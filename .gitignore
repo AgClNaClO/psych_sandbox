@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.env
+runs/
+data/external/
+data/processed/
+outputs/
+checkpoints/
+*.sqlite3

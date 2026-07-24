@@ -1,0 +1,511 @@
+# 基于 PsychEval/PsychAgent 的心理咨询多智能体研究沙盒
+
+本项目是一个面向大学生创新创业训练、智能体研究和心理咨询对话评测的实验系统。
+它把 PsychEval 中的多会话 CBT 案例、人物画像和咨询技能转换为可运行的多智能体环境，
+让“模拟来访者—咨询师—督导师”能够连续完成多次会谈，并记录记忆、技能选择、状态变化、
+风险判断和督导评分。
+
+> 本项目仅用于非商业教学与科研，不是真实心理咨询或医疗服务。禁止接入真实求助者，
+> 不用于诊断、治疗、药物建议或现实危机处置。系统中的情绪状态、人格参数和自动评分
+> 都是仿真变量，不是经过临床验证的量表。
+
+## 1. 项目要解决什么问题
+
+普通大模型通常只能完成单轮或短期心理咨询对话，存在以下问题：
+
+- 不记得上一次咨询谈过什么，容易重复提问或前后矛盾。
+- 只生成自然语言回复，无法解释本轮选择了什么咨询技能。
+- 模型可能提前知道来访者尚未披露的经历，造成隐藏信息泄漏。
+- 缺少独立督导师，无法形成“咨询—评分—反馈—调整”的闭环。
+- 遇到自伤、他伤等高风险表达时，仍可能继续进行普通 CBT 练习。
+- 高质量会谈经验不能沉淀为可回放数据、技能版本或训练样本。
+
+本项目针对这些问题实现以下闭环：
+
+```text
+PsychEval CBT 案例
+        ↓
+模拟来访者 ↔ CBT 咨询师
+        ↓
+安全检查 + 状态更新 + 信息披露门控
+        ↓
+会后摘要 + 跨 session 记忆 + 下一次计划
+        ↓
+规则督导 / LLM 督导
+        ↓
+SQLite、JSONL 轨迹和后续经验池
+```
+
+## 2. 当前完成情况
+
+第一阶段“CBT 基础闭环”的代码和 Mock 工程验证已经完成：
+
+- 转换 PsychEval 官方 148 个 CBT 案例。
+- 提取 346 个元技能和 1171 个原子技能，保留官方原子 `skill_id`。
+- 按案例进行确定性训练集、验证集和测试集划分：108/19/21。
+- 支持单个案例连续运行至少 3 个 session。
+- 支持从 SQLite 中最近一个 session 边界恢复运行。
+- 咨询师只能读取已解锁信息，不能读取完整来访者档案。
+- 每轮记录技能候选、实际技能、结构化决策、状态变化和安全结果。
+- 每个 session 生成摘要、下一次计划和六维督导报告。
+- 支持 Mock、OpenAI 兼容 API 和本地 Transformers 三种模型后端。
+- 55 项自动化测试全部通过，无跳过测试。
+- 已完成 10 个案例、30 个 session 的 Mock 基线实验。
+
+Mock 基线平均规则督导分为 7.889，未检测到提前泄漏和规则级安全违规。
+这只是工程基线，不代表真实咨询效果。真实 API、三随机种子、30 案例正式实验和人工评审
+仍需要在后续实验阶段完成。
+
+## 3. 项目中的三个智能体
+
+### 3.1 模拟来访者
+
+来访者智能体可以看到完整人物画像，包括：
+
+- 基本背景和当前问题。
+- 语言习惯和核心诉求。
+- 大五人格仿真参数。
+- 六维情绪仿真状态。
+- 成长经历、特殊情境和 CBT 概念化材料。
+- 当前 session 的目标和咨询师上一轮回复。
+
+来访者不能随意一次性说出所有隐藏信息。隐藏事实只有在信任度、对话主题和披露条件满足时，
+才会进入本轮允许披露列表。
+
+### 3.2 CBT 咨询师
+
+咨询师智能体只能看到：
+
+- 来访者已经明确说出的信息。
+- 已解锁档案。
+- 之前 session 的摘要、目标、作业和未解决问题。
+- 当前 session 目标。
+- 经过阶段过滤和 BM25 召回的候选技能。
+
+咨询师看不到完整档案、未披露成长经历和其他隐藏事实。每轮会输出简短、可审计的结构化决策，
+包括评估、状态观察、所选元技能、所选原子技能、策略、目标进度和最终回复。
+
+### 3.3 督导师
+
+督导师拥有审计视图，可以查看完整档案、会谈计划、对话和技能决策。第一阶段评估六个维度：
+
+- `wai_lite`：目标、任务和关系联盟。
+- `ctrs_lite`：议程、认知概念化、引导式发现、自动思维和行为任务。
+- `stage_consistency`：干预是否符合当前咨询阶段。
+- `persona_consistency`：来访者人设和跨 session 一致性。
+- `hidden_information_leakage`：咨询师是否提前使用隐藏信息。
+- `ethics_and_safety`：高风险场景是否停止普通干预并进行安全分流。
+
+Mock 模式使用可复查的规则督导；API 模式还可以调用 LLM 督导。两类评分分开保存，
+不会用一个总分覆盖具体证据和违规项。
+
+## 4. 核心架构
+
+```text
+src/psychsandbox/
+├── domain/          Pydantic 统一领域模型
+├── datasets/        PsychEval 下载、转换、划分和案例仓库
+├── agents/          来访者、CBT 咨询师和督导师
+├── runtime/         多会话编排、安全、披露、状态、记忆和 SQLite
+├── skills/          元技能/原子技能注册与层级检索
+├── evaluation/      评测入口
+├── experience/      通过安全门槛的经验池
+├── evolution/       技能审核、晋升、弃用和回滚状态机
+├── training/        SFT 与 DPO 数据导出
+├── model_client.py  Mock、API 和本地模型网关
+└── cli.py           数据、案例、仿真和报告命令
+```
+
+主要运行流程如下：
+
+1. `prepare_session`
+   - 读取上次摘要、已解锁档案、风险历史和督导反馈。
+   - 从 PsychEval 全局计划确定当前阶段和目标。
+   - 根据疗法与阶段过滤技能。
+2. `run_turn`
+   - 对来访者输入进行安全检查。
+   - BM25 召回元技能及其原子技能。
+   - 咨询师生成结构化决策和回复。
+   - 对咨询师输出再次进行安全检查。
+   - 来访者根据完整画像和允许披露事实生成回应。
+   - 分别保存规则状态增量和模型结构化信号增量。
+3. `consolidate_session`
+   - 生成摘要并更新跨 session 记忆。
+   - 保存新解锁事实、目标进度和已使用技能。
+   - 生成下一次计划。
+   - 调用规则督导；API 模式可同时调用 LLM 督导。
+   - 保存 SQLite 和 JSONL 轨迹。
+
+## 5. Windows CMD 环境准备
+
+以下命令都应在 Windows 的“命令提示符（CMD）”中运行，而不是 PowerShell。
+
+### 5.1 前置软件
+
+需要安装：
+
+- Python 3.11 或更高版本。
+- Git。
+- 推荐使用支持长路径的 Windows 10/11。
+
+先打开 CMD，进入项目目录：
+
+```bat
+cd /d D:\Projects\psych_sandbox
+```
+
+确认 Python 和 Git：
+
+```bat
+python --version
+git --version
+```
+
+### 5.2 创建并激活虚拟环境
+
+```bat
+python -m venv .venv
+call .venv\Scripts\activate.bat
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
+```
+
+以后每次重新打开 CMD，只需要执行：
+
+```bat
+cd /d D:\Projects\psych_sandbox
+call .venv\Scripts\activate.bat
+```
+
+如果安装成功，下面的命令应显示 CLI 帮助：
+
+```bat
+psych-sandbox --help
+```
+
+如果 CMD 找不到 `psych-sandbox`，可以使用完全等价的模块形式：
+
+```bat
+python -m psychsandbox --help
+```
+
+## 6. 下载和转换 PsychEval
+
+### 6.1 下载官方数据
+
+```bat
+psych-sandbox data fetch psycheval
+```
+
+数据下载到：
+
+```text
+data\external\psycheval\
+```
+
+下载器使用 PsychEval 官方仓库，并固定到提交：
+
+```text
+e04df535749e5bca76fcc45d9a85f3f46a082d91
+```
+
+### 6.2 转换 CBT 案例
+
+```bat
+psych-sandbox data convert --therapy cbt
+```
+
+转换结果位于：
+
+```text
+data\processed\psycheval\
+├── all.jsonl
+├── train.jsonl
+├── validation.jsonl
+├── test.jsonl
+├── skills.json
+└── manifest.json
+```
+
+`manifest.json` 保存案例数量、技能数量、上游提交、许可证、集合划分和源文件摘要。
+
+### 6.3 检查案例
+
+```bat
+psych-sandbox cases list --therapy cbt
+```
+
+正常情况下会看到 `psycheval-cbt-001` 到 `psycheval-cbt-148`。
+
+## 7. 运行 Mock 仿真
+
+Mock 模式不需要 API 密钥，适合测试、答辩演示和验证控制流程。
+
+运行一个案例的 3 次连续咨询：
+
+```bat
+psych-sandbox simulate --case psycheval-cbt-001 --sessions 3 --provider mock
+```
+
+限制每个 session 最多 4 轮：
+
+```bat
+psych-sandbox simulate ^
+  --case psycheval-cbt-001 ^
+  --sessions 3 ^
+  --provider mock ^
+  --max-turns 4 ^
+  --seed 42
+```
+
+输出完整 JSON：
+
+```bat
+psych-sandbox simulate ^
+  --case psycheval-cbt-001 ^
+  --sessions 3 ^
+  --provider mock ^
+  --json
+```
+
+运行完成后，终端会显示 `run-xxxxxxxxxxxx` 形式的运行编号，请保存该编号。
+
+## 8. 查看评测和完整报告
+
+查看每个 session 的六维评分：
+
+```bat
+psych-sandbox evaluate --run run-xxxxxxxxxxxx
+```
+
+查看包含证据、理由和违规项的完整 JSON 报告：
+
+```bat
+psych-sandbox report --run run-xxxxxxxxxxxx
+```
+
+默认数据库和轨迹位于：
+
+```text
+runs\psychsandbox.sqlite3
+runs\run-xxxxxxxxxxxx.jsonl
+```
+
+SQLite 保存案例、运行、session、turn、记忆、规则评测、LLM 评测和完整轨迹。
+JSONL 适合后续统计分析、经验回放和训练数据转换。
+
+## 9. 从 session 边界恢复
+
+程序只承诺从已经保存完成的 session 边界恢复，不恢复到半轮对话中间。
+
+```bat
+psych-sandbox simulate ^
+  --case psycheval-cbt-001 ^
+  --sessions 3 ^
+  --provider mock ^
+  --resume-run run-xxxxxxxxxxxx
+```
+
+恢复时案例必须与原运行一致。`--sessions 3` 表示最终希望该运行累计完成 3 个 session，
+不是额外再运行 3 个。
+
+## 10. 使用 OpenAI 兼容 API
+
+本项目使用 Chat Completions 风格的兼容接口，可用于 DeepSeek、通义或其他提供兼容接口的模型。
+具体模型名称和接口地址以供应商文档为准。
+
+在 CMD 中设置临时环境变量：
+
+```bat
+set MODEL_API_KEY=你的密钥
+set MODEL_BASE_URL=https://你的兼容接口地址/v1
+set CLIENT_MODEL=来访者模型名称
+set COUNSELOR_MODEL=咨询师模型名称
+set SUPERVISOR_MODEL=督导师模型名称
+set SUMMARY_MODEL=摘要模型名称
+set MODEL_TIMEOUT_SECONDS=90
+```
+
+不要把真实密钥写入 README、代码、测试或提交到 Git。
+
+运行真实 API：
+
+```bat
+psych-sandbox simulate ^
+  --case psycheval-cbt-001 ^
+  --sessions 3 ^
+  --provider api ^
+  --max-turns 6 ^
+  --seed 42
+```
+
+API 输出必须通过 Pydantic 结构校验。非法 JSON 会触发修复重试；连续失败后会返回包含
+模型角色、输出类型和校验错误的诊断信息。LLM 督导失败不会破坏已经完成的主会话，
+错误会单独写入 `evaluation_errors`。
+
+若希望关闭 CMD 后环境变量仍保留，可使用 `setx`，但新值只会对之后新开的 CMD 生效：
+
+```bat
+setx MODEL_BASE_URL "https://你的兼容接口地址/v1"
+setx CLIENT_MODEL "来访者模型名称"
+setx COUNSELOR_MODEL "咨询师模型名称"
+```
+
+出于安全考虑，不建议用 `setx` 长期保存 API 密钥。
+
+## 11. 本地模型模式
+
+本地模式是后续 QLoRA 模型的推理入口，需要额外依赖：
+
+```bat
+python -m pip install -e ".[local]"
+```
+
+当前机器为 8GB 显存时，建议从 3B/4B 指令模型的 4-bit 量化推理开始。运行前需要在配置或
+调用代码中填写 `local_model_name`。本地 7B/14B 训练不属于第一阶段验收内容。
+
+## 12. 运行自动化测试
+
+```bat
+pytest -q
+```
+
+当前预期结果：
+
+```text
+55 passed
+```
+
+测试覆盖：
+
+- PsychEval 官方案例数量、字段、划分和许可证。
+- 领域模型数值边界。
+- 咨询师信息隔离。
+- 隐藏事实披露门控。
+- 四级风险和输出安全检查。
+- 层级技能父子关系、过滤和确定性检索。
+- Mock 结构化输出。
+- 连续 3-session 运行。
+- 跨 session 状态连续性。
+- SQLite 恢复和 JSONL 输出。
+- 六维督导报告。
+- 技能审核、晋升和回滚约束。
+
+## 13. 数据和存储边界
+
+以下目录默认被 `.gitignore` 忽略：
+
+```text
+data\external\
+data\processed\
+runs\
+outputs\
+checkpoints\
+```
+
+原因是原始数据、转换数据、实验轨迹和模型权重不应直接进入代码仓库。项目不采集真实医疗记录、
+真实咨询录音或真实求助者隐私。人工评测应仅使用公开案例、合成资料或经过批准的脱敏材料。
+
+PsychEval 采用 CC BY-NC 4.0，本项目对其数据的使用限于非商业教学研究。转换器增加了统一字段、
+确定性划分、派生元技能 ID 和仿真人格先验，但不会伪造官方缺失的原子技能 ID。
+详见 [NOTICE.md](NOTICE.md) 和 [THIRD_PARTY_LICENSES](THIRD_PARTY_LICENSES/README.md)。
+
+## 14. 与 PsychEval、PsychAgent 的关系
+
+### PsychEval
+
+PsychEval 是本项目第一阶段的主要数据和技能来源。本项目直接借鉴并保留：
+
+- CBT 人物画像。
+- 三阶段/多 session 咨询计划。
+- session 目标。
+- persona links 和 case materials。
+- 推荐元技能与原子技能。
+- 参考对话、会后摘要和下一次计划材料。
+
+本项目在 PsychEval 之上增加可执行智能体、信息权限、安全状态机、跨 session 记忆、
+SQLite 恢复、轨迹记录和督导反馈，因此不是简单的数据浏览器。
+
+### PsychAgent
+
+PsychAgent 论文用于指导第三阶段的经验积累和自进化设计，包括经验回放、技能提取、
+技能版本化和训练数据生成。目前没有声称完整复现其训练系统。项目已经实现经验池、
+技能生命周期、SFT/DPO 数据导出接口，但还没有完成正式 QLoRA 或偏好训练实验。
+
+## 15. 后续阶段怎么做
+
+### 第二阶段：多流派和督导反馈闭环
+
+- EFT 明确定义为 Emotion-Focused Therapy。
+- 不把 PsychEval 的 HET 或 BT 数据直接重命名为 EFT。
+- 建立独立 EFT 技能库，并由心理学背景人员复核。
+- 支持 CBT、EFT 和 integrative 三种 `TherapyProfile`。
+- 对比“有督导反馈”和“无督导反馈”，验证反馈是否改变下一次 session 计划。
+
+### 第三阶段：经验积累和自进化
+
+- 只有安全与泄漏检查合格的轨迹可以进入训练候选集。
+- 候选技能必须经过 replayed、expert_reviewed、approved、promoted 等阶段。
+- 新技能不得自动进入正式技能库。
+- 先在 3B/4B 模型上进行 4-bit QLoRA SFT。
+- 再根据同一 session 的高低分候选生成 DPO chosen/rejected 数据。
+- 在独立案例测试集验证；安全、泄漏或主要指标下降时必须回滚。
+
+### 正式实验
+
+- 第一轮：10 个 CBT 案例 × 3 个随机种子。
+- 正式 CBT 实验：至少 30 个案例。
+- 安全集：至少 100 条，覆盖高、中、低风险和正常负面情绪。
+- 人工评测：两名心理学背景评审者，至少评审 30 个合成或脱敏 sessions。
+- 报告均值、标准差、置信区间、失败案例和加权 Kappa。
+
+更完整的研究路线见 [docs/ROADMAP.md](docs/ROADMAP.md)，当前 Mock 基线见
+[reports/phase1_mock_baseline.md](reports/phase1_mock_baseline.md)。
+
+## 16. 常见问题
+
+### CMD 提示“不是内部或外部命令”
+
+确认虚拟环境已经激活：
+
+```bat
+call .venv\Scripts\activate.bat
+```
+
+或者直接使用：
+
+```bat
+python -m psychsandbox --help
+```
+
+### 提示找不到案例
+
+先执行数据下载和转换：
+
+```bat
+psych-sandbox data fetch psycheval
+psych-sandbox data convert --therapy cbt
+```
+
+### 提示缺少 `MODEL_API_KEY`
+
+只有 `--provider api` 需要密钥。无密钥演示请使用：
+
+```bat
+psych-sandbox simulate --case psycheval-cbt-001 --sessions 3 --provider mock
+```
+
+### API 返回的不是合法 JSON
+
+程序会自动进行一次带校验错误信息的修复重试。若仍失败，应检查模型是否具有可靠的 JSON
+输出能力、上下文是否超过限制，以及 `CLIENT_MODEL`、`COUNSELOR_MODEL` 是否配置正确。
+
+### 中文在 CMD 中显示乱码
+
+先切换 CMD 到 UTF-8：
+
+```bat
+chcp 65001
+```
+
+然后重新运行命令。也可以使用 Windows Terminal 打开 CMD 配置文件，以获得更好的 UTF-8 支持。

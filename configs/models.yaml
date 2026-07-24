@@ -1,0 +1,13 @@
+provider: mock
+roles:
+  client:
+    env: CLIENT_MODEL
+  counselor:
+    env: COUNSELOR_MODEL
+  supervisor:
+    env: SUPERVISOR_MODEL
+  summarizer:
+    env: SUMMARY_MODEL
+local:
+  model_name: ""
+  device: auto

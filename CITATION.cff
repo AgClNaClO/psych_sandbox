@@ -1,0 +1,14 @@
+cff-version: 1.2.0
+title: "PsychSandbox: a multi-agent counseling research sandbox"
+message: "Please cite this project and the upstream PsychEval/PsychAgent work."
+type: software
+version: 0.3.0
+date-released: 2026-07-23
+license: MIT
+references:
+  - type: software
+    title: "PsychEval"
+    repository-code: "https://github.com/ECNU-ICALK/PsychEval"
+    license: "CC-BY-NC-4.0"
+  - type: article
+    title: "PsychAgent: An Experience-Driven Lifelong Learning Agent for Self-Evolving Psychological Counselor"

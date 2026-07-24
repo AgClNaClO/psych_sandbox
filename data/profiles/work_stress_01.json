@@ -1,0 +1,56 @@
+{
+  "case_id": "work_stress_01",
+  "topic": "职场压力与自我怀疑",
+  "opening": "最近工作压力特别大，我每天都很累，但一想到第二天要上班就睡不着。",
+  "static_traits": {
+    "name": "林晓",
+    "age": 28,
+    "gender": "女",
+    "occupation": "互联网产品经理",
+    "education": "本科",
+    "family_status": "独居，与父母保持联系",
+    "medical_history": "无已知重大躯体疾病；未提供精神科诊断信息",
+    "language_style": "克制、礼貌，信任建立后会更具体"
+  },
+  "personality": {
+    "openness": 0.62,
+    "conscientiousness": 0.82,
+    "extraversion": 0.38,
+    "agreeableness": 0.71,
+    "neuroticism": 0.76
+  },
+  "main_problem": "项目延期后持续担心被否定，出现入睡困难和反复检查工作",
+  "core_demands": "希望降低焦虑，并弄清自己为什么总觉得必须表现完美",
+  "hidden_facts": [
+    {
+      "fact_id": "manager_criticism",
+      "content": "上个月主管当着同事的面批评了我，从那以后我特别怕再出错。",
+      "minimum_trust": 0.35,
+      "required_topics": ["最近", "发生", "工作", "最难"],
+      "sensitivity": 0.45
+    },
+    {
+      "fact_id": "family_expectation",
+      "content": "父母一直把我的工作成绩当成最值得骄傲的事，我很怕让他们失望。",
+      "minimum_trust": 0.52,
+      "required_topics": ["家人", "期待", "证明", "担心"],
+      "sensitivity": 0.7
+    },
+    {
+      "fact_id": "resignation_thought",
+      "content": "我偷偷写过辞职信，但一直不敢提交。",
+      "minimum_trust": 0.64,
+      "required_topics": ["选择", "改变", "工作", "行动"],
+      "sensitivity": 0.8
+    }
+  ],
+  "initial_state": {
+    "valence": 0.28,
+    "arousal": 0.72,
+    "distress": 0.74,
+    "trust": 0.28,
+    "resistance": 0.42,
+    "hope": 0.36
+  }
+}
+

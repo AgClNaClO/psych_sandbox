@@ -1,0 +1,11 @@
+seed: 42
+provider: mock
+max_turns_per_session: 8
+session_count: 3
+temperature:
+  client: 0.8
+  counselor: 0.4
+  supervisor: 0.1
+  summarizer: 0.2
+trace_dir: runs
+database_path: runs/psychsandbox.sqlite3
