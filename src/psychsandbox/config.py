@@ -48,11 +48,17 @@ def load_runtime(root: Path = PROJECT_ROOT) -> dict[str, Any]:
 
 def default_config(root: Path = PROJECT_ROOT) -> SandboxConfig:
     raw = load_runtime(root)
+    patientact = raw.get("patientact", {})
     return SandboxConfig(
         project_root=root,
         provider=raw.get("provider", "mock"),
         seed=raw.get("seed", 42),
         max_turns_per_session=raw.get("max_turns_per_session", 8),
+        patientact_enabled=patientact.get("enabled", True),
+        client_pullback_after=patientact.get("pullback_after", 2),
+        disclosure_leak_retry_limit=patientact.get(
+            "disclosure_leak_retry_limit", 1
+        ),
     )
 
 

@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from ..domain import ClientGeneration, ClientState, CounselorTurn
+from ..domain import (
+    ClientBehaviorType,
+    ClientGeneration,
+    ClientState,
+    ClientTurnSignal,
+    CounselorTurn,
+    TrustChange,
+)
 
 
 def _clamp(value: float) -> float:
@@ -8,23 +15,35 @@ def _clamp(value: float) -> float:
 
 
 class StateUpdater:
+    TRUST_DELTAS = {
+        TrustChange.SIGNIFICANT_DECREASE: -0.10,
+        TrustChange.SLIGHT_DECREASE: -0.05,
+        TrustChange.UNCHANGED: 0.0,
+        TrustChange.SLIGHT_INCREASE: 0.05,
+        TrustChange.SIGNIFICANT_INCREASE: 0.10,
+    }
+
     def update(
         self,
         state: ClientState,
         counselor: CounselorTurn,
         client: ClientGeneration,
+        signal: ClientTurnSignal | None = None,
     ) -> tuple[ClientState, dict[str, dict[str, float]]]:
-        supportive = any(
-            word in counselor.response for word in ("理解", "听起来", "谢谢", "一起", "愿意")
-        )
+        del counselor
+        signal = signal or ClientTurnSignal()
+        trust_delta = self.TRUST_DELTAS[signal.trust_change]
         rule = {
-            "trust": 0.04 if supportive else -0.01,
-            "distress": -0.025 if supportive else 0.01,
-            "hope": 0.025 if supportive else 0.0,
+            "trust": trust_delta,
+            "distress": 0.0,
+            "hope": 0.0,
         }
+        resistance_target = (
+            0.8 if signal.behavior is ClientBehaviorType.RESISTANCE else 0.25
+        )
         model = {
-            "trust": 0.06 * (client.cooperation - 0.5),
-            "resistance": 0.08 * (client.resistance - state.resistance),
+            "trust": 0.0,
+            "resistance": 0.08 * (resistance_target - state.resistance),
             "hope": 0.05 * client.goal_progress_signal,
             "distress": -0.04 * client.goal_progress_signal,
         }

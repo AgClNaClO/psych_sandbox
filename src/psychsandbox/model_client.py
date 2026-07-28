@@ -8,7 +8,19 @@ from typing import Any
 from pydantic import BaseModel
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from .domain import ClientGeneration, CounselorDecision, CounselorTurn, RiskLevel
+from .domain import (
+    ClientBehaviorType,
+    ClientGeneration,
+    ClientReactionType,
+    ClientTurnSignal,
+    ClientUtterance,
+    CounselorDecision,
+    CounselorTurn,
+    ReactionIntensity,
+    ResistancePatternType,
+    RiskLevel,
+    TrustChange,
+)
 
 
 class ModelGateway(ABC):
@@ -78,6 +90,75 @@ class MockGateway(ModelGateway):
                 resistance=max(0.15, 0.48 - turn * 0.05),
                 goal_progress_signal=0.08,
             )
+        if output_schema is ClientTurnSignal:
+            disclosure = input_payload.get("disclosure_decision", {})
+            blocked = disclosure.get("blocked", [])
+            retrieved = disclosure.get("retrieved", [])
+            counselor = input_payload.get("counselor_message", "")
+            turn = int(input_payload.get("turn_index", 0))
+            if blocked:
+                pushed = any(
+                    term in counselor
+                    for term in ("必须", "一定要", "直接告诉", "别回避", "为什么不")
+                )
+                return ClientTurnSignal(
+                    reaction=ClientReactionType.SCARED
+                    if pushed else ClientReactionType.CHALLENGED,
+                    intensity=ReactionIntensity.HIGH
+                    if pushed else ReactionIntensity.MODERATE,
+                    behavior=ClientBehaviorType.RESISTANCE,
+                    resistance_pattern=ResistancePatternType.DEFENSIVENESS,
+                    blocked_fact_ids=[item["fact_id"] for item in blocked],
+                    trust_change=TrustChange.SIGNIFICANT_DECREASE
+                    if pushed else TrustChange.SLIGHT_DECREASE,
+                    rationale="咨询师接近了当前信任不足以讨论的敏感内容。",
+                )
+            respected = any(
+                term in counselor
+                for term in ("不着急", "按你的节奏", "先不谈", "可以换个话题")
+            )
+            behavior = (
+                ClientBehaviorType.COGNITIVE_EXPLORATION
+                if turn >= 2
+                else ClientBehaviorType.RECOUNTING
+            )
+            return ClientTurnSignal(
+                reaction=ClientReactionType.UNDERSTOOD
+                if respected else ClientReactionType.NO_REACTION,
+                intensity=ReactionIntensity.MODERATE
+                if respected else ReactionIntensity.LOW,
+                behavior=behavior,
+                retrieved_fact_ids=[item["fact_id"] for item in retrieved],
+                trust_change=TrustChange.SLIGHT_INCREASE
+                if respected else TrustChange.UNCHANGED,
+                rationale="根据当前联盟和可用内容选择回应方式。",
+            )
+        if output_schema is ClientUtterance:
+            signal = input_payload.get("turn_signal", {})
+            behavior = signal.get("behavior", "simple_response")
+            if input_payload.get("repair_instruction"):
+                return ClientUtterance(
+                    utterance="我现在还不太想把这部分说得太具体，可以先停一下吗？"
+                )
+            if behavior == ClientBehaviorType.RESISTANCE.value:
+                return ClientUtterance(
+                    utterance="我不太想现在谈这个。我们能不能先说说别的？"
+                )
+            allowed = input_payload.get("available_memories", [])
+            turn = int(input_payload.get("turn_index", 0))
+            if allowed and turn >= 2:
+                fact = allowed[0]
+                return ClientUtterance(
+                    utterance=f"其实还有一件事我一直不太敢说：{fact['content']}",
+                    disclosed_fact_ids=[fact["fact_id"]],
+                )
+            responses = [
+                "最近这件事一直在我脑子里转，我很累，但又停不下来。",
+                "我最担心的是再出错，别人会觉得我根本没有能力。",
+                "这样说以后，我好像能看到压力和那些想法之间的联系了。",
+                "我现在还不想急着做决定，想先把事情说清楚。",
+            ]
+            return ClientUtterance(utterance=responses[turn % len(responses)])
         raise ValueError(f"MockGateway does not support {output_schema.__name__}")
 
 

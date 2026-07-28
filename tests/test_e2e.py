@@ -70,6 +70,41 @@ def test_supervisor_has_six_dimensions(sandbox):
     assert len(result.sessions[0].supervisor_report.metrics) == 6
 
 
+def test_client_simulation_report_has_separate_dimensions(sandbox):
+    result = asyncio.run(sandbox.run_case("psycheval-cbt-006", session_count=1))
+    report = result.sessions[0].client_simulation_report
+    assert report is not None
+    assert len(report.metrics) == 8
+    rows = sandbox.store.evaluation_rows(result.run_id)
+    assert rows[0]["client_report"]["session_index"] == 1
+
+
+def test_old_session_json_without_client_report_still_loads(sandbox):
+    result = asyncio.run(sandbox.run_case("psycheval-cbt-008", session_count=1))
+    raw = result.sessions[0].model_dump(mode="json")
+    raw.pop("client_simulation_report")
+    from psychsandbox.domain import SessionRecord
+
+    restored = SessionRecord.model_validate(raw)
+    assert restored.client_simulation_report is None
+
+
+def test_patientact_pipeline_can_be_disabled(root, tmp_path):
+    config = SandboxConfig(
+        project_root=root,
+        provider="mock",
+        max_turns_per_session=1,
+        patientact_enabled=False,
+        database_path=tmp_path / "disabled.sqlite3",
+        trace_dir=tmp_path / "disabled-traces",
+    )
+    result = asyncio.run(
+        CounselingSandbox(config).run_case("psycheval-cbt-009", session_count=1)
+    )
+    signal = result.sessions[0].turn_records[0]["client_turn_signal"]
+    assert signal["rationale"].startswith("PATIENTACT internal planning disabled")
+
+
 def test_store_unknown_run(tmp_path):
     store = SQLiteStore(tmp_path / "empty.sqlite3")
     with pytest.raises(KeyError):

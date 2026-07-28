@@ -5,10 +5,18 @@ import random
 import uuid
 from pathlib import Path
 
-from ..agents import ClientAgent, CounselorAgent, LLMSupervisorAgent, SupervisorAgent
+from ..agents import (
+    ClientAgent,
+    ClientSimulationEvaluator,
+    CounselorAgent,
+    LLMSupervisorAgent,
+    SupervisorAgent,
+)
 from ..datasets import CaseRepository
 from ..domain import (
+    ClientBehaviorType,
     CounselingCase,
+    ClientTurnSignal,
     Message,
     RunResult,
     SandboxConfig,
@@ -51,9 +59,15 @@ class CounselingSandbox:
             skills_path = config.project_root / "data" / "skills" / "cbt.json"
         self.registry = SkillRegistry.from_json(skills_path)
         self.retriever = HierarchicalSkillRetriever(self.registry)
-        self.client = ClientAgent(self.gateway, config.temperature_client)
+        self.client = ClientAgent(
+            self.gateway,
+            config.temperature_client,
+            pullback_after=config.client_pullback_after,
+            leak_retry_limit=config.disclosure_leak_retry_limit,
+        )
         self.counselor = CounselorAgent(self.gateway, config.temperature_counselor)
         self.supervisor = SupervisorAgent()
+        self.client_evaluator = ClientSimulationEvaluator()
         self.llm_supervisor = (
             LLMSupervisorAgent(self.gateway, config.temperature_supervisor)
             if config.provider != "mock"
@@ -101,6 +115,9 @@ class CounselingSandbox:
                 session, case=case, memory_before=memory_before
             )
             session.supervisor_report = report
+            session.client_simulation_report = await self.client_evaluator.evaluate(
+                session
+            )
             if self.llm_supervisor:
                 try:
                     session.llm_supervisor_report = await self.llm_supervisor.evaluate(
@@ -123,6 +140,12 @@ class CounselingSandbox:
                     "seed": seed,
                     "temperature_client": self.config.temperature_client,
                     "temperature_counselor": self.config.temperature_counselor,
+                    "client_pipeline": (
+                        "patientact_v1"
+                        if self.config.patientact_enabled
+                        else "direct_generation_v1"
+                    ),
+                    "trace_schema_version": 2,
                 },
                 memory_before=memory_before,
                 plan=plan,
@@ -163,6 +186,7 @@ class CounselingSandbox:
             )
         ]
         decisions, risks, interventions, new_fact_ids, turn_records = [], [], [], [], []
+        recent_signals: list[ClientTurnSignal] = []
         end_reason = "max_turns"
         for turn_index in range(1, self.config.max_turns_per_session + 1):
             client_text = messages[-1].content
@@ -213,16 +237,38 @@ class CounselingSandbox:
                 end_reason = "imminent_risk" if risk.requires_immediate_stop else "safety_output_block"
                 break
             already = {item.fact_id for item in memory.unlocked_profile.facts} | set(new_fact_ids)
-            allowed = self.disclosure.allowed(
+            disclosure = self.disclosure.evaluate(
                 case.profile, state, client_text + counselor_turn.response, already
             )
-            client_generation = await self.client.respond(
+            if self.config.patientact_enabled:
+                signal = await self.client.plan_turn(
+                    profile=case.profile,
+                    state=state,
+                    counselor_message=counselor_turn.response,
+                    recent_messages=messages,
+                    disclosure=disclosure,
+                    recent_signals=recent_signals,
+                    turn_index=turn_index,
+                )
+            else:
+                signal = ClientTurnSignal(
+                    behavior=ClientBehaviorType.RECOUNTING,
+                    retrieved_fact_ids=[
+                        item.fact_id for item in disclosure.retrieved
+                    ],
+                    blocked_fact_ids=[
+                        item.fact_id for item in disclosure.blocked
+                    ],
+                    rationale="PATIENTACT internal planning disabled by configuration.",
+                )
+            client_generation, leakage = await self.client.generate_utterance(
                 profile=case.profile,
                 state=state,
-                plan=plan,
                 counselor_message=counselor_turn.response,
                 recent_messages=messages,
-                allowed_facts=allowed,
+                disclosure=disclosure,
+                signal=signal,
+                already_disclosed_ids=already,
                 turn_index=turn_index,
             )
             unlocked = self.disclosure.unlock(
@@ -234,8 +280,9 @@ class CounselingSandbox:
             memory.unlocked_profile.facts.extend(unlocked)
             new_fact_ids.extend(item.fact_id for item in unlocked)
             state, state_delta = self.state_updater.update(
-                state, counselor_turn, client_generation
+                state, counselor_turn, client_generation, signal
             )
+            recent_signals.append(signal)
             messages.append(Message(
                 session_index=plan.session_index,
                 turn_index=turn_index,
@@ -252,7 +299,13 @@ class CounselingSandbox:
                     item.skill_id for item in candidates.atomic_skills
                 ],
                 "decision": counselor_turn.decision.model_dump(mode="json"),
+                "disclosure_decision": disclosure.model_dump(mode="json"),
+                "client_turn_signal": signal.model_dump(mode="json"),
                 "client_generation": client_generation.model_dump(mode="json"),
+                "client_leakage": {
+                    **leakage,
+                    "exposed_to_counselor": False,
+                },
                 "input_safety": risk.model_dump(mode="json"),
                 "output_safety": output_risk.model_dump(mode="json"),
                 "state_before": state_before,

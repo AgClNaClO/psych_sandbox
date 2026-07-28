@@ -29,6 +29,17 @@ def test_hidden_fact_trust_bounds():
         HiddenFact(fact_id="x", content="x", minimum_trust=2)
 
 
+def test_hidden_fact_legacy_topics_fill_new_fields():
+    fact = HiddenFact(
+        fact_id="legacy",
+        content="一段敏感经历",
+        required_topics=["过去"],
+        sensitivity=0.8,
+    )
+    assert fact.activation_tags == ["过去"]
+    assert fact.generates_discomfort is True
+
+
 def test_risk_levels_are_complete():
     assert [x.value for x in RiskLevel] == ["low", "medium", "high", "imminent"]
 

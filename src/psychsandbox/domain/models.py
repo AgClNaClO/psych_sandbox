@@ -5,7 +5,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def utc_now() -> str:
@@ -37,6 +37,51 @@ class SkillStatus(StrEnum):
     PROMOTED = "promoted"
     DEPRECATED = "deprecated"
     ROLLED_BACK = "rolled_back"
+
+
+class ClientReactionType(StrEnum):
+    UNDERSTOOD = "understood"
+    HOPEFUL = "hopeful"
+    GAINED_CLARITY = "gained_clarity"
+    CHALLENGED = "challenged"
+    SCARED = "scared"
+    MISUNDERSTOOD = "misunderstood"
+    NO_REACTION = "no_reaction"
+
+
+class ReactionIntensity(StrEnum):
+    LOW = "low"
+    MODERATE = "moderate"
+    HIGH = "high"
+
+
+class ClientBehaviorType(StrEnum):
+    SIMPLE_RESPONSE = "simple_response"
+    REQUEST = "request"
+    RECOUNTING = "recounting"
+    COGNITIVE_EXPLORATION = "cognitive_exploration"
+    AFFECTIVE_EXPLORATION = "affective_exploration"
+    INSIGHT = "insight"
+    DISCUSSING_PLANS = "discussing_plans"
+    RESISTANCE = "resistance"
+
+
+class ResistancePatternType(StrEnum):
+    MINIMAL_TALK = "minimal_talk"
+    IRRELEVANT_TALK = "irrelevant_talk"
+    SUPERFICIAL = "superficial"
+    INTELLECTUALIZING = "intellectualizing"
+    HOSTILITY = "hostility"
+    DEFENSIVENESS = "defensiveness"
+    COMPLIANCE_WITHOUT_ENGAGEMENT = "compliance_without_engagement"
+
+
+class TrustChange(StrEnum):
+    SIGNIFICANT_DECREASE = "significant_decrease"
+    SLIGHT_DECREASE = "slight_decrease"
+    UNCHANGED = "unchanged"
+    SLIGHT_INCREASE = "slight_increase"
+    SIGNIFICANT_INCREASE = "significant_increase"
 
 
 class StaticTraits(StrictModel):
@@ -78,6 +123,58 @@ class HiddenFact(StrictModel):
     minimum_trust: float = Field(default=0.35, ge=0, le=1)
     required_topics: list[str] = Field(default_factory=list)
     sensitivity: float = Field(default=0.5, ge=0, le=1)
+    activation_tags: list[str] = Field(default_factory=list)
+    generates_discomfort: bool | None = None
+
+    @model_validator(mode="after")
+    def fill_compatibility_fields(self) -> HiddenFact:
+        if not self.activation_tags:
+            self.activation_tags = list(self.required_topics)
+        if self.generates_discomfort is None:
+            self.generates_discomfort = self.sensitivity >= 0.6
+        return self
+
+
+class BlockedMemorySignal(StrictModel):
+    fact_id: str
+    category: str
+    sensitivity: float = Field(ge=0, le=1)
+    activation_evidence: list[str] = Field(default_factory=list)
+    reason: str = "insufficient_trust"
+
+
+class DisclosureDecision(StrictModel):
+    retrieved: list[HiddenFact] = Field(default_factory=list)
+    blocked: list[BlockedMemorySignal] = Field(default_factory=list)
+    activated_fact_ids: list[str] = Field(default_factory=list)
+    activation_evidence: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class ClientTurnSignal(StrictModel):
+    reaction: ClientReactionType = ClientReactionType.NO_REACTION
+    intensity: ReactionIntensity = ReactionIntensity.LOW
+    behavior: ClientBehaviorType = ClientBehaviorType.SIMPLE_RESPONSE
+    resistance_pattern: ResistancePatternType | None = None
+    retrieved_fact_ids: list[str] = Field(default_factory=list)
+    blocked_fact_ids: list[str] = Field(default_factory=list)
+    trust_change: TrustChange = TrustChange.UNCHANGED
+    rationale: str = ""
+
+    @model_validator(mode="after")
+    def resistance_requires_pattern(self) -> ClientTurnSignal:
+        if (
+            self.behavior is ClientBehaviorType.RESISTANCE
+            and self.resistance_pattern is None
+        ):
+            self.resistance_pattern = ResistancePatternType.MINIMAL_TALK
+        if self.behavior is not ClientBehaviorType.RESISTANCE:
+            self.resistance_pattern = None
+        return self
+
+
+class ClientUtterance(StrictModel):
+    utterance: str
+    disclosed_fact_ids: list[str] = Field(default_factory=list)
 
 
 class ClientProfile(StrictModel):
@@ -246,6 +343,14 @@ class SupervisorReport(StrictModel):
     created_at: str = Field(default_factory=utc_now)
 
 
+class ClientSimulationReport(StrictModel):
+    session_index: int
+    metrics: list[EvaluationMetric]
+    overall_score: float = Field(ge=0, le=10)
+    red_flags: list[str] = Field(default_factory=list)
+    created_at: str = Field(default_factory=utc_now)
+
+
 class SessionRecord(StrictModel):
     session_id: str
     session_index: int
@@ -262,6 +367,7 @@ class SessionRecord(StrictModel):
     next_session_plan: SessionPlan | None = None
     supervisor_report: SupervisorReport | None = None
     llm_supervisor_report: SupervisorReport | None = None
+    client_simulation_report: ClientSimulationReport | None = None
     evaluation_errors: list[str] = Field(default_factory=list)
     end_reason: str
 
@@ -319,6 +425,9 @@ class SandboxConfig(StrictModel):
     temperature_client: float = Field(default=0.8, ge=0, le=2)
     temperature_counselor: float = Field(default=0.4, ge=0, le=2)
     temperature_supervisor: float = Field(default=0.1, ge=0, le=2)
+    patientact_enabled: bool = True
+    client_pullback_after: int = Field(default=2, ge=1, le=10)
+    disclosure_leak_retry_limit: int = Field(default=1, ge=0, le=3)
 
     def model_post_init(self, __context: Any) -> None:
         if self.database_path is None:

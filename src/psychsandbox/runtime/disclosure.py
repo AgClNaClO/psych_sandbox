@@ -1,9 +1,80 @@
 from __future__ import annotations
 
-from ..domain import ClientProfile, ClientState, HiddenFact, UnlockedFact
+import re
+from typing import Protocol
+
+from ..domain import (
+    BlockedMemorySignal,
+    ClientProfile,
+    ClientState,
+    DisclosureDecision,
+    HiddenFact,
+    UnlockedFact,
+)
+
+
+def normalize_activation_text(value: str) -> str:
+    return re.sub(r"[\W_]+", "", value.casefold(), flags=re.UNICODE)
+
+
+class ActivationMatcher(Protocol):
+    def match(self, text: str, fact: HiddenFact) -> list[str]: ...
+
+
+class TagActivationMatcher:
+    """Auditable tag matcher; replaceable by a semantic matcher later."""
+
+    def match(self, text: str, fact: HiddenFact) -> list[str]:
+        normalized = normalize_activation_text(text)
+        return [
+            tag
+            for tag in fact.activation_tags
+            if normalize_activation_text(tag)
+            and normalize_activation_text(tag) in normalized
+        ]
 
 
 class DisclosureGate:
+    def __init__(self, matcher: ActivationMatcher | None = None):
+        self.matcher = matcher or TagActivationMatcher()
+
+    def evaluate(
+        self,
+        profile: ClientProfile,
+        state: ClientState,
+        text: str,
+        disclosed_ids: set[str],
+    ) -> DisclosureDecision:
+        retrieved: list[HiddenFact] = []
+        blocked: list[BlockedMemorySignal] = []
+        activated: list[str] = []
+        evidence: dict[str, list[str]] = {}
+        for fact in profile.hidden_facts:
+            if fact.fact_id in disclosed_ids:
+                continue
+            matched = self.matcher.match(text, fact)
+            if fact.activation_tags and not matched:
+                continue
+            activated.append(fact.fact_id)
+            evidence[fact.fact_id] = matched
+            if state.trust >= fact.minimum_trust:
+                retrieved.append(fact)
+            elif fact.generates_discomfort:
+                blocked.append(
+                    BlockedMemorySignal(
+                        fact_id=fact.fact_id,
+                        category=fact.category,
+                        sensitivity=fact.sensitivity,
+                        activation_evidence=matched,
+                    )
+                )
+        return DisclosureDecision(
+            retrieved=retrieved,
+            blocked=blocked,
+            activated_fact_ids=activated,
+            activation_evidence=evidence,
+        )
+
     def allowed(
         self,
         profile: ClientProfile,
@@ -11,16 +82,7 @@ class DisclosureGate:
         text: str,
         disclosed_ids: set[str],
     ) -> list[HiddenFact]:
-        lowered = text.lower()
-        return [
-            fact for fact in profile.hidden_facts
-            if fact.fact_id not in disclosed_ids
-            and state.trust >= fact.minimum_trust
-            and (
-                not fact.required_topics
-                or any(topic.lower() in lowered for topic in fact.required_topics)
-            )
-        ]
+        return self.evaluate(profile, state, text, disclosed_ids).retrieved
 
     def unlock(
         self,

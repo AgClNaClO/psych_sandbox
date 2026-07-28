@@ -226,6 +226,8 @@ class PsychEvalAdapter:
                     minimum_trust=min(0.75, 0.3 + index * 0.08),
                     required_topics=["经历", "家庭", "成长", "过去", "影响"],
                     sensitivity=min(0.9, 0.45 + index * 0.08),
+                    activation_tags=["经历", "家庭", "成长", "小时候", "过去", "影响"],
+                    generates_discomfort=True,
                 )
             )
         for index, situation in enumerate(info.get("special_situations", []), start=1):
@@ -239,6 +241,8 @@ class PsychEvalAdapter:
                         minimum_trust=min(0.7, 0.28 + index * 0.06),
                         required_topics=["情境", "发生", "当时", "想法", "困扰"],
                         sensitivity=min(0.85, 0.4 + index * 0.06),
+                        activation_tags=["情境", "发生", "当时", "想法", "困扰"],
+                        generates_discomfort=index >= 3,
                     )
                 )
         return facts
@@ -481,4 +485,3 @@ def _files_digest(files: list[Path]) -> str:
         digest.update(path.name.encode())
         digest.update(hashlib.sha256(path.read_bytes()).digest())
     return digest.hexdigest()
-

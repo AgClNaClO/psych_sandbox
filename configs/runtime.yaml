@@ -9,3 +9,7 @@ temperature:
   summarizer: 0.2
 trace_dir: runs
 database_path: runs/psychsandbox.sqlite3
+patientact:
+  enabled: true
+  pullback_after: 2
+  disclosure_leak_retry_limit: 1

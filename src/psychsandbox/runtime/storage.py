@@ -37,6 +37,10 @@ CREATE TABLE IF NOT EXISTS llm_evaluations (
   run_id TEXT NOT NULL, session_index INTEGER NOT NULL, report_json TEXT NOT NULL,
   PRIMARY KEY(run_id, session_index)
 );
+CREATE TABLE IF NOT EXISTS client_evaluations (
+  run_id TEXT NOT NULL, session_index INTEGER NOT NULL, report_json TEXT NOT NULL,
+  PRIMARY KEY(run_id, session_index)
+);
 CREATE TABLE IF NOT EXISTS trajectories (
   trajectory_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, session_index INTEGER NOT NULL,
   trajectory_json TEXT NOT NULL
@@ -115,6 +119,15 @@ class SQLiteStore:
                         session.llm_supervisor_report.model_dump_json(),
                     ),
                 )
+            if session.client_simulation_report:
+                self.connection.execute(
+                    "INSERT OR REPLACE INTO client_evaluations VALUES (?,?,?)",
+                    (
+                        run_id,
+                        session.session_index,
+                        session.client_simulation_report.model_dump_json(),
+                    ),
+                )
             self.connection.execute(
                 "INSERT OR REPLACE INTO trajectories VALUES (?,?,?,?)",
                 (
@@ -174,11 +187,19 @@ class SQLiteStore:
                 (run_id,),
             ).fetchall()
         }
+        client = {
+            row[0]: json.loads(row[1])
+            for row in self.connection.execute(
+                "SELECT session_index, report_json FROM client_evaluations WHERE run_id=?",
+                (run_id,),
+            ).fetchall()
+        }
         return [
             {
                 "session_index": row[0],
                 "rule_report": json.loads(row[1]),
                 "llm_report": llm.get(row[0]),
+                "client_report": client.get(row[0]),
             }
             for row in rows
         ]
