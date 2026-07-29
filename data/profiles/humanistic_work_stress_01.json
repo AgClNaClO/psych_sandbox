@@ -1,0 +1,94 @@
+{
+  "case_id": "humanistic_work_stress_01",
+  "therapy": "humanistic_existential",
+  "session_count": 6,
+  "topic": "职场压力、身份认同与个人选择",
+  "opening": "最近工作让我觉得很累。我知道大家都说这份工作不错，可我越来越不知道自己为什么要坚持。",
+  "static_traits": {
+    "name": "周宁",
+    "age": 27,
+    "gender": "男",
+    "occupation": "设计师",
+    "education": "本科",
+    "family_status": "与伴侣同住，与父母保持联系",
+    "medical_history": "未提供精神科诊断信息",
+    "language_style": "谨慎、反思性强，通常先谈道理，安全感增加后才会表达情绪"
+  },
+  "personality": {
+    "openness": 0.78,
+    "conscientiousness": 0.7,
+    "extraversion": 0.36,
+    "agreeableness": 0.66,
+    "neuroticism": 0.69
+  },
+  "main_problem": "工作成就与个人价值感高度绑定，长期压抑疲惫和失去意义的感受",
+  "core_demands": "希望弄清自己真正重视什么，并找到能够自主承担的下一步",
+  "growth_experiences": [
+    "成长过程中常因表现优秀而被肯定，很少被询问真实感受和个人选择。",
+    "进入职场后习惯优先满足评价标准，逐渐难以辨认自己的需要。"
+  ],
+  "formulation_5ps": {
+    "presenting_problem": "持续疲惫、意义感下降，并在工作选择上反复犹豫。",
+    "predisposing_factors": [
+      "长期主要通过外部成绩获得肯定。",
+      "较少练习表达需要和自主作出选择。"
+    ],
+    "precipitating_factors": [
+      "最近负责的项目获得认可，但本人没有体验到预期的满足感。"
+    ],
+    "perpetuating_factors": [
+      "用分析和加班回避失落感。",
+      "担心改变会令重要他人失望，因此持续压抑个人需要。"
+    ],
+    "protective_factors": [
+      "有稳定伴侣关系。",
+      "反思能力较强并主动求助。",
+      "仍能维持基本工作与生活功能。"
+    ],
+    "source_fields": ["local_profile_review_draft"]
+  },
+  "therapy_parameters": {
+    "experience_focus": ["疲惫", "失落", "选择焦虑"],
+    "values_tension": "外部认可与个人意义之间的冲突"
+  },
+  "hidden_facts": [
+    {
+      "fact_id": "approval_history",
+      "content": "小时候只有拿到好成绩时，父亲才会明显地表扬我。",
+      "category": "growth_experience",
+      "minimum_trust": 0.42,
+      "required_topics": ["小时候", "肯定", "父亲", "成绩"],
+      "sensitivity": 0.62
+    },
+    {
+      "fact_id": "career_pause",
+      "content": "我已经查过停薪留职和转行的信息，但不敢让任何同事知道。",
+      "category": "choice",
+      "minimum_trust": 0.58,
+      "required_topics": ["选择", "离开", "改变", "工作"],
+      "sensitivity": 0.75
+    }
+  ],
+  "initial_state": {
+    "valence": 0.3,
+    "arousal": 0.58,
+    "distress": 0.68,
+    "trust": 0.28,
+    "resistance": 0.45,
+    "hope": 0.38
+  },
+  "stage_objectives": {
+    "case_conceptualization": [
+      "建立真诚、安全且尊重自主性的关系",
+      "澄清疲惫、失落和意义感下降的当下体验"
+    ],
+    "core_intervention": [
+      "探索外部期待、真实需要与个人价值之间的张力",
+      "支持来访者辨认可自主选择并愿意承担的行动"
+    ],
+    "consolidation": [
+      "整合对自我、关系和选择的新理解",
+      "形成尊重个人节奏的后续支持与自助计划"
+    ]
+  }
+}

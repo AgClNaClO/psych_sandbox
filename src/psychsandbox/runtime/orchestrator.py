@@ -13,6 +13,7 @@ from ..agents import (
     SupervisorAgent,
 )
 from ..datasets import CaseRepository
+from ..evaluation import LongitudinalEvaluator
 from ..domain import (
     ClientBehaviorType,
     CounselingCase,
@@ -30,6 +31,7 @@ from ..model_client import ModelGateway, create_gateway
 from ..skills import HierarchicalSkillRetriever, SkillRegistry
 from .disclosure import DisclosureGate
 from .memory import MemoryConsolidator
+from .planning import FeedbackPlanBuilder
 from .safety import SafetyStateMachine
 from .state import StateUpdater
 from .storage import SQLiteStore
@@ -58,6 +60,9 @@ class CounselingSandbox:
         if not skills_path.exists():
             skills_path = config.project_root / "data" / "skills" / "cbt.json"
         self.registry = SkillRegistry.from_json(skills_path)
+        for extra in sorted((config.project_root / "data" / "skills").glob("*.json")):
+            if extra.resolve() != skills_path.resolve() and extra.name != "cbt.json":
+                self.registry = self.registry.merge(SkillRegistry.from_json(extra))
         self.retriever = HierarchicalSkillRetriever(self.registry)
         self.client = ClientAgent(
             self.gateway,
@@ -77,27 +82,39 @@ class CounselingSandbox:
         self.disclosure = DisclosureGate()
         self.state_updater = StateUpdater()
         self.consolidator = MemoryConsolidator()
+        self.longitudinal = LongitudinalEvaluator()
+        self.plan_builder = FeedbackPlanBuilder()
         self.store = store or SQLiteStore(config.database_path)
 
     async def run_case(
         self,
         case_id: str,
-        therapy: str = "cbt",
+        therapy: str | None = None,
         session_count: int = 3,
         seed: int = 42,
         resume_run_id: str | None = None,
     ) -> RunResult:
         random.seed(seed)
         case = self.repository.get(case_id)
-        if therapy != case.therapy:
-            raise ValueError(f"Case {case_id} supports {case.therapy}, not {therapy}")
+        selected_therapy = therapy or case.therapy
+        if selected_therapy != case.therapy:
+            raise ValueError(
+                f"Case {case_id} supports {case.therapy}, not {selected_therapy}"
+            )
+        if resume_run_id:
+            existing = self.store.load_run(resume_run_id)
+            if existing.case_id != case_id or existing.therapy != selected_therapy:
+                raise ValueError(
+                    "Resume run must use the original case and therapy: "
+                    f"{existing.case_id}/{existing.therapy}"
+                )
         previous_sessions = self.store.load_sessions(resume_run_id) if resume_run_id else []
         memory = self.store.load_memory(resume_run_id) if resume_run_id else None
         run_id = resume_run_id or f"run-{uuid.uuid4().hex[:12]}"
         if memory is None:
             memory = self._initial_memory(case)
             self.store.start_run(
-                run_id, case_id, therapy, self.gateway.provider_name, seed,
+                run_id, case_id, selected_therapy, self.gateway.provider_name, seed,
                 self.config.model_dump(mode="json"),
             )
             self.store.save_case(case)
@@ -127,6 +144,18 @@ class CounselingSandbox:
                     session.evaluation_errors.append(
                         f"llm_supervisor:{type(exc).__name__}:{exc}"
                     )
+            session.longitudinal_report = self.longitudinal.evaluate(
+                session, sessions
+            )
+            baseline_next = self._baseline_next_plan(
+                case, session, session_index + 1
+            )
+            session.next_session_plan = self.plan_builder.build(
+                session.plan,
+                baseline_next,
+                session.supervisor_report,
+                session.longitudinal_report,
+            )
             memory = self.consolidator.consolidate(
                 memory, session, next_index=session_index + 1
             )
@@ -160,13 +189,21 @@ class CounselingSandbox:
             self.store.save_session(run_id, session, memory, trajectory)
             self._append_jsonl(trajectory)
             sessions.append(session)
-            if session.end_reason == "imminent_risk":
+            if (
+                session.end_reason == "imminent_risk"
+                or session.longitudinal_report.stage_action == "close"
+            ):
                 break
-        self.store.finish_run(run_id)
+        status = (
+            "safety_hold"
+            if sessions and sessions[-1].end_reason == "imminent_risk"
+            else "completed"
+        )
+        self.store.finish_run(run_id, status=status)
         return RunResult(
             run_id=run_id,
             case_id=case_id,
-            therapy=therapy,
+            therapy=selected_therapy,
             seed=seed,
             sessions=sessions,
             final_memory=memory,
@@ -238,7 +275,7 @@ class CounselingSandbox:
                 break
             already = {item.fact_id for item in memory.unlocked_profile.facts} | set(new_fact_ids)
             disclosure = self.disclosure.evaluate(
-                case.profile, state, client_text + counselor_turn.response, already
+                case.profile, state, counselor_turn.response, already
             )
             if self.config.patientact_enabled:
                 signal = await self.client.plan_turn(
@@ -316,7 +353,6 @@ class CounselingSandbox:
                 end_reason = "counselor_goal_complete"
                 break
         summary = self._summary(plan, messages, interventions)
-        next_plan = self.consolidator.next_plan(plan, plan.session_index + 1)
         return SessionRecord(
             session_id=f"session-{uuid.uuid4().hex[:12]}",
             session_index=plan.session_index,
@@ -330,7 +366,6 @@ class CounselingSandbox:
             newly_unlocked_fact_ids=list(dict.fromkeys(new_fact_ids)),
             interventions_used=list(dict.fromkeys(interventions)),
             risk_events=risks,
-            next_session_plan=next_plan,
             end_reason=end_reason,
         )
 
@@ -358,11 +393,23 @@ class CounselingSandbox:
     def _plan_for(
         self, case: CounselingCase, index: int, sessions: list[SessionRecord]
     ) -> SessionPlan:
-        if index <= len(case.global_plan):
-            return case.global_plan[index - 1].model_copy(update={"therapy": case.therapy})
         if sessions and sessions[-1].next_session_plan:
             return sessions[-1].next_session_plan
+        if index <= len(case.global_plan):
+            return case.global_plan[index - 1].model_copy(update={"therapy": case.therapy})
         return self.consolidator.next_plan(case.global_plan[-1], index)
+
+    def _baseline_next_plan(
+        self,
+        case: CounselingCase,
+        session: SessionRecord,
+        next_index: int,
+    ) -> SessionPlan:
+        if next_index <= len(case.global_plan):
+            return case.global_plan[next_index - 1].model_copy(
+                update={"therapy": case.therapy}
+            )
+        return self.consolidator.next_plan(session.plan, next_index)
 
     @staticmethod
     def _summary(

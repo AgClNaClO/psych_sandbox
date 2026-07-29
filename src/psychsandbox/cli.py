@@ -8,6 +8,7 @@ from pathlib import Path
 from .datasets import CaseRepository, convert_psycheval, fetch_psycheval
 from .domain import SandboxConfig
 from .runtime import CounselingSandbox, SQLiteStore
+from .visualization import generate_run_report
 
 
 DISCLAIMER = "仅用于非商业教学研究；不是医疗服务，不用于诊断、治疗或危机处置。"
@@ -32,18 +33,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     simulate = commands.add_parser("simulate")
     simulate.add_argument("--case", required=True)
-    simulate.add_argument("--therapy", default="cbt")
+    simulate.add_argument("--therapy")
     simulate.add_argument("--sessions", type=int, default=3)
     simulate.add_argument("--provider", choices=["mock", "api", "local"], default="mock")
     simulate.add_argument("--seed", type=int, default=42)
     simulate.add_argument("--max-turns", type=int, default=8)
     simulate.add_argument("--resume-run")
     simulate.add_argument("--json", action="store_true")
+    simulate.add_argument("--no-visualization", action="store_true")
 
     evaluate = commands.add_parser("evaluate")
     evaluate.add_argument("--run", required=True)
     report = commands.add_parser("report")
     report.add_argument("--run", required=True)
+    visualize = commands.add_parser("visualize")
+    visualize.add_argument("--run", required=True)
+    visualize.add_argument("--output", type=Path)
     return parser
 
 
@@ -65,6 +70,12 @@ async def _simulate(args: argparse.Namespace) -> int:
         seed=args.seed,
         resume_run_id=args.resume_run,
     )
+    visualization = None
+    if not args.no_visualization:
+        visualization = generate_run_report(
+            result,
+            sandbox.config.trace_dir / f"{result.run_id}.html",
+        )
     if args.json:
         print(result.model_dump_json(indent=2))
         return 0
@@ -76,6 +87,8 @@ async def _simulate(args: argparse.Namespace) -> int:
             f"Session {session.session_index}: {session.end_reason}; "
             f"督导={score}; 技能={','.join(session.interventions_used) or '无'}"
         )
+    if visualization:
+        print(f"可视化报告：{visualization}")
     return 0
 
 
@@ -98,6 +111,14 @@ def _evaluate(root: Path, run_id: str, full: bool) -> int:
             )
             if row.get("llm_report"):
                 print(f"  llm_overall={row['llm_report']['overall_score']}")
+    return 0
+
+
+def _visualize(root: Path, run_id: str, output: Path | None) -> int:
+    store = SQLiteStore(root / "runs" / "psychsandbox.sqlite3")
+    result = store.load_run(run_id)
+    destination = output or root / "runs" / f"{run_id}.html"
+    print(generate_run_report(result, destination.resolve()))
     return 0
 
 
@@ -124,6 +145,8 @@ def main() -> int:
         return 0
     if args.command == "simulate":
         return asyncio.run(_simulate(args))
+    if args.command == "visualize":
+        return _visualize(root, args.run, args.output)
     return _evaluate(root, args.run, args.command == "report")
 
 

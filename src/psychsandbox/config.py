@@ -34,7 +34,11 @@ def load_skill_registry(root: Path = PROJECT_ROOT) -> SkillRegistry:
     path = root / "data" / "processed" / "psycheval" / "skills.json"
     if not path.exists():
         path = root / "data" / "skills" / "cbt.json"
-    return SkillRegistry.from_json(path)
+    registry = SkillRegistry.from_json(path)
+    for extra in sorted((root / "data" / "skills").glob("*.json")):
+        if extra.resolve() != path.resolve() and extra.name != "cbt.json":
+            registry = registry.merge(SkillRegistry.from_json(extra))
+    return registry
 
 
 def load_skills(root: Path = PROJECT_ROOT):

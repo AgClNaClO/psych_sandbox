@@ -10,18 +10,20 @@ from ..domain import (
     SkillCandidate,
 )
 from ..model_client import ModelGateway
-
-
-COUNSELOR_SYSTEM = """你是研究沙盒中的 CBT 咨询师智能体，并非真实医疗服务。
-只能使用 unlocked_profile、session_memory、当前对话和候选技能中的信息；
-不得猜测或暗示未披露档案，不得诊断、提供药物剂量或承诺疗效。
-高风险时停止普通 CBT。输出严格 JSON，只给简短、可审计的结构化判断。"""
+from ..runtime.dialogue_guard import DialogueLoopGuard
+from ..therapies import get_therapy_profile
 
 
 class CounselorAgent:
-    def __init__(self, gateway: ModelGateway, temperature: float = 0.4):
+    def __init__(
+        self,
+        gateway: ModelGateway,
+        temperature: float = 0.4,
+        dialogue_guard: DialogueLoopGuard | None = None,
+    ):
         self.gateway = gateway
         self.temperature = temperature
+        self.dialogue_guard = dialogue_guard or DialogueLoopGuard()
 
     def build_payload(
         self,
@@ -35,8 +37,12 @@ class CounselorAgent:
         counselor_turn_count: int,
     ) -> dict:
         """Build the strict counselor view; a full ClientProfile never enters it."""
+        therapy_profile = get_therapy_profile(plan.therapy)
         return {
             "therapy": plan.therapy,
+            "therapy_name": therapy_profile.display_name,
+            "conceptualization_focus": therapy_profile.conceptualization_focus,
+            "stage_goals": list(therapy_profile.stage_goals[plan.stage]),
             "session_stage": plan.stage.value,
             "session_index": plan.session_index,
             "objectives": plan.objectives,
@@ -97,6 +103,21 @@ class CounselorAgent:
                 ),
                 response=_crisis_response(risk.level),
             )
+        boundary = self.dialogue_guard.inspect(client_message, recent_messages)
+        if boundary.detected:
+            return CounselorTurn(
+                decision=CounselorDecision(
+                    assessment="来访者明确表达了暂停或更换话题的边界。",
+                    state_observation=(
+                        "边界已重复出现，需要停止原方向并修复互动。"
+                        if boundary.repeated
+                        else "当前应优先确认自主性和安全感。"
+                    ),
+                    strategy="确认边界、不追问原因、提供低压力选择并让来访者决定方向。",
+                    risk_level=risk.level,
+                ),
+                response=self.dialogue_guard.counselor_response(boundary),
+            )
         payload = self.build_payload(
             memory=memory,
             plan=plan,
@@ -108,7 +129,7 @@ class CounselorAgent:
         )
         result = await self.gateway.complete_structured(
             role="counselor",
-            system_prompt=COUNSELOR_SYSTEM,
+            system_prompt=get_therapy_profile(plan.therapy).system_prompt(),
             input_payload=payload,
             output_schema=CounselorTurn,
             temperature=self.temperature,
@@ -125,6 +146,14 @@ class CounselorAgent:
             if item in allowed_meta
         ]
         turn.decision.risk_level = risk.level
+        if self.dialogue_guard.is_repeated_counselor_response(
+            turn.response,
+            recent_messages,
+        ):
+            turn.decision.strategy = (
+                f"{turn.decision.strategy} 检测到回复重复，暂停原追问并重新校准方向。"
+            )
+            turn.response = self.dialogue_guard.repetition_repair_response()
         return turn
 
 

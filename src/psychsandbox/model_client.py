@@ -62,6 +62,7 @@ class MockGateway(ModelGateway):
                     selected[0].get("intervention_type", "") if selected else "",
                     input_payload.get("client_message", ""),
                     input_payload.get("session_stage", ""),
+                    turn,
                 ),
             )
         if output_schema is ClientGeneration:
@@ -141,8 +142,29 @@ class MockGateway(ModelGateway):
                     utterance="我现在还不太想把这部分说得太具体，可以先停一下吗？"
                 )
             if behavior == ClientBehaviorType.RESISTANCE.value:
+                turn = int(input_payload.get("turn_index", 0))
+                resistance_pattern = signal.get("resistance_pattern", "")
+                if resistance_pattern == ResistancePatternType.DEFENSIVENESS.value:
+                    defensive_responses = [
+                        "我现在还没准备好谈这部分，我们能先换个话题吗？",
+                        "我已经说过暂时不想谈这个。请先停一下。",
+                    ]
+                    return ClientUtterance(
+                        utterance=defensive_responses[min(turn, 1)]
+                    )
+                resistance_responses = {
+                    ResistancePatternType.MINIMAL_TALK.value: "我现在只想简单说一点，不想展开。",
+                    ResistancePatternType.IRRELEVANT_TALK.value: "我们能先聊点别的吗？",
+                    ResistancePatternType.SUPERFICIAL.value: "大概就是这样，我还不想说得更深。",
+                    ResistancePatternType.INTELLECTUALIZING.value: "我更想先从道理上把这件事分析清楚。",
+                    ResistancePatternType.HOSTILITY.value: "这个追问让我不舒服，请先停一下。",
+                    ResistancePatternType.COMPLIANCE_WITHOUT_ENGAGEMENT.value: "我可以回答，但感觉自己还没有真正准备好。",
+                }
                 return ClientUtterance(
-                    utterance="我不太想现在谈这个。我们能不能先说说别的？"
+                    utterance=resistance_responses.get(
+                        resistance_pattern,
+                        "我不太想现在谈这个。我们能不能先说说别的？",
+                    )
                 )
             allowed = input_payload.get("available_memories", [])
             turn = int(input_payload.get("turn_index", 0))
@@ -288,7 +310,12 @@ def _strip_fence(text: str) -> str:
     return value
 
 
-def _mock_counselor_response(intervention: str, client: str, stage: str) -> str:
+def _mock_counselor_response(
+    intervention: str,
+    client: str,
+    stage: str,
+    turn: int = 0,
+) -> str:
     if stage == "consolidation":
         return "今天我们梳理了压力、自动想法和应对之间的联系。你愿意尝试的最小行动是什么？"
     templates = {
@@ -297,6 +324,17 @@ def _mock_counselor_response(intervention: str, client: str, stage: str) -> str:
         "clarification": "当时具体发生了什么？那一刻你脑中最先出现的想法是什么？",
         "socratic_question": "支持这个想法的证据有哪些？又有没有哪怕一个例外？",
         "behavioral_suggestion": "我们先不要求一次解决全部问题。你愿意选择一个十分钟内可完成的小行动吗？",
+        "emotion_reflection": "听起来你一边努力维持，一边又越来越难感受到这是不是自己真正想要的。",
+        "experiential_clarification": "当你说到这里时，此刻身体和情绪里最明显的感受是什么？",
+        "meaning_exploration": "在别人的期待与自己的真实感受之间，哪一部分最让你为难？",
+        "choice_support": "如果不急着找标准答案，哪些选择更接近你愿意承担的生活？",
         "session_summary": "今天我们确认了一个重要模式。哪些理解准确，哪些需要修正？",
     }
-    return templates.get(intervention, f"我听到你提到“{client[:24]}”。这对你最直接的影响是什么？")
+    if intervention in templates:
+        return templates[intervention]
+    fallback_responses = [
+        "我们可以慢一点。刚才的内容里，哪一部分最希望先被理解？",
+        "在继续前，我想确认方向是否合适。你更想谈当前感受、具体事件，还是先确定今天的目标？",
+        "我注意到我们可能在重复追问。我们停下来校准一下，什么样的谈法对你更有帮助？",
+    ]
+    return fallback_responses[turn % len(fallback_responses)]

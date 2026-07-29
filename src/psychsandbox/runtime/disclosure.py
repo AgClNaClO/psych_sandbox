@@ -24,14 +24,27 @@ class ActivationMatcher(Protocol):
 class TagActivationMatcher:
     """Auditable tag matcher; replaceable by a semantic matcher later."""
 
+    LOW_INFORMATION_TAGS = frozenset(
+        {"影响", "关系", "事情", "感觉", "问题"}
+    )
+
     def match(self, text: str, fact: HiddenFact) -> list[str]:
         normalized = normalize_activation_text(text)
-        return [
+        matched = [
             tag
             for tag in fact.activation_tags
             if normalize_activation_text(tag)
             and normalize_activation_text(tag) in normalized
         ]
+        # A single low-information tag such as “影响” or “关系” is too generic
+        # to justify activating a hidden memory. A specific tag, or multiple
+        # generic tags occurring together, remains valid and auditable.
+        strong = [
+            tag
+            for tag in matched
+            if normalize_activation_text(tag) not in self.LOW_INFORMATION_TAGS
+        ]
+        return matched if strong or len(matched) >= 2 else []
 
 
 class DisclosureGate:

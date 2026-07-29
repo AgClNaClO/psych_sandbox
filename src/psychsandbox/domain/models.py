@@ -105,6 +105,31 @@ class BigFive(StrictModel):
     neuroticism: float = Field(default=0.5, ge=0, le=1)
 
 
+class FivePsFormulation(StrictModel):
+    """Auditable 5Ps case formulation used by the private client model.
+
+    Empty lists are allowed for legacy records, but newly converted cases should
+    populate every section and retain the source fields used for the derivation.
+    """
+
+    presenting_problem: str = ""
+    predisposing_factors: list[str] = Field(default_factory=list)
+    precipitating_factors: list[str] = Field(default_factory=list)
+    perpetuating_factors: list[str] = Field(default_factory=list)
+    protective_factors: list[str] = Field(default_factory=list)
+    source_fields: list[str] = Field(default_factory=list)
+
+    def covered_sections(self) -> list[str]:
+        sections = {
+            "presenting": bool(self.presenting_problem.strip()),
+            "predisposing": bool(self.predisposing_factors),
+            "precipitating": bool(self.precipitating_factors),
+            "perpetuating": bool(self.perpetuating_factors),
+            "protective": bool(self.protective_factors),
+        }
+        return [name for name, covered in sections.items() if covered]
+
+
 class ClientState(StrictModel):
     """Simulation variables only; these are not clinical scale scores."""
 
@@ -184,6 +209,7 @@ class ClientProfile(StrictModel):
     topic: str
     core_demands: str
     growth_experiences: list[str] = Field(default_factory=list)
+    formulation_5ps: FivePsFormulation = Field(default_factory=FivePsFormulation)
     theory: dict[str, Any] = Field(default_factory=dict)
     personality: BigFive = Field(default_factory=BigFive)
     initial_state: ClientState = Field(default_factory=ClientState)
@@ -343,6 +369,17 @@ class SupervisorReport(StrictModel):
     created_at: str = Field(default_factory=utc_now)
 
 
+class LongitudinalReport(StrictModel):
+    """Session-to-session progress signal for planning, not a clinical outcome."""
+
+    session_index: int = Field(ge=1)
+    state_deltas: dict[str, float] = Field(default_factory=dict)
+    supervisor_score_delta: float | None = None
+    trend: Literal["baseline", "improving", "stable", "worsening", "mixed"]
+    stage_action: Literal["continue", "advance", "regress", "hold", "close"]
+    evidence: list[str] = Field(default_factory=list)
+
+
 class ClientSimulationReport(StrictModel):
     session_index: int
     metrics: list[EvaluationMetric]
@@ -368,6 +405,7 @@ class SessionRecord(StrictModel):
     supervisor_report: SupervisorReport | None = None
     llm_supervisor_report: SupervisorReport | None = None
     client_simulation_report: ClientSimulationReport | None = None
+    longitudinal_report: LongitudinalReport | None = None
     evaluation_errors: list[str] = Field(default_factory=list)
     end_reason: str
 

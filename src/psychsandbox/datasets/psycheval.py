@@ -12,6 +12,7 @@ from ..domain import (
     ClientProfile,
     ClientState,
     CounselingCase,
+    FivePsFormulation,
     HiddenFact,
     MetaSkill,
     SessionPlan,
@@ -84,6 +85,7 @@ class PsychEvalAdapter:
             topic=str(info.get("topic", "")),
             core_demands=str(info.get("core_demands", "")),
             growth_experiences=[str(item) for item in info.get("growth_experiences", [])],
+            formulation_5ps=self._five_ps(info),
             theory={
                 "cbt": {
                     "core_beliefs": info.get("core_beliefs", []),
@@ -213,6 +215,55 @@ class PsychEvalAdapter:
                 )
             )
         return plans
+
+    @staticmethod
+    def _five_ps(info: dict[str, Any]) -> FivePsFormulation:
+        """Derive an auditable 5Ps scaffold from fields PsychEval actually ships."""
+
+        growth = [
+            str(item).strip()
+            for item in info.get("growth_experiences", [])
+            if str(item).strip()
+        ]
+        situations = [
+            item for item in info.get("special_situations", [])
+            if isinstance(item, dict)
+        ]
+        events = [
+            str(item.get("event", "")).strip()
+            for item in situations
+            if str(item.get("event", "")).strip()
+        ]
+        perpetuating: list[str] = []
+        for item in situations:
+            for key, label in (
+                ("automatic_thoughts", "自动思维"),
+                ("conditional_assumptions", "条件假设"),
+                ("compensatory_strategies", "应对/维持策略"),
+            ):
+                value = str(item.get(key, "")).strip()
+                if value:
+                    perpetuating.append(f"{label}：{value}")
+        protective = []
+        if str(info.get("core_demands", "")).strip():
+            protective.append("能够表达求助目标并主动参与咨询")
+        family = str(info.get("static_traits", {}).get("family_status", "")).strip()
+        if family:
+            protective.append(f"可进一步核实的家庭/支持资源：{family}")
+        return FivePsFormulation(
+            presenting_problem=str(info.get("main_problem", "")).strip(),
+            predisposing_factors=growth,
+            precipitating_factors=events[:3],
+            perpetuating_factors=list(dict.fromkeys(perpetuating))[:8],
+            protective_factors=protective,
+            source_fields=[
+                "client_info.main_problem",
+                "client_info.growth_experiences",
+                "client_info.special_situations",
+                "client_info.core_demands",
+                "client_info.static_traits.family_status",
+            ],
+        )
 
     @staticmethod
     def _hidden_facts(case_id: str, info: dict[str, Any]) -> list[HiddenFact]:
@@ -375,6 +426,18 @@ class CaseRepository:
 def _legacy_case(path: Path) -> CounselingCase:
     raw = json.loads(path.read_text(encoding="utf-8"))
     traits = raw["static_traits"]
+    therapy = str(raw.get("therapy", "cbt"))
+    formulation = raw.get("formulation_5ps") or {
+        "presenting_problem": raw["main_problem"],
+        "predisposing_factors": raw.get("growth_experiences", []),
+        "precipitating_factors": raw.get("precipitating_factors", []),
+        "perpetuating_factors": raw.get("perpetuating_factors", []),
+        "protective_factors": (
+            raw.get("protective_factors", [])
+            or ["能够表达求助目标并主动参与咨询"]
+        ),
+        "source_fields": ["local_profile"],
+    }
     profile = ClientProfile(
         client_id=raw["case_id"],
         static_traits=StaticTraits(
@@ -390,33 +453,41 @@ def _legacy_case(path: Path) -> CounselingCase:
         main_problem=raw["main_problem"],
         topic=raw["topic"],
         core_demands=raw["core_demands"],
-        growth_experiences=[],
-        theory={"cbt": {}},
+        growth_experiences=raw.get("growth_experiences", []),
+        formulation_5ps=FivePsFormulation.model_validate(formulation),
+        theory={therapy: raw.get("therapy_parameters", {})},
         personality=BigFive.model_validate(raw["personality"]),
         initial_state=ClientState.model_validate(raw["initial_state"]),
         language_style=traits.get("language_style", ""),
         opening=raw["opening"],
         hidden_facts=[HiddenFact.model_validate(item) for item in raw["hidden_facts"]],
     )
+    session_count = int(raw.get("session_count", 3))
+    stage_objectives = raw.get("stage_objectives", {})
+
+    def stage_for(index: int) -> SessionStage:
+        if index <= min(2, session_count):
+            return SessionStage.CONCEPTUALIZATION
+        if index >= max(3, session_count - 1):
+            return SessionStage.CONSOLIDATION
+        return SessionStage.INTERVENTION
+
     plans = [
         SessionPlan(
             session_index=index,
-            therapy="cbt",
-            stage=(
-                SessionStage.CONCEPTUALIZATION
-                if index == 1
-                else SessionStage.INTERVENTION
-                if index < 3
-                else SessionStage.CONSOLIDATION
+            therapy=therapy,
+            stage=stage_for(index),
+            objectives=stage_objectives.get(
+                stage_for(index).value,
+                ["建立合作关系", "澄清困扰", "共同确定一个可观察的下一步"],
             ),
-            objectives=["建立合作关系", "澄清困扰", "共同确定一个可观察的下一步"],
             forbidden_actions=["医学诊断", "使用未披露档案", "过早挑战"],
         )
-        for index in range(1, 4)
+        for index in range(1, session_count + 1)
     ]
     return CounselingCase(
         case_id=raw["case_id"],
-        therapy="cbt",
+        therapy=therapy,
         profile=profile,
         global_plan=plans,
         source="local_demo",

@@ -136,10 +136,10 @@ class SQLiteStore:
                 ),
             )
 
-    def finish_run(self, run_id: str) -> None:
+    def finish_run(self, run_id: str, *, status: str = "completed") -> None:
         self.connection.execute(
-            "UPDATE experiment_runs SET status='completed', completed_at=? WHERE run_id=?",
-            (utc_now(), run_id),
+            "UPDATE experiment_runs SET status=?, completed_at=? WHERE run_id=?",
+            (status, utc_now(), run_id),
         )
         self.connection.commit()
 

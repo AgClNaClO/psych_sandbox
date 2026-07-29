@@ -45,6 +45,7 @@ class SkillRegistry:
                     description=item["meta_skill"],
                     therapy=item["therapy"],
                     stages=stage_map.get(item["stage"], list(SessionStage)),
+                    source=item.get("source", "local"),
                 ),
             )
             atomic.append(
@@ -61,10 +62,27 @@ class SkillRegistry:
                     intervention_type=item.get(
                         "intervention_type", "supportive_exploration"
                     ),
+                    source=item.get("source", "local"),
+                    version=int(item.get("version", 1)),
                     status=SkillStatus(item.get("status", "approved")),
                 )
             )
         return cls(list(meta.values()), atomic)
+
+    def merge(self, other: "SkillRegistry") -> "SkillRegistry":
+        """Merge registries while rejecting conflicting stable identifiers."""
+
+        meta = dict(self.meta_skills)
+        atomic = dict(self.atomic_skills)
+        for key, item in other.meta_skills.items():
+            if key in meta and meta[key] != item:
+                raise ValueError(f"Conflicting meta skill ID: {key}")
+            meta[key] = item
+        for key, item in other.atomic_skills.items():
+            if key in atomic and atomic[key] != item:
+                raise ValueError(f"Conflicting atomic skill ID: {key}")
+            atomic[key] = item
+        return SkillRegistry(list(meta.values()), list(atomic.values()))
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
