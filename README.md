@@ -9,6 +9,43 @@
 > 不用于诊断、治疗、药物建议或现实危机处置。系统中的情绪状态、人格参数和自动评分
 > 都是仿真变量，不是经过临床验证的量表。
 
+## 快速开始
+
+以下命令适用于 Windows CMD。Mock 模式不需要 API 密钥，可用于快速验证完整流程：
+
+```bat
+git clone --branch codex/patientact-client-upgrade-v2 --single-branch https://github.com/AgClNaClO/psych_sandbox.git
+cd psych_sandbox
+python -m venv .venv
+call .venv\Scripts\activate.bat
+python -m pip install -e ".[dev]"
+pytest -q
+psych-sandbox data fetch psycheval
+psych-sandbox data convert --therapy cbt
+psych-sandbox simulate --case psycheval-cbt-001 --sessions 3 --provider mock
+```
+
+`data fetch` 需要访问网络；如果本地已经生成 `data\processed\psycheval`，可以跳过
+数据下载和转换。
+
+仿真结束后，终端会输出 `run-xxxxxxxxxxxx` 格式的运行编号，并自动生成
+`runs\run-xxxxxxxxxxxx.html`。该报告可直接在浏览器中离线打开；也可以随时重新生成：
+
+```bat
+psych-sandbox visualize --run run-xxxxxxxxxxxx
+```
+
+## v0.3.0 更新重点
+
+- 新增 CBT 与人本—存在取向的独立 `TherapyProfile`，避免混用不同流派的数据与评估标准。
+- 将模拟来访者拆分为内部状态规划和自然语言表达两个阶段，增加话题边界、阻抗、
+  提前披露防护及对话循环修复。
+- 新增独立的来访者真实性评估、规则会谈评估和跨 session 纵向趋势分析。
+- 将督导反馈写入下一次会谈计划，形成“会谈—评估—反馈—调整”的可审计闭环。
+- 新增单文件 HTML 可视化报告，集中呈现运行流程、状态曲线、督导指标、
+  信息披露、安全检查和完整对话。
+- 自动化测试扩展至 79 项，覆盖多会话连续性、SQLite 恢复、信息隔离与安全分流。
+
 ## 1. 项目要解决什么问题
 
 普通大模型通常只能完成单轮或短期心理咨询对话，存在以下问题：
