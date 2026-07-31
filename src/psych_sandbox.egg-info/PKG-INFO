@@ -36,6 +36,44 @@ Dynamic: license-file
 > 不用于诊断、治疗、药物建议或现实危机处置。系统中的情绪状态、人格参数和自动评分
 > 都是仿真变量，不是经过临床验证的量表。
 
+## 快速开始
+
+以下命令适用于 Windows CMD。Mock 模式不需要 API 密钥，可用于快速验证完整流程：
+
+```bat
+git clone --branch codex/patientact-client-upgrade-v2 --single-branch https://github.com/AgClNaClO/psych_sandbox.git
+cd psych_sandbox
+python -m venv .venv
+call .venv\Scripts\activate.bat
+python -m pip install -e ".[dev]"
+pytest -q
+psych-sandbox data fetch psycheval
+psych-sandbox data convert --therapy cbt
+psych-sandbox simulate --case psycheval-cbt-001 --sessions 3 --provider mock
+```
+
+`data fetch` 需要访问网络；如果本地已经生成 `data\processed\psycheval`，可以跳过
+数据下载和转换。
+
+仿真结束后，终端会输出 `run-xxxxxxxxxxxx` 格式的运行编号，并自动生成
+`runs\run-xxxxxxxxxxxx.html`。该报告可直接在浏览器中离线打开；也可以随时重新生成：
+
+```bat
+psych-sandbox visualize --run run-xxxxxxxxxxxx
+```
+
+## v0.3.0 更新重点
+
+- 新增 CBT 与人本—存在取向的独立 `TherapyProfile`，避免混用不同流派的数据与评估标准。
+- 将模拟来访者拆分为内部状态规划和自然语言表达两个阶段，增加话题边界、阻抗、
+  提前披露防护及对话循环修复。
+- 新增独立的来访者真实性评估、规则会谈评估和跨 session 纵向趋势分析。
+- 将督导反馈写入下一次会谈计划，形成“会谈—评估—反馈—调整”的可审计闭环。
+- 新增单文件 HTML 可视化报告，集中呈现运行流程、状态曲线、督导指标、
+  信息披露、安全检查和完整对话。
+- 自动化测试扩展至 87 项，覆盖多会话连续性、SQLite 恢复、信息隔离、安全分流、
+  API 结构化输出、失败状态持久化与 CLI 进度反馈。
+
 ## 1. 项目要解决什么问题
 
 普通大模型通常只能完成单轮或短期心理咨询对话，存在以下问题：
@@ -65,20 +103,27 @@ SQLite、JSONL 轨迹和后续经验池
 
 ## 2. 当前完成情况
 
-第一阶段“CBT 基础闭环”的代码和 Mock 工程验证已经完成：
+第一阶段“最小可运行沙盒”的代码和 Mock 工程验证已经完成：
 
 - 转换 PsychEval 官方 148 个 CBT 案例。
 - 提取 346 个元技能和 1171 个原子技能，保留官方原子 `skill_id`。
 - 按案例进行确定性训练集、验证集和测试集划分：108/19/21。
-- 支持单个案例连续运行至少 3 个 session。
+- 将 PsychEval 原始字段转换为带来源字段的结构化 5Ps 个案概念化。
+- 支持 CBT 与人本—存在取向两个独立 `TherapyProfile`；后者仅使用合成案例和
+  第一阶段演示技能，不冒充 PsychEval 官方流派数据。
+- 支持单个案例连续运行 6–10 个 session，并验证状态与记忆连续性。
 - 支持从 SQLite 中最近一个 session 边界恢复运行。
 - 咨询师只能读取已解锁信息，不能读取完整来访者档案。
 - 来访者语言生成器只能读取静态画像和本轮允许记忆；私有记忆仅进入内部状态规划器。
 - 支持“反应—行为—阻抗—回答”的两阶段来访者生成、blocked 敏感话题信号和提前披露防护。
+- 支持来访者话题边界识别、咨询师重复回复检测和互动修复，避免固定追问形成对话循环。
 - 每轮记录技能候选、实际技能、结构化决策、状态变化和安全结果。
-- 每个 session 生成摘要、下一次计划、六维咨询师督导报告和独立来访者仿真报告。
+- 每个 session 生成摘要、六维咨询师督导、独立来访者仿真报告、纵向趋势和
+  反馈驱动的下一次计划。
+- 每次 CLI 仿真自动生成单文件 HTML 报告，展示流程、状态曲线、督导指标、
+  披露/安全过程和完整对话。
 - 支持 Mock、OpenAI 兼容 API 和本地 Transformers 三种模型后端。
-- 65 项自动化测试全部通过，无跳过测试。
+- 87 项自动化测试全部通过，无跳过测试。
 - 已完成 10 个案例、30 个 session 的 Mock 基线实验。
 
 Mock 基线平均规则督导分为 7.889，未检测到提前泄漏和规则级安全违规。
@@ -103,9 +148,9 @@ Mock 基线平均规则督导分为 7.889，未检测到提前泄漏和规则级
 生成器看不到未授权成长经历、特殊情境、完整 CBT 概念化材料或咨询师内部 session 目标。
 回答经过提前披露检查；首次失败会重试，仍失败则使用符合当前行为信号的安全替代回答。
 
-### 3.2 CBT 咨询师
+### 3.2 多流派咨询师
 
-咨询师智能体只能看到：
+第一阶段提供 CBT 与人本—存在取向两个适配器。咨询师智能体只能看到：
 
 - 来访者已经明确说出的信息。
 - 已解锁档案。
@@ -121,7 +166,7 @@ Mock 基线平均规则督导分为 7.889，未检测到提前泄漏和规则级
 督导师拥有审计视图，可以查看完整档案、会谈计划、对话和技能决策。第一阶段评估六个维度：
 
 - `wai_lite`：目标、任务和关系联盟。
-- `ctrs_lite`：议程、认知概念化、引导式发现、自动思维和行为任务。
+- `ctrs_lite` / `tes_lite`：分别检查 CBT 或人本—存在取向的可观察流派行为。
 - `stage_consistency`：干预是否符合当前咨询阶段。
 - `persona_consistency`：来访者人设和跨 session 一致性。
 - `hidden_information_leakage`：咨询师是否提前使用隐藏信息。
@@ -136,10 +181,12 @@ Mock 模式使用可复查的规则督导；API 模式还可以调用 LLM 督导
 src/psychsandbox/
 ├── domain/          Pydantic 统一领域模型
 ├── datasets/        PsychEval 下载、转换、划分和案例仓库
-├── agents/          来访者、CBT 咨询师和督导师
-├── runtime/         多会话编排、安全、披露、状态、记忆和 SQLite
+├── agents/          来访者、咨询师门面与可选 LLM 督导
+├── therapies/       治疗流派定义、概念化焦点与阶段目标
+├── runtime/         编排、安全、披露、状态、记忆、反馈计划和 SQLite
 ├── skills/          元技能/原子技能注册与层级检索
-├── evaluation/      评测入口
+├── evaluation/      单次会谈与纵向评测
+├── visualization/   无外部依赖的 SVG/HTML 运行报告
 ├── experience/      通过安全门槛的经验池
 ├── evolution/       技能审核、晋升、弃用和回滚状态机
 ├── training/        SFT 与 DPO 数据导出
@@ -163,11 +210,13 @@ src/psychsandbox/
    - 语言生成器仅根据静态视图、允许记忆和内部信号生成回应。
    - 回答通过提前披露检查后，分别保存状态增量、结构化信号和泄漏审计结果。
 3. `consolidate_session`
-   - 生成摘要并更新跨 session 记忆。
-   - 保存新解锁事实、目标进度和已使用技能。
-   - 生成下一次计划。
-   - 调用规则督导；API 模式可同时调用 LLM 督导。
-   - 保存 SQLite 和 JSONL 轨迹。
+    - 生成摘要并更新跨 session 记忆。
+    - 保存新解锁事实、目标进度和已使用技能。
+    - 调用规则督导；API 模式可同时调用 LLM 督导。
+    - 计算状态差值、相邻会谈趋势和阶段动作。
+    - 将督导修复项写入下一次计划。
+    - 保存 SQLite 和 JSONL 轨迹。
+    - CLI 模式生成可折叠查看逐轮过程的 HTML 报告。
 
 ## 5. Windows CMD 环境准备
 
@@ -317,6 +366,17 @@ psych-sandbox evaluate --run run-xxxxxxxxxxxx
 psych-sandbox report --run run-xxxxxxxxxxxx
 ```
 
+生成或重新生成过程与结果可视化：
+
+```bat
+psych-sandbox visualize --run run-xxxxxxxxxxxx
+```
+
+默认输出为 `runs\run-xxxxxxxxxxxx.html`。报告是可离线打开的单文件页面，不上传数据，
+包括六步运行流程、来访者状态曲线、逐 session 督导指标、纵向判断、逐轮技能/披露/安全记录
+和完整对话。`simulate` 默认自动生成该报告；如只需要 JSON/SQLite，可传
+`--no-visualization`。
+
 默认数据库和轨迹位于：
 
 ```text
@@ -355,11 +415,30 @@ set MODEL_BASE_URL=https://你的兼容接口地址/v1
 set CLIENT_MODEL=来访者模型名称
 set COUNSELOR_MODEL=咨询师模型名称
 set SUPERVISOR_MODEL=督导师模型名称
-set SUMMARY_MODEL=摘要模型名称
 set MODEL_TIMEOUT_SECONDS=90
+set MODEL_STRUCTURED_OUTPUT=auto
+set MODEL_MAX_TOKENS=4096
 ```
 
 不要把真实密钥写入 README、代码、测试或提交到 Git。
+
+`SUPERVISOR_MODEL` 未设置时会回退到 `COUNSELOR_MODEL`。当前 session 摘要由确定性规则生成，
+不调用 LLM；`.env.example` 中的 `SUMMARY_MODEL` 仅为未来扩展保留。
+
+`MODEL_STRUCTURED_OUTPUT=auto` 会按角色和模型判断：ChatECNU 的 `ecnu-plus` 与
+`ecnu-turbo` 自动启用原生 `response_format=json_schema`；`ecnu-max` 及其他兼容接口
+保持提示词 JSON 模式。已确认供应商支持 JSON Schema 时可显式设为 `json_schema`，
+不支持时设为 `off`。ChatECNU 推荐配置示例：
+
+```bat
+set MODEL_BASE_URL=https://chat.ecnu.edu.cn/open/api/v1
+set CLIENT_MODEL=ecnu-plus
+set COUNSELOR_MODEL=ecnu-plus
+set SUPERVISOR_MODEL=ecnu-plus
+set MODEL_STRUCTURED_OUTPUT=auto
+set MODEL_TIMEOUT_SECONDS=180
+set MODEL_MAX_TOKENS=4096
+```
 
 运行真实 API：
 
@@ -372,9 +451,11 @@ psych-sandbox simulate ^
   --seed 42
 ```
 
-API 输出必须通过 Pydantic 结构校验。非法 JSON 会触发修复重试；连续失败后会返回包含
-模型角色、输出类型和校验错误的诊断信息。LLM 督导失败不会破坏已经完成的主会话，
-错误会单独写入 `evaluation_errors`。
+API 输出必须通过 Pydantic 结构校验。非法 JSON 会把上一次无效响应和校验错误交给模型
+修复，并把本地诊断文件写入 `runs\diagnostics`。该目录可能包含案例内容，已被 Git 忽略，
+不应对外发送。连续失败后会返回包含模型角色、输出类型和校验错误的异常。运行过程中会
+逐 session 输出开始和完成进度；未捕获异常会将数据库运行状态标记为 `failed`。LLM 督导
+失败不会破坏已经完成的主会话，错误会单独写入 `evaluation_errors`。
 
 若希望关闭 CMD 后环境变量仍保留，可使用 `setx`，但新值只会对之后新开的 CMD 生效：
 
@@ -394,8 +475,20 @@ setx COUNSELOR_MODEL "咨询师模型名称"
 python -m pip install -e ".[local]"
 ```
 
-当前机器为 8GB 显存时，建议从 3B/4B 指令模型的 4-bit 量化推理开始。运行前需要在配置或
-调用代码中填写 `local_model_name`。本地 7B/14B 训练不属于第一阶段验收内容。
+当前机器为 8GB 显存时，建议从 3B/4B 指令模型的 4-bit 量化推理开始。本地运行示例：
+
+```bat
+psych-sandbox simulate ^
+  --case psycheval-cbt-001 ^
+  --sessions 1 ^
+  --provider local ^
+  --local-model 模型仓库名或本地路径 ^
+  --local-device auto
+```
+
+Python API 的 `default_config()` 会读取 `configs\runtime.yaml` 中的路径、温度和
+PATIENTACT 参数，以及 `configs\models.yaml` 中的本地模型配置。CLI 以命令行参数为准。
+本地 7B/14B 训练不属于第一阶段验收内容。
 
 ## 12. 运行自动化测试
 
@@ -406,7 +499,7 @@ pytest -q
 当前预期结果：
 
 ```text
-65 passed
+87 passed
 ```
 
 测试覆盖：
@@ -415,15 +508,22 @@ pytest -q
 - 领域模型数值边界。
 - 咨询师信息隔离。
 - 来访者静态/私有信息隔离、retrieved/blocked 披露门控和提前披露 fallback。
+- 泛化触发词抑制、明确话题边界响应和咨询师重复回复修复。
 - 两阶段来访者生成、信任因果更新、自然回撤和独立仿真评估。
 - 四级风险和输出安全检查。
 - 层级技能父子关系、过滤和确定性检索。
 - Mock 结构化输出。
+- API JSON Schema 请求、非法 JSON 修复重试与本地诊断记录。
+- ECNU `auto` 模式按角色区分 `ecnu-plus`/`ecnu-turbo` 与 `ecnu-max`。
 - 连续 3-session 运行。
+- CLI session 进度反馈和异常运行 `failed` 状态持久化。
 - 跨 session 状态连续性。
 - SQLite 恢复和 JSONL 输出。
 - 六维督导报告。
+- 结构化 5Ps、双流派适配、纵向报告和反馈计划。
+- HTML 过程/结果可视化。
 - 技能审核、晋升和回滚约束。
+- YAML 默认配置读取与本地模型 CLI 参数。
 
 ## 13. 数据和存储边界
 

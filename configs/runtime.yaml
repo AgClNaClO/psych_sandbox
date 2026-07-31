@@ -6,7 +6,6 @@ temperature:
   client: 0.8
   counselor: 0.4
   supervisor: 0.1
-  summarizer: 0.2
 trace_dir: runs
 database_path: runs/psychsandbox.sqlite3
 patientact:

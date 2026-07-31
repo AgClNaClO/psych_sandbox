@@ -8,6 +8,7 @@ import pytest
 
 from psychsandbox.domain import SandboxConfig, SkillStatus, SkillVersion
 from psychsandbox.evolution import SkillEvolutionManager
+from psychsandbox.model_client import ModelGateway
 from psychsandbox.runtime import CounselingSandbox, SQLiteStore
 
 
@@ -65,6 +66,23 @@ def test_jsonl_trajectory_written(sandbox):
     assert json.loads(rows[0])["case_id"] == result.case_id
 
 
+def test_run_reports_session_progress(sandbox):
+    messages: list[str] = []
+
+    result = asyncio.run(
+        sandbox.run_case(
+            "psycheval-cbt-005",
+            session_count=1,
+            progress_callback=messages.append,
+        )
+    )
+
+    assert any(result.run_id in message and "已开始" in message for message in messages)
+    assert any("Session 1/1 开始" in message for message in messages)
+    assert any("Session 1/1 完成" in message for message in messages)
+    assert any("状态=completed" in message for message in messages)
+
+
 def test_supervisor_has_six_dimensions(sandbox):
     result = asyncio.run(sandbox.run_case("psycheval-cbt-006", session_count=1))
     assert len(result.sessions[0].supervisor_report.metrics) == 6
@@ -103,6 +121,41 @@ def test_patientact_pipeline_can_be_disabled(root, tmp_path):
     )
     signal = result.sessions[0].turn_records[0]["client_turn_signal"]
     assert signal["rationale"].startswith("PATIENTACT internal planning disabled")
+
+
+class FailingGateway(ModelGateway):
+    provider_name = "failing"
+
+    async def complete_structured(self, **kwargs):
+        raise RuntimeError("synthetic model failure")
+
+
+def test_failed_run_is_persisted(root, tmp_path):
+    config = SandboxConfig(
+        project_root=root,
+        provider="mock",
+        max_turns_per_session=1,
+        database_path=tmp_path / "failed.sqlite3",
+        trace_dir=tmp_path / "failed-traces",
+    )
+    sandbox = CounselingSandbox(config, gateway=FailingGateway())
+    messages: list[str] = []
+
+    with pytest.raises(RuntimeError, match="synthetic model failure"):
+        asyncio.run(
+            sandbox.run_case(
+                "psycheval-cbt-009",
+                session_count=1,
+                progress_callback=messages.append,
+            )
+        )
+
+    row = sandbox.store.connection.execute(
+        "SELECT status, completed_at FROM experiment_runs"
+    ).fetchone()
+    assert row["status"] == "failed"
+    assert row["completed_at"]
+    assert any("状态已记录为 failed" in message for message in messages)
 
 
 def test_store_unknown_run(tmp_path):

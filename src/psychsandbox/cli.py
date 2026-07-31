@@ -38,6 +38,8 @@ def build_parser() -> argparse.ArgumentParser:
     simulate.add_argument("--provider", choices=["mock", "api", "local"], default="mock")
     simulate.add_argument("--seed", type=int, default=42)
     simulate.add_argument("--max-turns", type=int, default=8)
+    simulate.add_argument("--local-model", default="")
+    simulate.add_argument("--local-device", default="auto")
     simulate.add_argument("--resume-run")
     simulate.add_argument("--json", action="store_true")
     simulate.add_argument("--no-visualization", action="store_true")
@@ -58,6 +60,8 @@ def _config(args: argparse.Namespace) -> SandboxConfig:
         provider=getattr(args, "provider", "mock"),
         seed=getattr(args, "seed", 42),
         max_turns_per_session=getattr(args, "max_turns", 8),
+        local_model_name=getattr(args, "local_model", ""),
+        local_device=getattr(args, "local_device", "auto"),
     )
 
 
@@ -69,6 +73,11 @@ async def _simulate(args: argparse.Namespace) -> int:
         session_count=args.sessions,
         seed=args.seed,
         resume_run_id=args.resume_run,
+        progress_callback=(
+            None
+            if args.json
+            else lambda message: print(message, flush=True)
+        ),
     )
     visualization = None
     if not args.no_visualization:

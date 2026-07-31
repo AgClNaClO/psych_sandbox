@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import random
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 from ..agents import (
@@ -51,6 +52,7 @@ class CounselingSandbox:
             config.provider,
             local_model_name=config.local_model_name,
             local_device=config.local_device,
+            diagnostic_dir=config.trace_dir / "diagnostics",
         )
         self.repository = repository or CaseRepository(
             config.processed_dataset_dir,
@@ -93,6 +95,7 @@ class CounselingSandbox:
         session_count: int = 3,
         seed: int = 42,
         resume_run_id: str | None = None,
+        progress_callback: Callable[[str], None] | None = None,
     ) -> RunResult:
         random.seed(seed)
         case = self.repository.get(case_id)
@@ -118,96 +121,113 @@ class CounselingSandbox:
                 self.config.model_dump(mode="json"),
             )
             self.store.save_case(case)
+        notify = progress_callback or (lambda _message: None)
+        notify(
+            f"运行 {run_id} 已开始；案例={case_id}；"
+            f"待执行 sessions={max(0, session_count - len(previous_sessions))}"
+        )
         sessions = list(previous_sessions)
         start = len(sessions) + 1
-        for session_index in range(start, session_count + 1):
-            plan = self._plan_for(case, session_index, sessions)
-            memory_before = memory.model_copy(deep=True)
-            initial_state = (
-                sessions[-1].final_state.model_copy(deep=True)
-                if sessions else case.profile.initial_state.model_copy(deep=True)
+        try:
+            for session_index in range(start, session_count + 1):
+                notify(f"Session {session_index}/{session_count} 开始")
+                plan = self._plan_for(case, session_index, sessions)
+                memory_before = memory.model_copy(deep=True)
+                initial_state = (
+                    sessions[-1].final_state.model_copy(deep=True)
+                    if sessions else case.profile.initial_state.model_copy(deep=True)
+                )
+                session = await self._run_session(case, plan, memory, initial_state)
+                report = await self.supervisor.evaluate(
+                    session, case=case, memory_before=memory_before
+                )
+                session.supervisor_report = report
+                session.client_simulation_report = await self.client_evaluator.evaluate(
+                    session
+                )
+                if self.llm_supervisor:
+                    try:
+                        session.llm_supervisor_report = await self.llm_supervisor.evaluate(
+                            session, case=case, memory_before=memory_before
+                        )
+                    except Exception as exc:
+                        session.evaluation_errors.append(
+                            f"llm_supervisor:{type(exc).__name__}:{exc}"
+                        )
+                session.longitudinal_report = self.longitudinal.evaluate(
+                    session, sessions
+                )
+                baseline_next = self._baseline_next_plan(
+                    case, session, session_index + 1
+                )
+                session.next_session_plan = self.plan_builder.build(
+                    session.plan,
+                    baseline_next,
+                    session.supervisor_report,
+                    session.longitudinal_report,
+                )
+                memory = self.consolidator.consolidate(
+                    memory, session, next_index=session_index + 1
+                )
+                trajectory = Trajectory(
+                    trajectory_id=f"traj-{uuid.uuid4().hex[:12]}",
+                    run_id=run_id,
+                    case_id=case_id,
+                    session_index=session_index,
+                    model_config_snapshot={
+                        "provider": self.gateway.provider_name,
+                        "seed": seed,
+                        "temperature_client": self.config.temperature_client,
+                        "temperature_counselor": self.config.temperature_counselor,
+                        "client_pipeline": (
+                            "patientact_v1"
+                            if self.config.patientact_enabled
+                            else "direct_generation_v1"
+                        ),
+                        "trace_schema_version": 2,
+                    },
+                    memory_before=memory_before,
+                    plan=plan,
+                    session=session,
+                    reward=report.overall_score,
+                    safety_passed=all(
+                        metric.score >= 7
+                        for metric in report.metrics
+                        if metric.name
+                        in {"ethics_and_safety", "hidden_information_leakage"}
+                    ),
+                )
+                self.store.save_session(run_id, session, memory, trajectory)
+                self._append_jsonl(trajectory)
+                sessions.append(session)
+                notify(
+                    f"Session {session_index}/{session_count} 完成；"
+                    f"turns={len(session.turn_records)}；督导={report.overall_score}"
+                )
+                if (
+                    session.end_reason == "imminent_risk"
+                    or session.longitudinal_report.stage_action == "close"
+                ):
+                    break
+            status = (
+                "safety_hold"
+                if sessions and sessions[-1].end_reason == "imminent_risk"
+                else "completed"
             )
-            session = await self._run_session(case, plan, memory, initial_state)
-            report = await self.supervisor.evaluate(
-                session, case=case, memory_before=memory_before
-            )
-            session.supervisor_report = report
-            session.client_simulation_report = await self.client_evaluator.evaluate(
-                session
-            )
-            if self.llm_supervisor:
-                try:
-                    session.llm_supervisor_report = await self.llm_supervisor.evaluate(
-                        session, case=case, memory_before=memory_before
-                    )
-                except Exception as exc:
-                    session.evaluation_errors.append(
-                        f"llm_supervisor:{type(exc).__name__}:{exc}"
-                    )
-            session.longitudinal_report = self.longitudinal.evaluate(
-                session, sessions
-            )
-            baseline_next = self._baseline_next_plan(
-                case, session, session_index + 1
-            )
-            session.next_session_plan = self.plan_builder.build(
-                session.plan,
-                baseline_next,
-                session.supervisor_report,
-                session.longitudinal_report,
-            )
-            memory = self.consolidator.consolidate(
-                memory, session, next_index=session_index + 1
-            )
-            trajectory = Trajectory(
-                trajectory_id=f"traj-{uuid.uuid4().hex[:12]}",
+            self.store.finish_run(run_id, status=status)
+            notify(f"运行 {run_id} 已结束；状态={status}")
+            return RunResult(
                 run_id=run_id,
                 case_id=case_id,
-                session_index=session_index,
-                model_config_snapshot={
-                    "provider": self.gateway.provider_name,
-                    "seed": seed,
-                    "temperature_client": self.config.temperature_client,
-                    "temperature_counselor": self.config.temperature_counselor,
-                    "client_pipeline": (
-                        "patientact_v1"
-                        if self.config.patientact_enabled
-                        else "direct_generation_v1"
-                    ),
-                    "trace_schema_version": 2,
-                },
-                memory_before=memory_before,
-                plan=plan,
-                session=session,
-                reward=report.overall_score,
-                safety_passed=all(
-                    metric.score >= 7
-                    for metric in report.metrics
-                    if metric.name in {"ethics_and_safety", "hidden_information_leakage"}
-                ),
+                therapy=selected_therapy,
+                seed=seed,
+                sessions=sessions,
+                final_memory=memory,
             )
-            self.store.save_session(run_id, session, memory, trajectory)
-            self._append_jsonl(trajectory)
-            sessions.append(session)
-            if (
-                session.end_reason == "imminent_risk"
-                or session.longitudinal_report.stage_action == "close"
-            ):
-                break
-        status = (
-            "safety_hold"
-            if sessions and sessions[-1].end_reason == "imminent_risk"
-            else "completed"
-        )
-        self.store.finish_run(run_id, status=status)
-        return RunResult(
-            run_id=run_id,
-            case_id=case_id,
-            therapy=selected_therapy,
-            seed=seed,
-            sessions=sessions,
-            final_memory=memory,
-        )
+        except BaseException:
+            self.store.finish_run(run_id, status="failed")
+            notify(f"运行 {run_id} 失败；状态已记录为 failed")
+            raise
 
     async def _run_session(
         self, case: CounselingCase, plan: SessionPlan, memory: SessionMemory, state

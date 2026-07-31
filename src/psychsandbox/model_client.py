@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import uuid
 from abc import ABC, abstractmethod
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
@@ -21,6 +25,8 @@ from .domain import (
     RiskLevel,
     TrustChange,
 )
+
+ECNU_JSON_SCHEMA_MODELS = {"ecnu-plus", "ecnu-turbo"}
 
 
 class ModelGateway(ABC):
@@ -187,7 +193,7 @@ class MockGateway(ModelGateway):
 class OpenAICompatibleGateway(ModelGateway):
     provider_name = "openai_compatible"
 
-    def __init__(self) -> None:
+    def __init__(self, diagnostic_dir: Path | None = None) -> None:
         try:
             from openai import AsyncOpenAI
         except ImportError as exc:
@@ -195,9 +201,10 @@ class OpenAICompatibleGateway(ModelGateway):
         api_key = os.getenv("MODEL_API_KEY")
         if not api_key:
             raise RuntimeError("MODEL_API_KEY is required for API mode")
+        base_url = os.getenv("MODEL_BASE_URL") or None
         self.client = AsyncOpenAI(
             api_key=api_key,
-            base_url=os.getenv("MODEL_BASE_URL") or None,
+            base_url=base_url,
             timeout=float(os.getenv("MODEL_TIMEOUT_SECONDS", "90")),
         )
         counselor = os.getenv("COUNSELOR_MODEL", "")
@@ -209,19 +216,47 @@ class OpenAICompatibleGateway(ModelGateway):
         }
         if not self.models["client"] or not counselor:
             raise RuntimeError("CLIENT_MODEL and COUNSELOR_MODEL are required")
+        structured_mode = os.getenv("MODEL_STRUCTURED_OUTPUT", "auto").strip().lower()
+        if structured_mode not in {"auto", "json_schema", "off"}:
+            raise RuntimeError(
+                "MODEL_STRUCTURED_OUTPUT must be auto, json_schema, or off"
+            )
+        self.json_schema_roles = _structured_output_roles(
+            mode=structured_mode,
+            base_url=base_url,
+            models=self.models,
+        )
+        self.max_tokens = int(os.getenv("MODEL_MAX_TOKENS", "4096"))
+        self.diagnostic_dir = Path(diagnostic_dir) if diagnostic_dir else None
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8), reraise=True)
     async def _complete_text(
-        self, *, role: str, system_prompt: str, user_prompt: str, temperature: float
+        self, *, role: str, system_prompt: str, user_prompt: str, temperature: float,
+        output_schema: type[BaseModel],
     ) -> str:
-        result = await self.client.chat.completions.create(
-            model=self.models[role],
-            temperature=temperature,
-            messages=[
+        request: dict[str, Any] = {
+            "model": self.models[role],
+            "temperature": temperature,
+            "max_tokens": self.max_tokens,
+            "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-        )
+        }
+        if role in self.json_schema_roles:
+            schema_name = re.sub(r"[^a-zA-Z0-9_-]", "_", output_schema.__name__)
+            request.update(
+                {
+                    "response_format": {
+                        "type": "json_schema",
+                        "json_schema": {
+                            "name": schema_name,
+                            "schema": output_schema.model_json_schema(),
+                        },
+                    },
+                }
+            )
+        result = await self.client.chat.completions.create(**request)
         return result.choices[0].message.content or ""
 
     async def complete_structured(
@@ -231,23 +266,62 @@ class OpenAICompatibleGateway(ModelGateway):
         payload = dict(input_payload)
         payload["output_schema"] = output_schema.model_json_schema()
         error = ""
-        for _ in range(2):
+        text = ""
+        for attempt in range(2):
             if error:
                 payload["repair_instruction"] = (
-                    f"上次输出校验失败：{error}。只返回一个符合 schema 的 JSON 对象。"
+                    "上次输出未通过 JSON 解析或 schema 校验。请根据错误修复上次输出，"
+                    "只返回一个符合 output_schema 的 JSON 对象，不要添加 Markdown 或解释。"
                 )
+                payload["validation_error"] = error
+                payload["invalid_previous_output"] = text[-12000:]
             text = await self._complete_text(
                 role=role,
                 system_prompt=system_prompt,
                 user_prompt=json.dumps(payload, ensure_ascii=False),
                 temperature=temperature,
+                output_schema=output_schema,
             )
             try:
                 return output_schema.model_validate(json.loads(_strip_fence(text)))
             except Exception as exc:
                 error = str(exc)
+                self._write_invalid_output(
+                    role=role,
+                    output_schema=output_schema,
+                    attempt=attempt + 1,
+                    error=error,
+                    text=text,
+                )
         raise ValueError(
             f"{self.provider_name}/{role} failed {output_schema.__name__}: {error}"
+        )
+
+    def _write_invalid_output(
+        self, *, role: str, output_schema: type[BaseModel], attempt: int,
+        error: str, text: str,
+    ) -> None:
+        if self.diagnostic_dir is None:
+            return
+        self.diagnostic_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
+        path = self.diagnostic_dir / (
+            f"{timestamp}-{role}-{output_schema.__name__}-"
+            f"attempt-{attempt}-{uuid.uuid4().hex[:8]}.json"
+        )
+        path.write_text(
+            json.dumps(
+                {
+                    "role": role,
+                    "output_schema": output_schema.__name__,
+                    "attempt": attempt,
+                    "error": error,
+                    "raw_response": text,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
         )
 
 
@@ -289,15 +363,32 @@ class LocalTransformersGateway(ModelGateway):
 
 
 def create_gateway(
-    provider: str, *, local_model_name: str = "", local_device: str = "auto"
+    provider: str, *, local_model_name: str = "", local_device: str = "auto",
+    diagnostic_dir: Path | None = None,
 ) -> ModelGateway:
     if provider == "mock":
         return MockGateway()
     if provider == "api":
-        return OpenAICompatibleGateway()
+        return OpenAICompatibleGateway(diagnostic_dir=diagnostic_dir)
     if provider == "local":
         return LocalTransformersGateway(local_model_name, local_device)
     raise ValueError(f"Unsupported model provider: {provider}")
+
+
+def _structured_output_roles(
+    *, mode: str, base_url: str | None, models: dict[str, str],
+) -> set[str]:
+    if mode == "off":
+        return set()
+    if mode == "json_schema":
+        return set(models)
+    if not base_url or "chat.ecnu.edu.cn" not in base_url.lower():
+        return set()
+    return {
+        role
+        for role, model in models.items()
+        if model.strip().lower() in ECNU_JSON_SCHEMA_MODELS
+    }
 
 
 def _strip_fence(text: str) -> str:

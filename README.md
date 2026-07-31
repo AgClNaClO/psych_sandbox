@@ -44,7 +44,8 @@ psych-sandbox visualize --run run-xxxxxxxxxxxx
 - 将督导反馈写入下一次会谈计划，形成“会谈—评估—反馈—调整”的可审计闭环。
 - 新增单文件 HTML 可视化报告，集中呈现运行流程、状态曲线、督导指标、
   信息披露、安全检查和完整对话。
-- 自动化测试扩展至 79 项，覆盖多会话连续性、SQLite 恢复、信息隔离与安全分流。
+- 自动化测试扩展至 87 项，覆盖多会话连续性、SQLite 恢复、信息隔离、安全分流、
+  API 结构化输出、失败状态持久化与 CLI 进度反馈。
 
 ## 1. 项目要解决什么问题
 
@@ -95,7 +96,7 @@ SQLite、JSONL 轨迹和后续经验池
 - 每次 CLI 仿真自动生成单文件 HTML 报告，展示流程、状态曲线、督导指标、
   披露/安全过程和完整对话。
 - 支持 Mock、OpenAI 兼容 API 和本地 Transformers 三种模型后端。
-- 79 项自动化测试全部通过，无跳过测试。
+- 87 项自动化测试全部通过，无跳过测试。
 - 已完成 10 个案例、30 个 session 的 Mock 基线实验。
 
 Mock 基线平均规则督导分为 7.889，未检测到提前泄漏和规则级安全违规。
@@ -387,11 +388,30 @@ set MODEL_BASE_URL=https://你的兼容接口地址/v1
 set CLIENT_MODEL=来访者模型名称
 set COUNSELOR_MODEL=咨询师模型名称
 set SUPERVISOR_MODEL=督导师模型名称
-set SUMMARY_MODEL=摘要模型名称
 set MODEL_TIMEOUT_SECONDS=90
+set MODEL_STRUCTURED_OUTPUT=auto
+set MODEL_MAX_TOKENS=4096
 ```
 
 不要把真实密钥写入 README、代码、测试或提交到 Git。
+
+`SUPERVISOR_MODEL` 未设置时会回退到 `COUNSELOR_MODEL`。当前 session 摘要由确定性规则生成，
+不调用 LLM；`.env.example` 中的 `SUMMARY_MODEL` 仅为未来扩展保留。
+
+`MODEL_STRUCTURED_OUTPUT=auto` 会按角色和模型判断：ChatECNU 的 `ecnu-plus` 与
+`ecnu-turbo` 自动启用原生 `response_format=json_schema`；`ecnu-max` 及其他兼容接口
+保持提示词 JSON 模式。已确认供应商支持 JSON Schema 时可显式设为 `json_schema`，
+不支持时设为 `off`。ChatECNU 推荐配置示例：
+
+```bat
+set MODEL_BASE_URL=https://chat.ecnu.edu.cn/open/api/v1
+set CLIENT_MODEL=ecnu-plus
+set COUNSELOR_MODEL=ecnu-plus
+set SUPERVISOR_MODEL=ecnu-plus
+set MODEL_STRUCTURED_OUTPUT=auto
+set MODEL_TIMEOUT_SECONDS=180
+set MODEL_MAX_TOKENS=4096
+```
 
 运行真实 API：
 
@@ -404,9 +424,11 @@ psych-sandbox simulate ^
   --seed 42
 ```
 
-API 输出必须通过 Pydantic 结构校验。非法 JSON 会触发修复重试；连续失败后会返回包含
-模型角色、输出类型和校验错误的诊断信息。LLM 督导失败不会破坏已经完成的主会话，
-错误会单独写入 `evaluation_errors`。
+API 输出必须通过 Pydantic 结构校验。非法 JSON 会把上一次无效响应和校验错误交给模型
+修复，并把本地诊断文件写入 `runs\diagnostics`。该目录可能包含案例内容，已被 Git 忽略，
+不应对外发送。连续失败后会返回包含模型角色、输出类型和校验错误的异常。运行过程中会
+逐 session 输出开始和完成进度；未捕获异常会将数据库运行状态标记为 `failed`。LLM 督导
+失败不会破坏已经完成的主会话，错误会单独写入 `evaluation_errors`。
 
 若希望关闭 CMD 后环境变量仍保留，可使用 `setx`，但新值只会对之后新开的 CMD 生效：
 
@@ -426,8 +448,20 @@ setx COUNSELOR_MODEL "咨询师模型名称"
 python -m pip install -e ".[local]"
 ```
 
-当前机器为 8GB 显存时，建议从 3B/4B 指令模型的 4-bit 量化推理开始。运行前需要在配置或
-调用代码中填写 `local_model_name`。本地 7B/14B 训练不属于第一阶段验收内容。
+当前机器为 8GB 显存时，建议从 3B/4B 指令模型的 4-bit 量化推理开始。本地运行示例：
+
+```bat
+psych-sandbox simulate ^
+  --case psycheval-cbt-001 ^
+  --sessions 1 ^
+  --provider local ^
+  --local-model 模型仓库名或本地路径 ^
+  --local-device auto
+```
+
+Python API 的 `default_config()` 会读取 `configs\runtime.yaml` 中的路径、温度和
+PATIENTACT 参数，以及 `configs\models.yaml` 中的本地模型配置。CLI 以命令行参数为准。
+本地 7B/14B 训练不属于第一阶段验收内容。
 
 ## 12. 运行自动化测试
 
@@ -438,7 +472,7 @@ pytest -q
 当前预期结果：
 
 ```text
-79 passed
+87 passed
 ```
 
 测试覆盖：
@@ -452,13 +486,17 @@ pytest -q
 - 四级风险和输出安全检查。
 - 层级技能父子关系、过滤和确定性检索。
 - Mock 结构化输出。
+- API JSON Schema 请求、非法 JSON 修复重试与本地诊断记录。
+- ECNU `auto` 模式按角色区分 `ecnu-plus`/`ecnu-turbo` 与 `ecnu-max`。
 - 连续 3-session 运行。
+- CLI session 进度反馈和异常运行 `failed` 状态持久化。
 - 跨 session 状态连续性。
 - SQLite 恢复和 JSONL 输出。
 - 六维督导报告。
 - 结构化 5Ps、双流派适配、纵向报告和反馈计划。
 - HTML 过程/结果可视化。
 - 技能审核、晋升和回滚约束。
+- YAML 默认配置读取与本地模型 CLI 参数。
 
 ## 13. 数据和存储边界
 

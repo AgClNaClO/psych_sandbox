@@ -50,14 +50,35 @@ def load_runtime(root: Path = PROJECT_ROOT) -> dict[str, Any]:
     return load_yaml(root / "configs" / "runtime.yaml")
 
 
+def load_models(root: Path = PROJECT_ROOT) -> dict[str, Any]:
+    return load_yaml(root / "configs" / "models.yaml")
+
+
+def _project_path(root: Path, value: str | Path | None) -> Path | None:
+    if not value:
+        return None
+    path = Path(value)
+    return path if path.is_absolute() else root / path
+
+
 def default_config(root: Path = PROJECT_ROOT) -> SandboxConfig:
     raw = load_runtime(root)
+    model_config = load_models(root)
     patientact = raw.get("patientact", {})
+    temperatures = raw.get("temperature", {})
+    local = model_config.get("local", {})
     return SandboxConfig(
         project_root=root,
         provider=raw.get("provider", "mock"),
         seed=raw.get("seed", 42),
         max_turns_per_session=raw.get("max_turns_per_session", 8),
+        database_path=_project_path(root, raw.get("database_path")),
+        trace_dir=_project_path(root, raw.get("trace_dir")),
+        local_model_name=local.get("model_name", ""),
+        local_device=local.get("device", "auto"),
+        temperature_client=temperatures.get("client", 0.8),
+        temperature_counselor=temperatures.get("counselor", 0.4),
+        temperature_supervisor=temperatures.get("supervisor", 0.1),
         patientact_enabled=patientact.get("enabled", True),
         client_pullback_after=patientact.get("pullback_after", 2),
         disclosure_leak_retry_limit=patientact.get(
