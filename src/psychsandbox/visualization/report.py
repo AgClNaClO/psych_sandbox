@@ -17,9 +17,38 @@ PROCESS_STEPS = (
     ("督导与计划", "双侧评分 → 纵向趋势 → 下一计划"),
 )
 
+ICON_BRAIN = (
+    '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+    'stroke-width="2"><path d="M12 2a3 3 0 0 0-3 3v1H6a3 3 0 0 0-3 3v2a3 3 0 0 0 1 2.17V15a3 3 0 0 0 3 3h1v1a3 3 0 0 0 6 0v-1h1'
+    'a3 3 0 0 0 3-3v-1.83A3 3 0 0 0 19 11V9a3 3 0 0 0-3-3h-1V5a3 3 0 0 0-3-3z"/>'
+    '<circle cx="9" cy="10" r="1.5"/><circle cx="15" cy="10" r="1.5"/>'
+    '<path d="M9 14c.83.67 1.92 1 3 1s2.17-.33 3-1"/></svg>'
+)
+ICON_CHAT = (
+    '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+    'stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>'
+)
+ICON_USER = (
+    '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+    'stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>'
+    '<circle cx="12" cy="7" r="4"/></svg>'
+)
+ICON_STETHOSCOPE = (
+    '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+    'stroke-width="2"><path d="M4 8a6 6 0 0 1 12 0v6a3 3 0 0 0 6 0v-2"/>'
+    '<path d="M22 12v2a4 4 0 0 1-8 0v-6"/><circle cx="6" cy="14" r="2"/>'
+    '<line x1="6" y1="16" x2="6" y2="20"/><line x1="4" y1="20" x2="8" y2="20"/></svg>'
+)
+
 
 def generate_run_report(result: RunResult, output: Path) -> Path:
-    """Create a self-contained HTML report for offline review and replay."""
+    """Create a self-contained HTML report for offline review and replay.
+
+    Features:
+    - Thinking process panel (counselor decision) separate from dialogue
+    - Beautiful chat bubbles for conversation
+    - Session-level thinking summary
+    """
 
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -60,10 +89,10 @@ def generate_run_report(result: RunResult, output: Path) -> Path:
     <div class="disclaimer">仅用于教学与研究，不代表临床疗效</div>
   </header>
   <section class="summary-grid">
-    {_summary_card("会谈数", str(len(result.sessions)), "sessions")}
-    {_summary_card("平均督导分", f"{mean_score:.2f}", "/ 10")}
-    {_summary_card("高风险事件", str(safety_events), "需人工复核")}
-    {_summary_card("暴露泄漏", str(leaks), "越低越好")}
+    {_summary_card("会谈数", str(len(result.sessions)), "sessions", "📋")}
+    {_summary_card("平均督导分", f"{mean_score:.2f}", "/ 10", "📊")}
+    {_summary_card("高风险事件", str(safety_events), "需人工复核", "⚠️")}
+    {_summary_card("暴露泄漏", str(leaks), "越低越好", "🔒")}
   </section>
   <section class="panel">
     <h2>运行过程</h2>
@@ -85,24 +114,26 @@ def generate_run_report(result: RunResult, output: Path) -> Path:
     return output
 
 
-def _summary_card(label: str, value: str, note: str) -> str:
+def _summary_card(label: str, value: str, note: str, icon: str) -> str:
     return (
         '<div class="summary-card">'
+        f'<span class="card-icon">{icon}</span>'
         f"<span>{escape(label)}</span><strong>{escape(value)}</strong>"
         f"<small>{escape(note)}</small></div>"
     )
 
 
 def _process_flow() -> str:
-    return "".join(
-        (
+    parts = []
+    for index, (title, description) in enumerate(PROCESS_STEPS, start=1):
+        parts.append(
             '<div class="process-step">'
-            f"<strong>{index}. {escape(title)}</strong>"
+            f"<strong>{ICON_BRAIN}{index}. {escape(title)}</strong>"
             f"<span>{escape(description)}</span></div>"
         )
-        + ('<div class="arrow">→</div>' if index < len(PROCESS_STEPS) else "")
-        for index, (title, description) in enumerate(PROCESS_STEPS, start=1)
-    )
+        if index < len(PROCESS_STEPS):
+            parts.append('<div class="arrow">→</div>')
+    return "".join(parts)
 
 
 def _session_section(session: SessionRecord) -> str:
@@ -116,13 +147,16 @@ def _session_section(session: SessionRecord) -> str:
         if report and report.feedback
         else "<li>本次规则督导未生成低分修复项</li>"
     )
+    # Build thinking summary from turn records
+    thinking_cards = _session_thinking_summary(session)
+
     return f"""
 <article class="session">
   <div class="session-head">
     <div>
       <span class="badge">Session {session.session_index}</span>
       <h3>{escape(session.plan.stage.value)}</h3>
-      <p>{escape('；'.join(session.plan.objectives[:3]))}</p>
+      <p>{escape("；".join(session.plan.objectives[:3]))}</p>
     </div>
     <div class="score">{score:.2f}<small>/10</small></div>
   </div>
@@ -140,15 +174,84 @@ def _session_section(session: SessionRecord) -> str:
       <ul>{feedback}</ul>
     </div>
   </div>
-  <details>
-    <summary>查看逐轮过程（{len(session.turn_records)} turns）</summary>
-    {_turn_timeline(session)}
+  <details open>
+    <summary>{ICON_BRAIN} 咨询师内部思考过程（{len(session.turn_records)} turns）</summary>
+    <div class="thinking-grid">{thinking_cards}</div>
   </details>
-  <details>
-    <summary>查看对话</summary>
+  <details open>
+    <summary>{ICON_CHAT} 对话记录</summary>
     <div class="dialogue">{_dialogue(session)}</div>
   </details>
+  <details>
+    <summary>查看逐轮技术细节（{len(session.turn_records)} turns）</summary>
+    {_turn_timeline(session)}
+  </details>
 </article>"""
+
+
+def _session_thinking_summary(session: SessionRecord) -> str:
+    """Generate a flow-chart style thinking process overview for each turn."""
+    cards = []
+    for record in session.turn_records:
+        decision = record.get("decision", {})
+        turn = record.get("turn_index", "?")
+        assessment = decision.get("assessment", "")
+        strategy = decision.get("strategy", "")
+        state_obs = decision.get("state_observation", "")
+        skills = decision.get("selected_atomic_skill_ids", [])
+        risk = decision.get("risk_level", "low")
+        progress = decision.get("goal_progress", 0)
+
+        risk_class = ""
+        risk_label = ""
+        if risk == "high":
+            risk_class = "risk-high"
+            risk_label = "🔴 高风险"
+        elif risk == "medium":
+            risk_class = "risk-medium"
+            risk_label = "🟡 中风险"
+        elif risk == "imminent":
+            risk_class = "risk-imminent"
+            risk_label = "🚨 紧急"
+        else:
+            risk_class = "risk-low"
+            risk_label = "🟢 低风险"
+
+        cards.append(
+            '<div class="thinking-card">'
+            f'<div class="thinking-header">'
+            f'<span class="thinking-badge">Turn {escape(str(turn))}</span>'
+            f'<span class="risk-tag {risk_class}">{risk_label}</span>'
+            f'<span class="progress-tag">目标进度 {progress:.0%}</span>'
+            f'</div>'
+            f'<div class="thinking-body">'
+            f'<div class="thinking-item">'
+            f'<strong>📋 评估</strong>'
+            f'<p>{escape(assessment)}</p>'
+            f'</div>'
+            f'<div class="thinking-item">'
+            f'<strong>🔍 状态观察</strong>'
+            f'<p>{escape(state_obs)}</p>'
+            f'</div>'
+            f'<div class="thinking-item">'
+            f'<strong>🎯 策略</strong>'
+            f'<p>{escape(strategy)}</p>'
+            f'</div>'
+            + (
+                f'<div class="thinking-item skills">'
+                f'<strong>🛠 使用技能</strong>'
+                f'<div class="skill-tags">'
+                + "".join(
+                    f'<span class="skill-tag">{escape(s)}</span>'
+                    for s in skills
+                )
+                + "</div></div>"
+                if skills
+                else ""
+            )
+            + "</div></div>"
+        )
+    return "".join(cards) if cards else '<p class="muted">暂无思考记录</p>'
 
 
 def _delta_table(session: SessionRecord) -> str:
@@ -213,62 +316,171 @@ def _number_delta(before: dict[str, Any], after: dict[str, Any], key: str) -> st
 
 
 def _dialogue(session: SessionRecord) -> str:
-    return "".join(
-        '<div class="message '
-        + escape(message.role)
-        + '"><span>'
-        + ("来访者" if message.role == "client" else "咨询师")
-        + "</span><p>"
-        + escape(message.content)
-        + "</p></div>"
-        for message in session.messages
-        if message.role in {"client", "counselor"}
-    )
+    """Render conversation with styled chat bubbles, counselor vs client."""
+    parts = []
+    for message in session.messages:
+        if message.role not in {"client", "counselor"}:
+            continue
+        is_client = message.role == "client"
+        role_label = "来访者" if is_client else "咨询师"
+        avatar = ICON_USER if is_client else ICON_STETHOSCOPE
+        css_class = "msg-client" if is_client else "msg-counselor"
+        parts.append(
+            f'<div class="{css_class}">'
+            f'<div class="msg-avatar">{avatar}</div>'
+            f'<div class="msg-bubble">'
+            f'<div class="msg-role">{escape(role_label)}</div>'
+            f'<div class="msg-text">{escape(message.content)}</div>'
+            f"</div></div>"
+        )
+    return "".join(parts)
 
 
 def _styles() -> str:
     return """
 :root{color-scheme:light;--ink:#172033;--muted:#64748b;--line:#dce3ed;
---panel:#fff;--bg:#f4f7fb;--blue:#3157d5;--green:#1b8f5a;--red:#c94343}
+--panel:#fff;--bg:#f4f7fb;--blue:#3157d5;--green:#1b8f5a;--red:#c94343;
+--amber:#d97706;--purple:#7c3aed;--pink:#db2777;--cyan:#0891b2;
+--surface2:#f1f5f9;--surface3:#e8efff;--shadow:0 7px 24px #1720330d;--radius:16px}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);
 font:14px/1.6 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
-main{max-width:1180px;margin:auto;padding:32px 22px 72px}.hero{display:flex;
-justify-content:space-between;align-items:flex-end;padding:30px;border-radius:20px;
-background:linear-gradient(135deg,#172554,#3157d5);color:#fff}.hero h1{margin:4px 0;
-font-size:32px}.hero p{margin:0}.eyebrow{letter-spacing:.12em;opacity:.8}
-.disclaimer{padding:8px 12px;border:1px solid #ffffff55;border-radius:99px}
-.summary-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin:18px 0}
+main{max-width:1280px;margin:auto;padding:32px 22px 72px}
+
+/* ---- Hero ---- */
+.hero{display:flex;justify-content:space-between;align-items:flex-end;padding:30px 36px;
+border-radius:20px;background:linear-gradient(135deg,#0f172a,#1e3a8a,#3157d5);
+color:#fff;position:relative;overflow:hidden}
+.hero::before{content:'';position:absolute;top:-50%;right:-20%;width:400px;height:400px;
+background:radial-gradient(circle,rgba(255,255,255,.08) 0%,transparent 70%);border-radius:50%}
+.hero::after{content:'';position:absolute;bottom:-30%;left:-10%;width:300px;height:300px;
+background:radial-gradient(circle,rgba(255,255,255,.06) 0%,transparent 70%);border-radius:50%}
+.hero h1{margin:4px 0;font-size:32px;position:relative;z-index:1}
+.hero p{margin:0;position:relative;z-index:1}
+.eyebrow{letter-spacing:.12em;opacity:.8;font-size:12px;text-transform:uppercase}
+.disclaimer{padding:8px 16px;border:1px solid #ffffff55;border-radius:99px;
+backdrop-filter:blur(4px);position:relative;z-index:1}
+
+/* ---- Summary ---- */
+.summary-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin:20px 0}
 .summary-card,.panel,.session{background:var(--panel);border:1px solid var(--line);
-border-radius:16px;box-shadow:0 7px 24px #1720330d}.summary-card{padding:18px}
+border-radius:var(--radius);box-shadow:var(--shadow);transition:transform .2s,box-shadow .2s}
+.summary-card:hover{transform:translateY(-2px);box-shadow:0 12px 40px #17203315}
+.summary-card{padding:20px;position:relative;overflow:hidden}
+.summary-card::after{content:'';position:absolute;top:0;left:0;width:4px;height:100%;
+background:var(--blue);border-radius:4px 0 0 4px}
+.summary-card .card-icon{font-size:28px;display:block;margin-bottom:4px}
 .summary-card span,.summary-card small{display:block;color:var(--muted)}
-.summary-card strong{display:block;font-size:28px;margin:4px 0}.panel{padding:22px;
-margin:18px 0}h2{margin:28px 0 12px}h3,h4{margin:6px 0}.process{display:flex;
-align-items:stretch;overflow:auto;padding:4px}.process-step{min-width:145px;flex:1;
-padding:13px;background:#eef2ff;border-radius:10px}.process-step span{display:block;
-color:var(--muted);font-size:12px}.arrow{align-self:center;padding:8px;color:var(--blue);
-font-size:20px}.chart svg{width:100%;height:auto}.axis,.legend{font-size:11px;fill:#64748b}
-.muted{color:var(--muted)}.session{padding:22px;margin:16px 0}.session-head{display:flex;
-justify-content:space-between;gap:16px;border-bottom:1px solid var(--line);padding-bottom:14px}
-.badge{display:inline-block;background:#e0e7ff;color:#3730a3;border-radius:99px;
-padding:3px 9px;font-weight:700}.score{font-size:34px;font-weight:800;color:var(--blue)}
-.score small{font-size:14px;color:var(--muted)}.session-grid{display:grid;
-grid-template-columns:1.35fr 1fr;gap:28px;padding:18px 0}.metric{margin:10px 0}
-.metric-label{display:flex;justify-content:space-between}.bar-track{height:8px;
-background:#e8edf4;border-radius:99px;overflow:hidden}.bar{height:100%;background:var(--blue)}
-.bar.good{background:var(--green)}.bar.warn{background:#d97706}.bar.bad{background:var(--red)}
-.metric-reason{color:var(--muted);font-size:12px}.trend{display:flex;
-justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--line)}
-.delta{width:100%;border-collapse:collapse;margin:8px 0}.delta td{padding:5px;
-border-bottom:1px solid var(--line)}.delta td:last-child{text-align:right;font-variant-numeric:tabular-nums}
-.positive{color:var(--green)}.negative{color:var(--red)}details{border-top:1px solid var(--line);
-padding:12px 0}summary{cursor:pointer;font-weight:700}.timeline{display:grid;
-grid-template-columns:repeat(2,1fr);gap:10px;margin-top:12px}.turn-card{padding:12px;
-border-left:4px solid var(--blue);background:#f8fafc;border-radius:8px}.turn-card p{margin:3px 0}
-.turn-index{font-weight:800;color:var(--blue)}.dialogue{padding-top:10px}.message{max-width:82%;
-padding:10px 13px;border-radius:12px;margin:8px 0}.message span{font-size:11px;
-color:var(--muted)}.message p{margin:2px 0}.message.client{background:#f1f5f9}
-.message.counselor{background:#e8efff;margin-left:auto}
-@media(max-width:800px){.summary-grid{grid-template-columns:repeat(2,1fr)}
-.session-grid,.timeline{grid-template-columns:1fr}.process{display:grid;gap:8px}
-.arrow{display:none}.hero{display:block}.disclaimer{margin-top:12px;display:inline-block}}
+.summary-card strong{display:block;font-size:30px;margin:4px 0;font-weight:800}
+
+/* ---- Panel ---- */
+.panel{padding:24px;margin:20px 0}
+h2{margin:32px 0 14px}h3,h4{margin:6px 0}
+
+/* ---- Process Flow ---- */
+.process{display:flex;align-items:stretch;overflow:auto;padding:4px;gap:0}
+.process-step{min-width:155px;flex:1;padding:16px;background:linear-gradient(135deg,#eef2ff,#e0e7ff);
+border-radius:12px;border:1px solid #c7d2fe;transition:transform .2s}
+.process-step:hover{transform:translateY(-2px)}
+.process-step strong{display:flex;align-items:center;gap:6px;font-size:13px;color:#3730a3}
+.process-step strong svg{flex-shrink:0;color:#6366f1}
+.process-step span{display:block;color:var(--muted);font-size:12px;margin-top:4px}
+.arrow{align-self:center;padding:0 10px;color:var(--blue);font-size:24px;font-weight:300}
+.chart svg{width:100%;height:auto}.axis,.legend{font-size:11px;fill:#64748b}
+.muted{color:var(--muted)}
+
+/* ---- Session ---- */
+.session{padding:24px;margin:20px 0}
+.session-head{display:flex;justify-content:space-between;gap:16px;
+border-bottom:1px solid var(--line);padding-bottom:16px}
+.badge{display:inline-block;background:linear-gradient(135deg,#e0e7ff,#c7d2fe);
+color:#3730a3;border-radius:99px;padding:4px 12px;font-weight:700;font-size:13px}
+.score{font-size:38px;font-weight:800;color:var(--blue)}
+.score small{font-size:14px;color:var(--muted)}
+.session-grid{display:grid;grid-template-columns:1.35fr 1fr;gap:28px;padding:18px 0}
+
+/* ---- Metrics ---- */
+.metric{margin:12px 0}
+.metric-label{display:flex;justify-content:space-between;margin-bottom:4px}
+.metric-label strong{font-variant-numeric:tabular-nums}
+.bar-track{height:10px;background:#e8edf4;border-radius:99px;overflow:hidden}
+.bar{height:100%;background:var(--blue);border-radius:99px;transition:width .6s ease}
+.bar.good{background:linear-gradient(90deg,#16a34a,#22c55e)}
+.bar.warn{background:linear-gradient(90deg,#d97706,#f59e0b)}
+.bar.bad{background:linear-gradient(90deg,#c94343,#ef4444)}
+.metric-reason{color:var(--muted);font-size:12px;margin-top:4px}
+
+/* ---- Trends ---- */
+.trend{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--line)}
+.delta{width:100%;border-collapse:collapse;margin:8px 0}
+.delta td{padding:6px;border-bottom:1px solid var(--line)}
+.delta td:last-child{text-align:right;font-variant-numeric:tabular-nums;font-weight:600}
+.positive{color:var(--green)}.negative{color:var(--red)}
+
+/* ---- Details (collapsible) ---- */
+details{border-top:1px solid var(--line);padding:14px 0}
+details summary{cursor:pointer;font-weight:700;font-size:15px;display:flex;align-items:center;gap:8px;
+padding:4px 0;user-select:none;transition:color .2s}
+details summary:hover{color:var(--blue)}
+details summary svg{flex-shrink:0}
+
+/* ---- Thinking Process Grid ---- */
+.thinking-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px;
+margin-top:14px}
+.thinking-card{background:linear-gradient(135deg,#faf5ff,#ede9fe);border:1px solid #ddd6fe;
+border-radius:14px;overflow:hidden;transition:transform .2s,box-shadow .2s}
+.thinking-card:hover{transform:translateY(-2px);box-shadow:0 8px 30px #7c3aed15}
+.thinking-header{display:flex;align-items:center;gap:8px;padding:10px 14px;
+background:linear-gradient(90deg,#ede9fe,#ddd6fe);border-bottom:1px solid #c4b5fd}
+.thinking-badge{font-weight:800;font-size:13px;color:#5b21b6}
+.risk-tag{font-size:11px;padding:2px 8px;border-radius:99px;font-weight:600}
+.risk-low{background:#dcfce7;color:#166534}
+.risk-medium{background:#fef9c3;color:#854d0e}
+.risk-high{background:#fee2e2;color:#991b1b}
+.risk-imminent{background:#fecaca;color:#7f1d1d;animation:pulse 1.5s infinite}
+.progress-tag{font-size:11px;padding:2px 8px;background:#e0f2fe;color:#0c4a6e;
+border-radius:99px;font-weight:600;margin-left:auto}
+.thinking-body{padding:12px 14px;display:flex;flex-direction:column;gap:10px}
+.thinking-item strong{display:block;font-size:12px;color:var(--muted);margin-bottom:2px}
+.thinking-item p{margin:0;font-size:13px;line-height:1.5}
+.thinking-item.skills .skill-tags{display:flex;flex-wrap:wrap;gap:4px;margin-top:2px}
+.skill-tag{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;
+background:#dbeafe;color:#1e40af;font-weight:600}
+
+/* ---- Dialogue ---- */
+.dialogue{padding:16px 0;display:flex;flex-direction:column;gap:16px}
+.msg-client,.msg-counselor{display:flex;gap:10px;align-items:flex-start;max-width:88%}
+.msg-counselor{align-self:flex-end;flex-direction:row-reverse}
+.msg-avatar{width:36px;height:36px;border-radius:50%;display:flex;align-items:center;
+justify-content:center;flex-shrink:0}
+.msg-client .msg-avatar{background:linear-gradient(135deg,#e0e7ff,#c7d2fe);color:#3730a3}
+.msg-counselor .msg-avatar{background:linear-gradient(135deg,#dcfce7,#bbf7d0);color:#166534}
+.msg-bubble{padding:12px 16px;border-radius:18px;position:relative}
+.msg-client .msg-bubble{background:#f1f5f9;border-bottom-left-radius:6px}
+.msg-counselor .msg-bubble{background:#e8efff;border-bottom-right-radius:6px;text-align:right}
+.msg-role{font-size:11px;color:var(--muted);margin-bottom:4px;font-weight:600}
+.msg-text{font-size:14px;line-height:1.6;white-space:pre-wrap;word-break:break-word}
+
+/* ---- Turn Timeline ---- */
+.timeline{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-top:12px}
+.turn-card{padding:12px;border-left:4px solid var(--blue);background:#f8fafc;border-radius:8px}
+.turn-card p{margin:3px 0;font-size:13px}
+.turn-index{font-weight:800;color:var(--blue)}
+
+/* ---- Animations ---- */
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.6}}
+
+/* ---- Responsive ---- */
+@media(max-width:900px){
+  .summary-grid{grid-template-columns:repeat(2,1fr)}
+  .session-grid,.timeline,.thinking-grid{grid-template-columns:1fr}
+  .process{display:grid;gap:8px}.arrow{display:none}
+  .hero{display:block}.disclaimer{margin-top:12px;display:inline-block}
+  .msg-client,.msg-counselor{max-width:96%}
+}
+@media(max-width:600px){
+  .summary-grid{grid-template-columns:1fr}
+  main{padding:16px 10px 48px}
+  .hero{padding:20px 22px}
+  .hero h1{font-size:24px}
+}
 """

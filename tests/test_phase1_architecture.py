@@ -110,7 +110,9 @@ def test_visual_report_contains_process_results_and_turns(root, tmp_path):
     assert "运行过程" in html
     assert "来访者状态趋势" in html
     assert "督导指标" in html
-    assert "逐轮过程" in html
+    assert "咨询师内部思考过程" in html
+    assert "对话记录" in html
+    assert "逐轮技术细节" in html
     assert result.run_id in html
 
 

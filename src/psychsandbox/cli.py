@@ -5,6 +5,8 @@ import asyncio
 import json
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 from .datasets import CaseRepository, convert_psycheval, fetch_psycheval
 from .domain import SandboxConfig
 from .runtime import CounselingSandbox, SQLiteStore
@@ -132,6 +134,8 @@ def _visualize(root: Path, run_id: str, output: Path | None) -> int:
 
 
 def main() -> int:
+    # Auto-load .env from project root so MODEL_API_KEY etc. are available
+    load_dotenv(Path(__file__).resolve().parents[2] / ".env")
     args = build_parser().parse_args()
     root = args.root.resolve()
     if args.command == "data":

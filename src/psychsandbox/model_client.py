@@ -407,25 +407,26 @@ def _mock_counselor_response(
     stage: str,
     turn: int = 0,
 ) -> str:
+    # Natural, colloquial Chinese - like a real counselor speaking
     if stage == "consolidation":
-        return "今天我们梳理了压力、自动想法和应对之间的联系。你愿意尝试的最小行动是什么？"
+        return "今天我们聊了不少。如果只选一件事这周试试，你会选什么？"
     templates = {
-        "empathic_reflection": "听起来你在紧张和疲惫里坚持了很久。最近哪个具体时刻最难受？",
-        "open_question": "谢谢你愿意说出来。你希望我们先从哪一部分开始理解？",
-        "clarification": "当时具体发生了什么？那一刻你脑中最先出现的想法是什么？",
-        "socratic_question": "支持这个想法的证据有哪些？又有没有哪怕一个例外？",
-        "behavioral_suggestion": "我们先不要求一次解决全部问题。你愿意选择一个十分钟内可完成的小行动吗？",
-        "emotion_reflection": "听起来你一边努力维持，一边又越来越难感受到这是不是自己真正想要的。",
-        "experiential_clarification": "当你说到这里时，此刻身体和情绪里最明显的感受是什么？",
-        "meaning_exploration": "在别人的期待与自己的真实感受之间，哪一部分最让你为难？",
-        "choice_support": "如果不急着找标准答案，哪些选择更接近你愿意承担的生活？",
-        "session_summary": "今天我们确认了一个重要模式。哪些理解准确，哪些需要修正？",
+        "empathic_reflection": "嗯，听起来你扛了很久，挺不容易的。能说说最近哪一刻最难受吗？",
+        "open_question": "谢谢你愿意说这些。你觉得我们先从哪聊起比较好？",
+        "clarification": "当时具体是什么样的？你脑子里最先跳出来的想法是什么？",
+        "socratic_question": "你觉得支持这个想法的有哪些事情？有没有哪怕一次不太一样的？",
+        "behavioral_suggestion": "不用一下解决全部。你能不能想一件十分钟就能做的小事，先试试？",
+        "emotion_reflection": "好像你一边撑着，一边又越来越不确定这是不是自己想要的。",
+        "experiential_clarification": "说到这的时候，你现在的感觉是什么？身体上或者情绪上。",
+        "meaning_exploration": "在别人对你的期待和你自己的感受之间，哪部分最让你纠结？",
+        "choice_support": "如果不急着找对的答案，你觉得哪条路更像你愿意走下去的？",
+        "session_summary": "今天我们聊到一个挺重要的地方。你觉得我理解的对不对？有没有漏掉的？",
     }
     if intervention in templates:
         return templates[intervention]
     fallback_responses = [
-        "我们可以慢一点。刚才的内容里，哪一部分最希望先被理解？",
-        "在继续前，我想确认方向是否合适。你更想谈当前感受、具体事件，还是先确定今天的目标？",
-        "我注意到我们可能在重复追问。我们停下来校准一下，什么样的谈法对你更有帮助？",
+        "我们慢一点没关系。刚才说的这些，你希望我先接着哪部分？",
+        "先停一下——你是想继续聊刚才的事，还是换个方向？",
+        "嗯，我感觉我们可能需要换个角度。你觉得现在什么样的回应对你有用？",
     ]
     return fallback_responses[turn % len(fallback_responses)]
