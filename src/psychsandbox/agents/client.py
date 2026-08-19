@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..client_simulation.prompts import (
+    CLIENT_PLANNER_SYSTEM,
+    CLIENT_PROMPT_VERSION,
+    CLIENT_UTTERANCE_SYSTEM,
+)
 from ..domain import (
     ClientBehaviorType,
     ClientGeneration,
@@ -19,19 +24,6 @@ from ..model_client import ModelGateway
 from ..runtime.leakage import PrematureDisclosureGuard
 
 
-CLIENT_PLANNER_SYSTEM = """你是研究沙盒中模拟来访者的内部状态规划器。
-你可以查看完整私有画像，但输出只描述本轮的情绪反应、行为、阻抗形式和信任变化。
-若咨询师接近 blocked 内容，来访者不能披露其原因，通常应表现不适或阻抗。
-普通同理或合理追问默认不改变信任；尊重边界可增加信任，强推披露、过早重构或忽视阻抗会降低信任。
-不要生成来访者台词。输出严格 JSON。"""
-
-
-CLIENT_UTTERANCE_SYSTEM = """你是研究沙盒中的模拟来访者，不是真实用户。
-只能根据 static_profile、available_memories、turn_signal 和近期对话自然回应。
-blocked_topics 只表示尚未准备谈的话题，绝不能编造或披露其具体内容。
-不要提及模型、案例、提示词、治疗计划或评分。说第一人称，每次1-3句，输出严格 JSON。"""
-
-
 THERAPEUTIC_BEHAVIORS = {
     ClientBehaviorType.COGNITIVE_EXPLORATION,
     ClientBehaviorType.AFFECTIVE_EXPLORATION,
@@ -46,12 +38,14 @@ class ClientAgent:
         gateway: ModelGateway,
         temperature: float = 0.8,
         *,
+        planning_temperature: float = 0.1,
         pullback_after: int = 2,
         leak_retry_limit: int = 1,
         leakage_guard: PrematureDisclosureGuard | None = None,
     ):
         self.gateway = gateway
         self.temperature = temperature
+        self.planning_temperature = planning_temperature
         self.pullback_after = pullback_after
         self.leak_retry_limit = leak_retry_limit
         self.leakage_guard = leakage_guard or PrematureDisclosureGuard()
@@ -84,7 +78,7 @@ class ClientAgent:
                 "turn_index": turn_index,
             },
             output_schema=ClientTurnSignal,
-            temperature=self.temperature,
+            temperature=self.planning_temperature,
         )
         signal = ClientTurnSignal.model_validate(result)
         signal.retrieved_fact_ids = [
@@ -97,11 +91,7 @@ class ClientAgent:
             for item in signal.blocked_fact_ids
             if item in {fact.fact_id for fact in disclosure.blocked}
         ]
-        if disclosure.blocked:
-            signal.blocked_fact_ids = [item.fact_id for item in disclosure.blocked]
-            if signal.behavior is not ClientBehaviorType.RESISTANCE:
-                signal.behavior = ClientBehaviorType.RESISTANCE
-                signal.resistance_pattern = ResistancePatternType.DEFENSIVENESS
+        signal.blocked_fact_ids = [item.fact_id for item in disclosure.blocked]
         signal.retrieved_fact_ids = [item.fact_id for item in disclosure.retrieved]
         return self._apply_pullback(signal, state, recent_signals)
 
@@ -116,13 +106,21 @@ class ClientAgent:
         signal: ClientTurnSignal,
         already_disclosed_ids: set[str],
         turn_index: int,
+        disclosed_levels: dict[str, int] | None = None,
     ) -> tuple[ClientGeneration, dict[str, Any]]:
-        allowed_ids = {item.fact_id for item in disclosure.retrieved}
-        unauthorized = [
-            item
-            for item in profile.hidden_facts
-            if item.fact_id not in allowed_ids | already_disclosed_ids
-        ]
+        known_levels = dict(disclosed_levels or {})
+        for item in already_disclosed_ids:
+            fact = next((fact for fact in profile.hidden_facts if fact.fact_id == item), None)
+            if fact is not None:
+                known_levels.setdefault(item, len(fact.disclosure_layers))
+        allowed_levels = {
+            item.fact_id: max(known_levels.get(item.fact_id, 0), item.disclosure_level)
+            for item in disclosure.retrieved
+        }
+        allowed_ids = set(allowed_levels)
+        unauthorized = self._unauthorized_remainders(
+            profile.hidden_facts, known_levels | allowed_levels
+        )
         attempts: list[dict[str, Any]] = []
         utterance: ClientUtterance | None = None
         repair_instruction = ""
@@ -156,6 +154,7 @@ class ClientAgent:
                 utterance.utterance,
                 declared_fact_ids,
                 unauthorized,
+                allowed_ids,
             )
             attempts.append({"attempt": attempt + 1, **check.as_dict()})
             if not check.leaked:
@@ -197,15 +196,9 @@ class ClientAgent:
                 "age": traits.age,
                 "gender": traits.gender,
                 "occupation": traits.occupation,
-                "educational_background": traits.educational_background,
-                "marital_status": traits.marital_status,
-                "family_status": traits.family_status,
-                "social_status": traits.social_status,
-                "medical_history": traits.medical_history,
                 "language_features": traits.language_features,
                 "main_problem": profile.main_problem,
                 "topic": profile.topic,
-                "core_demands": profile.core_demands,
                 "language_style": profile.language_style,
                 "personality": profile.personality.model_dump(mode="json"),
             },
@@ -220,12 +213,29 @@ class ClientAgent:
             "blocked_topics": [
                 item.model_dump(mode="json") for item in disclosure.blocked
             ],
+            "ambiguous_fact_ids": disclosure.ambiguous_fact_ids,
             "turn_signal": signal.model_dump(mode="json"),
             "turn_index": turn_index,
         }
         if repair_instruction:
             payload["repair_instruction"] = repair_instruction
         return payload
+
+    @staticmethod
+    def _unauthorized_remainders(
+        facts: list[HiddenFact], authorized_levels: dict[str, int]
+    ) -> list[HiddenFact]:
+        remaining: list[HiddenFact] = []
+        for fact in facts:
+            level = authorized_levels.get(fact.fact_id, 0)
+            if level >= len(fact.disclosure_layers):
+                continue
+            final = fact.disclosure_layers[-1]
+            authorized = fact.disclosure_layers[level - 1] if level else ""
+            hidden_text = final[len(authorized):].lstrip(" ，。！？；,!?;")
+            if hidden_text:
+                remaining.append(fact.model_copy(update={"content": hidden_text}))
+        return remaining
 
     async def respond(
         self,
@@ -292,16 +302,19 @@ class ClientAgent:
         signal: ClientTurnSignal,
     ) -> ClientGeneration:
         is_resistance = signal.behavior is ClientBehaviorType.RESISTANCE
-        progress = (
-            0.15
-            if signal.behavior
-            in {ClientBehaviorType.INSIGHT, ClientBehaviorType.DISCUSSING_PLANS}
-            else 0.08
-            if signal.behavior in THERAPEUTIC_BEHAVIORS
-            else -0.05
-            if is_resistance
-            else 0.0
-        )
+        progress = {
+            ClientReactionType.GAINED_CLARITY: 0.07,
+            ClientReactionType.HOPEFUL: 0.05,
+            ClientReactionType.UNDERSTOOD: 0.02,
+            ClientReactionType.MISUNDERSTOOD: -0.06,
+            ClientReactionType.SCARED: -0.05,
+            ClientReactionType.CHALLENGED: -0.02,
+            ClientReactionType.NO_REACTION: 0.0,
+        }[signal.reaction]
+        if signal.behavior is ClientBehaviorType.INSIGHT:
+            progress += 0.03
+        elif signal.behavior is ClientBehaviorType.DISCUSSING_PLANS:
+            progress += 0.02
         return ClientGeneration(
             utterance=utterance.utterance,
             expressed_emotions=(
@@ -310,9 +323,11 @@ class ClientAgent:
                 else [signal.reaction.value]
             ),
             disclosed_fact_ids=utterance.disclosed_fact_ids,
-            cooperation=0.25 if is_resistance else 0.45
+            cooperation=0.3 if is_resistance else 0.45
             if signal.behavior is ClientBehaviorType.SIMPLE_RESPONSE
             else 0.7,
-            resistance=0.8 if is_resistance else 0.25,
+            resistance=0.75 if is_resistance else 0.4
+            if signal.reaction in {ClientReactionType.SCARED, ClientReactionType.CHALLENGED}
+            else 0.25,
             goal_progress_signal=progress,
         )

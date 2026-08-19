@@ -4,6 +4,7 @@ max_turns_per_session: 8
 session_count: 3
 temperature:
   client: 0.8
+  client_planner: 0.1
   counselor: 0.4
   supervisor: 0.1
 trace_dir: runs

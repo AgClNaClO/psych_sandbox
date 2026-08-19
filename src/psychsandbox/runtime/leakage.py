@@ -40,14 +40,16 @@ class PrematureDisclosureGuard:
         utterance: str,
         declared_fact_ids: list[str],
         unauthorized_facts: list[HiddenFact],
+        allowed_fact_ids: set[str] | None = None,
     ) -> LeakageResult:
         normalized_utterance = normalize_disclosure_text(utterance)
         declared = set(declared_fact_ids)
+        allowed = allowed_fact_ids or set()
         matches: dict[str, list[str]] = {}
         for fact in unauthorized_facts:
             reasons: list[str] = []
             normalized_fact = normalize_disclosure_text(fact.content)
-            if fact.fact_id in declared:
+            if fact.fact_id in declared and fact.fact_id not in allowed:
                 reasons.append("unauthorized_fact_id")
             if len(normalized_fact) >= 8 and normalized_fact in normalized_utterance:
                 reasons.append("normalized_full_text")

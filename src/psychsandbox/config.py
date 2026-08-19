@@ -77,6 +77,7 @@ def default_config(root: Path = PROJECT_ROOT) -> SandboxConfig:
         local_model_name=local.get("model_name", ""),
         local_device=local.get("device", "auto"),
         temperature_client=temperatures.get("client", 0.8),
+        temperature_client_planner=temperatures.get("client_planner", 0.1),
         temperature_counselor=temperatures.get("counselor", 0.4),
         temperature_supervisor=temperatures.get("supervisor", 0.1),
         patientact_enabled=patientact.get("enabled", True),

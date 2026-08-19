@@ -84,6 +84,13 @@ class TrustChange(StrEnum):
     SIGNIFICANT_INCREASE = "significant_increase"
 
 
+class RuptureState(StrEnum):
+    NONE = "none"
+    EMERGING = "emerging"
+    ACTIVE = "active"
+    REPAIRING = "repairing"
+
+
 class StaticTraits(StrictModel):
     name: str = ""
     age: str | int = ""
@@ -103,6 +110,25 @@ class BigFive(StrictModel):
     extraversion: float = Field(default=0.5, ge=0, le=1)
     agreeableness: float = Field(default=0.5, ge=0, le=1)
     neuroticism: float = Field(default=0.5, ge=0, le=1)
+
+
+class ClientRelationalProfile(StrictModel):
+    """Theory-grounded simulation parameters, never clinical diagnoses."""
+
+    attachment_pattern: Literal[
+        "secure", "anxious", "avoidant", "disorganized", "unspecified"
+    ] = "unspecified"
+    core_belief_theme: str = ""
+    expected_counselor_response: str = ""
+    self_response_pattern: str = ""
+    therapy_triggers: list[str] = Field(default_factory=list)
+    coping_patterns: list[str] = Field(default_factory=list)
+    preferred_resistance_patterns: list[ResistancePatternType] = Field(
+        default_factory=list
+    )
+    emotional_range: list[str] = Field(default_factory=list)
+    source_fact_ids: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=0, ge=0, le=1)
 
 
 class FivePsFormulation(StrictModel):
@@ -139,6 +165,9 @@ class ClientState(StrictModel):
     trust: float = Field(default=0.25, ge=0, le=1)
     resistance: float = Field(default=0.4, ge=0, le=1)
     hope: float = Field(default=0.35, ge=0, le=1)
+    topic_readiness: dict[str, float] = Field(default_factory=dict)
+    fatigue: float = Field(default=0.1, ge=0, le=1)
+    rupture_state: RuptureState = RuptureState.NONE
 
 
 class HiddenFact(StrictModel):
@@ -149,12 +178,24 @@ class HiddenFact(StrictModel):
     required_topics: list[str] = Field(default_factory=list)
     sensitivity: float = Field(default=0.5, ge=0, le=1)
     activation_tags: list[str] = Field(default_factory=list)
+    activation_examples: list[str] = Field(default_factory=list)
+    negative_examples: list[str] = Field(default_factory=list)
+    topic_key: str = ""
+    disclosure_layers: list[str] = Field(default_factory=list)
+    disclosure_level: int = Field(default=1, ge=1)
+    minimum_topic_readiness: float = Field(default=0, ge=0, le=1)
+    source_field: str = ""
     generates_discomfort: bool | None = None
 
     @model_validator(mode="after")
     def fill_compatibility_fields(self) -> HiddenFact:
         if not self.activation_tags:
             self.activation_tags = list(self.required_topics)
+        if not self.topic_key:
+            self.topic_key = self.category
+        if not self.disclosure_layers:
+            self.disclosure_layers = [self.content]
+        self.disclosure_level = min(self.disclosure_level, len(self.disclosure_layers))
         if self.generates_discomfort is None:
             self.generates_discomfort = self.sensitivity >= 0.6
         return self
@@ -173,6 +214,7 @@ class DisclosureDecision(StrictModel):
     blocked: list[BlockedMemorySignal] = Field(default_factory=list)
     activated_fact_ids: list[str] = Field(default_factory=list)
     activation_evidence: dict[str, list[str]] = Field(default_factory=dict)
+    ambiguous_fact_ids: list[str] = Field(default_factory=list)
 
 
 class ClientTurnSignal(StrictModel):
@@ -212,6 +254,7 @@ class ClientProfile(StrictModel):
     formulation_5ps: FivePsFormulation = Field(default_factory=FivePsFormulation)
     theory: dict[str, Any] = Field(default_factory=dict)
     personality: BigFive = Field(default_factory=BigFive)
+    relational: ClientRelationalProfile = Field(default_factory=ClientRelationalProfile)
     initial_state: ClientState = Field(default_factory=ClientState)
     language_style: str = ""
     opening: str = ""
@@ -232,6 +275,7 @@ class UnlockedFact(StrictModel):
     evidence_session: int = Field(ge=1)
     evidence_turn: int = Field(ge=0)
     disclosure_method: Literal["explicit", "confirmed_inference"] = "explicit"
+    disclosure_level: int = Field(default=1, ge=1)
 
 
 class UnlockedClientProfile(StrictModel):
@@ -309,6 +353,9 @@ class SessionMemory(StrictModel):
     interventions_used: list[str] = Field(default_factory=list)
     risk_history: list[str] = Field(default_factory=list)
     supervisor_feedback: list[str] = Field(default_factory=list)
+    relationship_events: list[str] = Field(default_factory=list)
+    between_session_context: list[str] = Field(default_factory=list)
+    last_client_closing: str = ""
 
 
 class Message(StrictModel):
@@ -461,6 +508,7 @@ class SandboxConfig(StrictModel):
     local_model_name: str = ""
     local_device: str = "auto"
     temperature_client: float = Field(default=0.8, ge=0, le=2)
+    temperature_client_planner: float = Field(default=0.1, ge=0, le=2)
     temperature_counselor: float = Field(default=0.4, ge=0, le=2)
     temperature_supervisor: float = Field(default=0.1, ge=0, le=2)
     patientact_enabled: bool = True

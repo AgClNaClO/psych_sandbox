@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import Any, Iterable
@@ -10,6 +11,7 @@ from ..domain import (
     AtomicSkill,
     BigFive,
     ClientProfile,
+    ClientRelationalProfile,
     ClientState,
     CounselingCase,
     FivePsFormulation,
@@ -24,6 +26,60 @@ from ..skills import SkillRegistry
 
 PSYCHEVAL_REPOSITORY = "https://github.com/ECNU-ICALK/PsychEval.git"
 PSYCHEVAL_REVISION = "e04df535749e5bca76fcc45d9a85f3f46a082d91"
+
+_FACT_TOPIC_TERMS = (
+    "父亲", "母亲", "父母", "家庭", "小时候", "小学", "中学", "大学",
+    "老师", "同学", "朋友", "伴侣", "婚姻", "孩子", "上司", "领导",
+    "实习", "工作", "考试", "毕业", "失业", "睡眠", "争吵", "批评",
+    "失败", "拒绝", "离开", "生病", "医院", "焦虑", "抑郁",
+)
+
+
+def _fact_activation_tags(content: str, fallback: list[str]) -> list[str]:
+    """Create fact-specific, auditable tags without inventing case content."""
+
+    specific = [term for term in _FACT_TOPIC_TERMS if term in content]
+    quoted = [
+        value.strip()
+        for value in re.findall(r"[“\"]([^”\"]{2,12})[”\"]", content)
+        if value.strip()
+    ]
+    return list(dict.fromkeys(specific + quoted + fallback))[:12]
+
+
+def _disclosure_layers(content: str) -> list[str]:
+    """Split a source fact into cumulative disclosure depths."""
+
+    clauses = [
+        item.strip()
+        for item in re.split(r"(?<=[。！？；])", content)
+        if item.strip()
+    ]
+    if len(clauses) <= 1:
+        clauses = [
+            item.strip()
+            for item in re.split(r"[；;]", content)
+            if item.strip()
+        ]
+    if len(clauses) <= 1:
+        return [content]
+    boundaries = sorted({1, min(2, len(clauses)), len(clauses)})
+    return ["".join(clauses[:end]) for end in boundaries]
+
+
+def _situation_layers(situation: dict[str, Any]) -> list[str]:
+    fields = (
+        ("event", "事件"),
+        ("automatic_thoughts", "当时的想法"),
+        ("conditional_assumptions", "背后的假设"),
+        ("compensatory_strategies", "应对方式"),
+    )
+    parts = [
+        f"{label}：{str(situation.get(key, '')).strip()}"
+        for key, label in fields
+        if str(situation.get(key, "")).strip()
+    ]
+    return ["；".join(parts[:end]) for end in range(1, len(parts) + 1)]
 
 
 def fetch_psycheval(destination: Path, revision: str = PSYCHEVAL_REVISION) -> Path:
@@ -64,7 +120,7 @@ class PsychEvalAdapter:
         info = raw["client_info"]
         static = info.get("static_traits", {})
         hidden = self._hidden_facts(case_id, info)
-        personality = self._deterministic_personality(case_id)
+        personality = BigFive()
         reference_sessions = raw.get("sessions", [])
         opening = self._opening(reference_sessions, info.get("main_problem", ""))
         profile = ClientProfile(
@@ -91,18 +147,12 @@ class PsychEvalAdapter:
                     "core_beliefs": info.get("core_beliefs", []),
                     "special_situations": info.get("special_situations", []),
                 },
-                "_personality_source": "deterministic_simulation_prior",
+                "_personality_source": "unspecified_neutral_prior",
                 "_source_path": source_path,
             },
             personality=personality,
-            initial_state=ClientState(
-                valence=0.3,
-                arousal=0.68,
-                distress=0.7,
-                trust=0.22,
-                resistance=0.45,
-                hope=0.35,
-            ),
+            relational=self._relational_profile(info, hidden),
+            initial_state=self._initial_state(info),
             language_style=str(static.get("language_features", "")),
             opening=opening,
             hidden_facts=hidden,
@@ -269,30 +319,59 @@ class PsychEvalAdapter:
     def _hidden_facts(case_id: str, info: dict[str, Any]) -> list[HiddenFact]:
         facts: list[HiddenFact] = []
         for index, content in enumerate(info.get("growth_experiences", []), start=1):
+            text = str(content).strip()
+            if not text:
+                continue
+            topic_key = f"growth_{index}"
             facts.append(
                 HiddenFact(
                     fact_id=f"{case_id}:growth:{index}",
-                    content=str(content),
+                    content=text,
                     category="growth_experience",
-                    minimum_trust=min(0.75, 0.3 + index * 0.08),
-                    required_topics=["经历", "家庭", "成长", "过去", "影响"],
-                    sensitivity=min(0.9, 0.45 + index * 0.08),
-                    activation_tags=["经历", "家庭", "成长", "小时候", "过去", "影响"],
+                    minimum_trust=0.38,
+                    minimum_topic_readiness=0.35,
+                    required_topics=["经历", "成长", "过去"],
+                    sensitivity=min(0.85, 0.48 + index * 0.06),
+                    activation_tags=_fact_activation_tags(
+                        text, ["经历", "成长", "过去"]
+                    ),
+                    activation_examples=[
+                        "这段经历当时是怎样的？",
+                        "这件事后来怎样影响了你？",
+                    ],
+                    negative_examples=["能介绍一下你的基本情况吗？"],
+                    topic_key=topic_key,
+                    disclosure_layers=_disclosure_layers(text),
+                    source_field=f"client_info.growth_experiences[{index - 1}]",
                     generates_discomfort=True,
                 )
             )
         for index, situation in enumerate(info.get("special_situations", []), start=1):
-            content = str(situation.get("event", "")).strip()
-            if content:
+            event = str(situation.get("event", "")).strip()
+            if event:
+                layers = _situation_layers(situation)
+                content = layers[-1]
+                topic_key = f"cbt_situation_{index}"
                 facts.append(
                     HiddenFact(
                         fact_id=f"{case_id}:situation:{index}",
                         content=content,
                         category="cbt_special_situation",
-                        minimum_trust=min(0.7, 0.28 + index * 0.06),
-                        required_topics=["情境", "发生", "当时", "想法", "困扰"],
-                        sensitivity=min(0.85, 0.4 + index * 0.06),
-                        activation_tags=["情境", "发生", "当时", "想法", "困扰"],
+                        minimum_trust=0.3,
+                        minimum_topic_readiness=0.25,
+                        required_topics=["情境", "发生", "当时"],
+                        sensitivity=min(0.82, 0.42 + index * 0.06),
+                        activation_tags=_fact_activation_tags(
+                            event, ["情境", "发生", "当时"]
+                        ),
+                        activation_examples=[
+                            "当时具体发生了什么？",
+                            "那一刻你脑中闪过了什么？",
+                        ],
+                        negative_examples=["最近还有别的困扰吗？"],
+                        topic_key=topic_key,
+                        disclosure_layers=layers,
+                        source_field=f"client_info.special_situations[{index - 1}]",
                         generates_discomfort=index >= 3,
                     )
                 )
@@ -304,20 +383,54 @@ class PsychEvalAdapter:
             for item in sessions[0].get("session_dialogue", []):
                 if str(item.get("role", "")).lower() == "client":
                     text = str(item.get("text", "")).strip()
-                    if len(text) >= 8:
+                    name_only = any(
+                        term in text for term in ("叫我", "称呼我", "名字是")
+                    )
+                    if len(text) >= 8 and not name_only:
                         return text
         return fallback or "最近有些事情让我很困扰，我想找个人谈一谈。"
 
     @staticmethod
-    def _deterministic_personality(case_id: str) -> BigFive:
-        digest = hashlib.sha256(case_id.encode()).digest()
-        values = [0.3 + byte / 255 * 0.4 for byte in digest[:5]]
-        return BigFive(
-            openness=values[0],
-            conscientiousness=values[1],
-            extraversion=values[2],
-            agreeableness=values[3],
-            neuroticism=values[4],
+    def _initial_state(info: dict[str, Any]) -> ClientState:
+        text = " ".join(
+            str(value)
+            for value in (
+                info.get("main_problem", ""),
+                info.get("core_demands", ""),
+                info.get("static_traits", {}).get("medical_history", ""),
+            )
+        )
+        anxious = any(term in text for term in ("焦虑", "紧张", "担心", "失眠"))
+        depressed = any(term in text for term in ("抑郁", "低落", "无力", "疲惫"))
+        return ClientState(
+            valence=0.28 if depressed else 0.38,
+            arousal=0.7 if anxious else 0.56,
+            distress=0.72 if anxious or depressed else 0.6,
+            trust=0.25,
+            resistance=0.4,
+            hope=0.4 if str(info.get("core_demands", "")).strip() else 0.32,
+        )
+
+    @staticmethod
+    def _relational_profile(
+        info: dict[str, Any], hidden: list[HiddenFact]
+    ) -> ClientRelationalProfile:
+        beliefs = [
+            str(item).strip()
+            for item in info.get("core_beliefs", [])
+            if str(item).strip()
+        ]
+        coping = [
+            str(item.get("compensatory_strategies", "")).strip()
+            for item in info.get("special_situations", [])
+            if isinstance(item, dict)
+            and str(item.get("compensatory_strategies", "")).strip()
+        ]
+        return ClientRelationalProfile(
+            core_belief_theme="；".join(beliefs[:3]),
+            coping_patterns=list(dict.fromkeys(coping))[:5],
+            source_fact_ids=[item.fact_id for item in hidden],
+            confidence=0.45 if beliefs or coping else 0,
         )
 
 
@@ -419,8 +532,88 @@ class CaseRepository:
             with path.open("r", encoding="utf-8") as handle:
                 for line in handle:
                     if line.strip():
-                        case = CounselingCase.model_validate_json(line)
+                        case = _upgrade_case_for_simulation(
+                            CounselingCase.model_validate_json(line)
+                        )
                         self._index[case.case_id] = case
+
+
+def _upgrade_case_for_simulation(case: CounselingCase) -> CounselingCase:
+    """Apply schema-v2 defaults to previously converted PsychEval records."""
+
+    profile = case.profile
+    cbt = profile.theory.get("cbt", {})
+    situations = cbt.get("special_situations", [])
+    upgraded: list[HiddenFact] = []
+    for fact in profile.hidden_facts:
+        try:
+            index = int(fact.fact_id.rsplit(":", 1)[-1]) - 1
+        except ValueError:
+            index = -1
+        if fact.category == "cbt_special_situation" and 0 <= index < len(situations):
+            situation = situations[index]
+            layers = _situation_layers(situation)
+            activation_source = str(situation.get("event", fact.content))
+            source_field = f"client_info.special_situations[{index}]"
+            fallback = ["情境", "发生", "当时"]
+            topic_key = f"cbt_situation_{index + 1}"
+            readiness = 0.25
+        else:
+            layers = _disclosure_layers(fact.content)
+            activation_source = fact.content
+            source_field = (
+                f"client_info.growth_experiences[{index}]"
+                if index >= 0
+                else fact.source_field
+            )
+            fallback = ["经历", "成长", "过去"]
+            topic_key = f"growth_{index + 1}" if index >= 0 else fact.topic_key
+            readiness = 0.35
+        upgraded.append(
+            fact.model_copy(
+                update={
+                    "content": layers[-1],
+                    "activation_tags": _fact_activation_tags(
+                        activation_source, fallback
+                    ),
+                    "topic_key": topic_key,
+                    "disclosure_layers": layers,
+                    "minimum_topic_readiness": (
+                        fact.minimum_topic_readiness or readiness
+                    ),
+                    "source_field": fact.source_field or source_field,
+                }
+            )
+        )
+    source_info = {
+        "main_problem": profile.main_problem,
+        "core_demands": profile.core_demands,
+        "static_traits": profile.static_traits.model_dump(mode="json"),
+        "core_beliefs": cbt.get("core_beliefs", []),
+        "special_situations": situations,
+    }
+    legacy_prior = profile.theory.get("_personality_source") == "deterministic_simulation_prior"
+    theory = dict(profile.theory)
+    if legacy_prior:
+        theory["_personality_source"] = "unspecified_neutral_prior"
+    migrated_profile = profile.model_copy(
+        update={
+            "hidden_facts": upgraded,
+            "theory": theory,
+            "personality": BigFive() if legacy_prior else profile.personality,
+            "relational": (
+                PsychEvalAdapter._relational_profile(source_info, upgraded)
+                if profile.relational.confidence == 0
+                else profile.relational
+            ),
+            "initial_state": (
+                PsychEvalAdapter._initial_state(source_info)
+                if legacy_prior
+                else profile.initial_state
+            ),
+        }
+    )
+    return case.model_copy(update={"profile": migrated_profile})
 
 
 def _legacy_case(path: Path) -> CounselingCase:

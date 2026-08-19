@@ -17,6 +17,7 @@ def test_default_config_loads_runtime_and_local_model_settings(tmp_path):
                 "database_path: custom-runs/custom.sqlite3",
                 "temperature:",
                 "  client: 0.6",
+                "  client_planner: 0.05",
                 "  counselor: 0.2",
                 "  supervisor: 0.0",
                 "patientact:",
@@ -48,6 +49,7 @@ def test_default_config_loads_runtime_and_local_model_settings(tmp_path):
     assert config.local_model_name == "example/model"
     assert config.local_device == "cpu"
     assert config.temperature_client == 0.6
+    assert config.temperature_client_planner == 0.05
     assert config.temperature_counselor == 0.2
     assert config.temperature_supervisor == 0.0
     assert config.patientact_enabled is False

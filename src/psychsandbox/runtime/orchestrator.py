@@ -13,10 +13,11 @@ from ..agents import (
     LLMSupervisorAgent,
     SupervisorAgent,
 )
+from ..client_simulation import ClientSimulator, ClientTurnInput
+from ..client_simulation.prompts import CLIENT_PROMPT_VERSION
 from ..datasets import CaseRepository
 from ..evaluation import LongitudinalEvaluator
 from ..domain import (
-    ClientBehaviorType,
     CounselingCase,
     ClientTurnSignal,
     Message,
@@ -69,6 +70,7 @@ class CounselingSandbox:
         self.client = ClientAgent(
             self.gateway,
             config.temperature_client,
+            planning_temperature=config.temperature_client_planner,
             pullback_after=config.client_pullback_after,
             leak_retry_limit=config.disclosure_leak_retry_limit,
         )
@@ -83,6 +85,9 @@ class CounselingSandbox:
         self.safety = SafetyStateMachine()
         self.disclosure = DisclosureGate()
         self.state_updater = StateUpdater()
+        self.client_simulator = ClientSimulator(
+            self.client, self.disclosure, self.state_updater
+        )
         self.consolidator = MemoryConsolidator()
         self.longitudinal = LongitudinalEvaluator()
         self.plan_builder = FeedbackPlanBuilder()
@@ -178,9 +183,10 @@ class CounselingSandbox:
                         "provider": self.gateway.provider_name,
                         "seed": seed,
                         "temperature_client": self.config.temperature_client,
+                        "temperature_client_planner": self.config.temperature_client_planner,
                         "temperature_counselor": self.config.temperature_counselor,
                         "client_pipeline": (
-                            "patientact_v1"
+                            CLIENT_PROMPT_VERSION
                             if self.config.patientact_enabled
                             else "direct_generation_v1"
                         ),
@@ -238,8 +244,9 @@ class CounselingSandbox:
                 session_index=plan.session_index,
                 turn_index=0,
                 role="client",
-                content=case.profile.opening if plan.session_index == 1
-                else "我想接着上次谈到的内容继续。",
+                content=self.client_simulator.start_session(
+                    case.profile, memory, plan.session_index
+                ),
             )
         ]
         decisions, risks, interventions, new_fact_ids, turn_records = [], [], [], [], []
@@ -293,52 +300,31 @@ class CounselingSandbox:
                 })
                 end_reason = "imminent_risk" if risk.requires_immediate_stop else "safety_output_block"
                 break
-            already = {item.fact_id for item in memory.unlocked_profile.facts} | set(new_fact_ids)
-            disclosure = self.disclosure.evaluate(
-                case.profile, state, counselor_turn.response, already
-            )
-            if self.config.patientact_enabled:
-                signal = await self.client.plan_turn(
+            client_turn = await self.client_simulator.respond(
+                ClientTurnInput(
                     profile=case.profile,
                     state=state,
-                    counselor_message=counselor_turn.response,
+                    counselor_turn=counselor_turn,
                     recent_messages=messages,
-                    disclosure=disclosure,
+                    unlocked_facts=memory.unlocked_profile.facts,
                     recent_signals=recent_signals,
+                    session_index=plan.session_index,
                     turn_index=turn_index,
+                    patientact_enabled=self.config.patientact_enabled,
                 )
-            else:
-                signal = ClientTurnSignal(
-                    behavior=ClientBehaviorType.RECOUNTING,
-                    retrieved_fact_ids=[
-                        item.fact_id for item in disclosure.retrieved
-                    ],
-                    blocked_fact_ids=[
-                        item.fact_id for item in disclosure.blocked
-                    ],
-                    rationale="PATIENTACT internal planning disabled by configuration.",
-                )
-            client_generation, leakage = await self.client.generate_utterance(
-                profile=case.profile,
-                state=state,
-                counselor_message=counselor_turn.response,
-                recent_messages=messages,
-                disclosure=disclosure,
-                signal=signal,
-                already_disclosed_ids=already,
-                turn_index=turn_index,
             )
-            unlocked = self.disclosure.unlock(
-                case.profile,
-                client_generation.disclosed_fact_ids,
-                session_index=plan.session_index,
-                turn_index=turn_index,
+            disclosure = client_turn.disclosure
+            signal = client_turn.signal
+            client_generation = client_turn.generation
+            leakage = client_turn.leakage
+            memory.unlocked_profile.facts = self.client_simulator.merge_unlocked(
+                memory.unlocked_profile.facts, client_turn.newly_unlocked
             )
-            memory.unlocked_profile.facts.extend(unlocked)
-            new_fact_ids.extend(item.fact_id for item in unlocked)
-            state, state_delta = self.state_updater.update(
-                state, counselor_turn, client_generation, signal
+            new_fact_ids.extend(
+                item.fact_id for item in client_turn.newly_unlocked
             )
+            state = client_turn.state_after
+            state_delta = client_turn.state_update
             recent_signals.append(signal)
             messages.append(Message(
                 session_index=plan.session_index,

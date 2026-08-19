@@ -38,8 +38,13 @@ class ClientSimulationEvaluator:
             for record, signal in zip(records, signals, strict=False)
             if record.get("disclosure_decision", {}).get("blocked")
         ]
-        blocked_resisted = sum(
-            signal.behavior is ClientBehaviorType.RESISTANCE
+        blocked_handled = sum(
+            signal.behavior
+            in {
+                ClientBehaviorType.RESISTANCE,
+                ClientBehaviorType.REQUEST,
+                ClientBehaviorType.SIMPLE_RESPONSE,
+            }
             for _, signal in blocked_records
         )
         resistance_patterns = {
@@ -90,14 +95,17 @@ class ClientSimulationEvaluator:
                     else min(
                         10,
                         4
-                        + 4 * blocked_resisted / len(blocked_records)
+                        + 4 * blocked_handled / len(blocked_records)
                         + min(2, len(resistance_patterns)),
                     )
                 ),
                 evidence=[
                     item.value for item in resistance_patterns if item is not None
                 ],
-                reason="敏感内容被阻断时应出现与人物状态一致的阻抗。",
+                reason=(
+                    "敏感内容被阻断时应保护披露边界；可表现为请求、简短回应或"
+                    "与人物状态一致的阻抗，不要求每次都防御。"
+                ),
             ),
             EvaluationMetric(
                 name="client_emotional_authenticity",

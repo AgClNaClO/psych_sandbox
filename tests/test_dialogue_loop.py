@@ -35,27 +35,28 @@ def test_single_generic_tag_does_not_activate_hidden_memory(sample_case):
     growth_ids = {
         fact.fact_id
         for fact in sample_case.profile.hidden_facts
-        if "影响" in fact.activation_tags
+        if fact.category == "growth_experience"
     }
     assert growth_ids
     assert growth_ids.isdisjoint(decision.activated_fact_ids)
 
 
-def test_specific_activation_tag_still_activates_hidden_memory(sample_case):
+def test_shared_activation_tags_are_reported_as_ambiguous(sample_case):
     state = sample_case.profile.initial_state.model_copy(update={"trust": 0})
     decision = DisclosureGate().evaluate(
         sample_case.profile,
         state,
-        "小时候的家庭经历对你有什么影响？",
+        "可以谈谈过去的成长经历吗？",
         set(),
     )
     growth_ids = {
         fact.fact_id
         for fact in sample_case.profile.hidden_facts
-        if "小时候" in fact.activation_tags
+        if fact.category == "growth_experience"
     }
     assert growth_ids
-    assert growth_ids.issubset(set(decision.activated_fact_ids))
+    assert growth_ids.issubset(set(decision.ambiguous_fact_ids))
+    assert growth_ids.isdisjoint(decision.activated_fact_ids)
 
 
 def test_counselor_respects_explicit_topic_boundary(sample_case):

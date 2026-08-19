@@ -101,8 +101,17 @@ class MockGateway(ModelGateway):
             disclosure = input_payload.get("disclosure_decision", {})
             blocked = disclosure.get("blocked", [])
             retrieved = disclosure.get("retrieved", [])
+            ambiguous = disclosure.get("ambiguous_fact_ids", [])
             counselor = input_payload.get("counselor_message", "")
             turn = int(input_payload.get("turn_index", 0))
+            if ambiguous:
+                return ClientTurnSignal(
+                    reaction=ClientReactionType.CHALLENGED,
+                    intensity=ReactionIntensity.LOW,
+                    behavior=ClientBehaviorType.REQUEST,
+                    trust_change=TrustChange.UNCHANGED,
+                    rationale="问题可能指向多段经历，先请咨询师具体化。",
+                )
             if blocked:
                 pushed = any(
                     term in counselor
@@ -111,14 +120,19 @@ class MockGateway(ModelGateway):
                 return ClientTurnSignal(
                     reaction=ClientReactionType.SCARED
                     if pushed else ClientReactionType.CHALLENGED,
-                    intensity=ReactionIntensity.HIGH
-                    if pushed else ReactionIntensity.MODERATE,
-                    behavior=ClientBehaviorType.RESISTANCE,
-                    resistance_pattern=ResistancePatternType.DEFENSIVENESS,
+                    intensity=ReactionIntensity.HIGH if pushed else ReactionIntensity.LOW,
+                    behavior=(
+                        ClientBehaviorType.RESISTANCE
+                        if pushed
+                        else ClientBehaviorType.REQUEST
+                    ),
+                    resistance_pattern=(
+                        ResistancePatternType.DEFENSIVENESS if pushed else None
+                    ),
                     blocked_fact_ids=[item["fact_id"] for item in blocked],
                     trust_change=TrustChange.SIGNIFICANT_DECREASE
-                    if pushed else TrustChange.SLIGHT_DECREASE,
-                    rationale="咨询师接近了当前信任不足以讨论的敏感内容。",
+                    if pushed else TrustChange.UNCHANGED,
+                    rationale="敏感内容尚未准备披露；是否阻抗取决于咨询师是否施压。",
                 )
             respected = any(
                 term in counselor
@@ -171,6 +185,14 @@ class MockGateway(ModelGateway):
                         resistance_pattern,
                         "我不太想现在谈这个。我们能不能先说说别的？",
                     )
+                )
+            if behavior == ClientBehaviorType.REQUEST.value:
+                if input_payload.get("ambiguous_fact_ids"):
+                    return ClientUtterance(
+                        utterance="你具体是想问哪一段经历？我想先确认一下。"
+                    )
+                return ClientUtterance(
+                    utterance="这部分我还没有准备好细说，可以先从现在的感受谈起吗？"
                 )
             allowed = input_payload.get("available_memories", [])
             turn = int(input_payload.get("turn_index", 0))

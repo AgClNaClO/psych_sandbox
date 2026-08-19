@@ -5,7 +5,17 @@ import asyncio
 import pytest
 
 from psychsandbox.agents import ClientAgent, CounselorAgent
+from psychsandbox.agents.client import (
+    CLIENT_PLANNER_SYSTEM,
+    CLIENT_PROMPT_VERSION,
+    CLIENT_UTTERANCE_SYSTEM,
+)
+from psychsandbox.client_simulation.prompts import (
+    CLIENT_PLANNER_SYSTEM as CANONICAL_CLIENT_PLANNER_SYSTEM,
+    CLIENT_UTTERANCE_SYSTEM as CANONICAL_CLIENT_UTTERANCE_SYSTEM,
+)
 from psychsandbox.domain import (
+    BlockedMemorySignal,
     ClientBehaviorType,
     ClientGeneration,
     ClientState,
@@ -41,11 +51,18 @@ def test_disclosure_does_not_repeat(sample_case):
 
 def test_disclosure_returns_blocked_signal_without_content(sample_case):
     fact = max(sample_case.profile.hidden_facts, key=lambda item: item.sensitivity)
+    profile = sample_case.profile.model_copy(
+        update={
+            "hidden_facts": [
+                fact.model_copy(update={"activation_tags": ["唯一敏感话题"]})
+            ]
+        }
+    )
     state = sample_case.profile.initial_state.model_copy(update={"trust": 0})
     decision = DisclosureGate().evaluate(
-        sample_case.profile,
+        profile,
         state,
-        " ".join(fact.activation_tags),
+        "我想问问唯一敏感话题",
         set(),
     )
     blocked = next(item for item in decision.blocked if item.fact_id == fact.fact_id)
@@ -62,6 +79,34 @@ def test_unlock_records_evidence(sample_case):
     assert unlocked[0].evidence_turn == 3
 
 
+def test_disclosure_advances_one_layer_at_a_time(sample_case):
+    fact = sample_case.profile.hidden_facts[0].model_copy(
+        update={
+            "content": "表层信息；更私密的细节",
+            "disclosure_layers": ["表层信息", "表层信息；更私密的细节"],
+            "activation_tags": ["特定成长话题"],
+            "topic_key": "specific_growth",
+            "minimum_trust": 0.2,
+            "minimum_topic_readiness": 0.3,
+        }
+    )
+    profile = sample_case.profile.model_copy(update={"hidden_facts": [fact]})
+    state = sample_case.profile.initial_state.model_copy(
+        update={"trust": 0.8, "topic_readiness": {"specific_growth": 0.8}}
+    )
+    gate = DisclosureGate()
+
+    first = gate.evaluate(profile, state, "想谈特定成长话题", {})
+    second = gate.evaluate(profile, state, "继续谈特定成长话题", {fact.fact_id: 1})
+    finished = gate.evaluate(profile, state, "继续谈特定成长话题", {fact.fact_id: 2})
+
+    assert first.retrieved[0].content == "表层信息"
+    assert first.retrieved[0].disclosure_level == 1
+    assert second.retrieved[0].content == "表层信息；更私密的细节"
+    assert second.retrieved[0].disclosure_level == 2
+    assert finished.retrieved == []
+
+
 def test_state_stays_in_bounds():
     state = ClientState(trust=0.99, distress=0.01)
     counselor = CounselorTurn(
@@ -76,7 +121,11 @@ def test_state_stays_in_bounds():
     updated, delta = StateUpdater().update(state, counselor, client)
     assert 0 <= updated.trust <= 1
     assert 0 <= updated.distress <= 1
-    assert set(delta) == {"rule_delta", "model_signal_delta"}
+    assert set(delta) == {
+        "rule_delta",
+        "model_signal_delta",
+        "interaction_features",
+    }
 
 
 def test_trust_changes_only_from_turn_signal():
@@ -96,7 +145,7 @@ def test_trust_changes_only_from_turn_signal():
         ClientTurnSignal(trust_change=TrustChange.SLIGHT_INCREASE),
     )
     assert unchanged.trust == 0.5
-    assert increased.trust == 0.55
+    assert increased.trust == 0.53
 
 
 def test_skill_parent_child_integrity(root):
@@ -189,10 +238,67 @@ def test_high_risk_counselor_routes_to_safety(sample_case):
 class CountingMockGateway(MockGateway):
     def __init__(self):
         self.calls = []
+        self.requests = []
 
     async def complete_structured(self, **kwargs):
         self.calls.append(kwargs["output_schema"])
+        self.requests.append(kwargs)
         return await super().complete_structured(**kwargs)
+
+
+def test_client_prompts_are_versioned_and_reexported():
+    assert CLIENT_PROMPT_VERSION == "psycheval_patientact_v3"
+    assert CLIENT_PLANNER_SYSTEM is CANONICAL_CLIENT_PLANNER_SYSTEM
+    assert CLIENT_UTTERANCE_SYSTEM is CANONICAL_CLIENT_UTTERANCE_SYSTEM
+
+
+def test_client_planner_prompt_contract():
+    required_rules = (
+        "private_client_profile",
+        "disclosure_decision.retrieved",
+        "rationale",
+        "ambiguous_fact_ids",
+        "优先选择 request",
+        "不自动等于 resistance",
+        "不得默认每轮线性改善",
+        "不得因为多个事实标签相似",
+        "只有确实出现防御、回避或表面配合时才选择 resistance",
+        "显著变化必须有明确互动依据",
+        "不生成来访者台词",
+        "ClientTurnSignal",
+    )
+    assert all(rule in CLIENT_PLANNER_SYSTEM for rule in required_rules)
+
+
+def test_client_utterance_prompt_contract():
+    payload_fields = (
+        "static_profile",
+        "simulation_state",
+        "counselor_message",
+        "recent_messages",
+        "available_memories",
+        "blocked_topics",
+        "ambiguous_fact_ids",
+        "turn_signal",
+        "turn_index",
+        "repair_instruction",
+    )
+    required_rules = (
+        "被动、渐进披露",
+        "不得编造",
+        "不得提前扩展到更私密的层级",
+        "不猜测咨询师指的是哪件事",
+        "安全、具体的问题可以正常合作",
+        "不要突然顿悟、痊愈、完全信任咨询师",
+        "专业术语",
+        "本轮 utterance 实际表达过",
+        "ClientUtterance",
+    )
+    assert all(field in CLIENT_UTTERANCE_SYSTEM for field in payload_fields)
+    assert all(rule in CLIENT_UTTERANCE_SYSTEM for rule in required_rules)
+    assert "private_client_profile" not in CLIENT_UTTERANCE_SYSTEM
+    assert "session_goals" not in CLIENT_UTTERANCE_SYSTEM
+    assert "suggested_skills" not in CLIENT_UTTERANCE_SYSTEM
 
 
 def test_client_two_stage_calls_and_strict_utterance_payload(sample_case):
@@ -229,6 +335,8 @@ def test_client_two_stage_calls_and_strict_utterance_payload(sample_case):
     )
     dumped = str(payload)
     assert gateway.calls == [ClientTurnSignal, ClientUtterance]
+    assert gateway.requests[0]["system_prompt"] is CLIENT_PLANNER_SYSTEM
+    assert gateway.requests[1]["system_prompt"] is CLIENT_UTTERANCE_SYSTEM
     assert generation.utterance
     assert metadata["retry_count"] == 0
     assert "session_plan" not in payload
@@ -236,6 +344,59 @@ def test_client_two_stage_calls_and_strict_utterance_payload(sample_case):
     assert "special_situations" not in dumped
     for fact in sample_case.profile.hidden_facts:
         assert fact.content not in dumped
+
+
+def test_ambiguous_facts_request_clarification_without_disclosure(sample_case):
+    facts = sample_case.profile.hidden_facts[:2]
+    disclosure = DisclosureDecision(
+        retrieved=facts,
+        ambiguous_fact_ids=[fact.fact_id for fact in facts],
+    )
+    agent = ClientAgent(MockGateway())
+    signal = asyncio.run(
+        agent.plan_turn(
+            profile=sample_case.profile,
+            state=sample_case.profile.initial_state,
+            counselor_message="你说的那段过去，当时发生了什么？",
+            recent_messages=[],
+            disclosure=disclosure,
+            recent_signals=[],
+            turn_index=1,
+        )
+    )
+    generation, _ = asyncio.run(
+        agent.generate_utterance(
+            profile=sample_case.profile,
+            state=sample_case.profile.initial_state,
+            counselor_message="你说的那段过去，当时发生了什么？",
+            recent_messages=[],
+            disclosure=disclosure,
+            signal=signal,
+            already_disclosed_ids=set(),
+            turn_index=1,
+        )
+    )
+
+    assert signal.behavior is ClientBehaviorType.REQUEST
+    assert "具体" in generation.utterance
+    assert generation.disclosed_fact_ids == []
+    assert all(fact.content not in generation.utterance for fact in facts)
+
+
+def test_ordinary_follow_up_does_not_change_trust(sample_case):
+    signal = asyncio.run(
+        ClientAgent(MockGateway()).plan_turn(
+            profile=sample_case.profile,
+            state=sample_case.profile.initial_state,
+            counselor_message="最近怎么样？",
+            recent_messages=[],
+            disclosure=DisclosureDecision(),
+            recent_signals=[],
+            turn_index=1,
+        )
+    )
+
+    assert signal.trust_change is TrustChange.UNCHANGED
 
 
 class AlwaysLeakingGateway(MockGateway):
@@ -277,11 +438,14 @@ def test_client_leak_retries_then_uses_safe_fallback(sample_case):
 
 def test_respectful_and_pushy_messages_diverge(sample_case):
     fact = max(sample_case.profile.hidden_facts, key=lambda item: item.sensitivity)
-    blocked = DisclosureGate().evaluate(
-        sample_case.profile,
-        sample_case.profile.initial_state.model_copy(update={"trust": 0}),
-        " ".join(fact.activation_tags),
-        set(),
+    blocked = DisclosureDecision(
+        blocked=[
+            BlockedMemorySignal(
+                fact_id=fact.fact_id,
+                category=fact.category,
+                sensitivity=fact.sensitivity,
+            )
+        ]
     )
     agent = ClientAgent(MockGateway())
     pushy = asyncio.run(agent.plan_turn(
@@ -305,6 +469,32 @@ def test_respectful_and_pushy_messages_diverge(sample_case):
     assert pushy.trust_change is TrustChange.SIGNIFICANT_DECREASE
     assert pushy.behavior is ClientBehaviorType.RESISTANCE
     assert respectful.trust_change is TrustChange.SLIGHT_INCREASE
+
+
+def test_blocked_memory_does_not_force_resistance_without_pressure(sample_case):
+    fact = sample_case.profile.hidden_facts[0]
+    disclosure = DisclosureDecision(
+        blocked=[
+            BlockedMemorySignal(
+                fact_id=fact.fact_id,
+                category=fact.category,
+                sensitivity=fact.sensitivity,
+            )
+        ]
+    )
+    signal = asyncio.run(
+        ClientAgent(MockGateway()).plan_turn(
+            profile=sample_case.profile,
+            state=sample_case.profile.initial_state,
+            counselor_message="如果你愿意，可以只说现在能说的部分。",
+            recent_messages=[],
+            disclosure=disclosure,
+            recent_signals=[],
+            turn_index=1,
+        )
+    )
+    assert signal.behavior is ClientBehaviorType.REQUEST
+    assert signal.resistance_pattern is None
 
 
 def test_client_pulls_back_after_consecutive_exploration(sample_case):
