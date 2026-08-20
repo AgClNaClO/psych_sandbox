@@ -40,8 +40,10 @@ class StateUpdater:
         response = counselor.response
         respected = any(term in response for term in self.RESPECT_MARKERS)
         pressured = any(term in response for term in self.PRESSURE_MARKERS)
-        interaction_delta = -0.035 if pressured else 0.012 if respected else 0.0
-        trust_delta = self.TRUST_DELTAS[signal.trust_change] + interaction_delta
+        # The planner has already interpreted the interaction into trust_change.
+        # Marker detection remains an auditable feature and rupture/readiness cue,
+        # but must not count the same counselor behavior a second time.
+        trust_delta = self.TRUST_DELTAS[signal.trust_change]
         trust_delta *= self._attachment_multiplier(profile, trust_delta)
         rule = {
             "trust": trust_delta,

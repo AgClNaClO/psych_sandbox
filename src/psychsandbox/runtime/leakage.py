@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 
 from ..domain import (
     ClientBehaviorType,
@@ -33,7 +34,32 @@ class LeakageResult:
 
 
 class PrematureDisclosureGuard:
-    """Fail-closed lexical guard used after strict prompt-level isolation."""
+    """Deterministic defense-in-depth after strict prompt-level isolation."""
+
+    def substantiate(
+        self,
+        utterance: str,
+        declared_fact_ids: list[str],
+        allowed_facts: list[HiddenFact],
+    ) -> tuple[list[str], list[str], dict[str, str]]:
+        """Keep only declarations supported by something the client actually said."""
+
+        allowed = {fact.fact_id: fact for fact in allowed_facts}
+        confirmed: list[str] = []
+        rejected: list[str] = []
+        evidence: dict[str, str] = {}
+        for fact_id in dict.fromkeys(declared_fact_ids):
+            fact = allowed.get(fact_id)
+            if fact is None:
+                rejected.append(fact_id)
+                continue
+            excerpt = _disclosure_evidence(utterance, fact.content)
+            if excerpt is None:
+                rejected.append(fact_id)
+                continue
+            confirmed.append(fact_id)
+            evidence[fact_id] = excerpt
+        return confirmed, rejected, evidence
 
     def inspect(
         self,
@@ -54,8 +80,12 @@ class PrematureDisclosureGuard:
             if len(normalized_fact) >= 8 and normalized_fact in normalized_utterance:
                 reasons.append("normalized_full_text")
             for clause in _distinctive_clauses(fact.content):
-                if normalize_disclosure_text(clause) in normalized_utterance:
+                normalized_clause = normalize_disclosure_text(clause)
+                if normalized_clause in normalized_utterance:
                     reasons.append(f"distinctive_clause:{clause[:24]}")
+                    break
+                if _fuzzy_disclosure_overlap(normalized_utterance, normalized_clause):
+                    reasons.append(f"fuzzy_clause:{clause[:24]}")
                     break
             if reasons:
                 matches[fact.fact_id] = reasons
@@ -90,3 +120,37 @@ def _distinctive_clauses(content: str) -> list[str]:
         if len(normalize_disclosure_text(item)) >= 10
     ]
     return clauses[:4]
+
+
+def _disclosure_evidence(utterance: str, content: str) -> str | None:
+    normalized_utterance = normalize_disclosure_text(utterance)
+    normalized_content = normalize_disclosure_text(content)
+    if len(normalized_content) >= 4 and normalized_content in normalized_utterance:
+        return content
+    clauses = [
+        item.strip()
+        for item in re.split(r"[，。！？；,.!?;\n]+", content)
+        # Short layer labels such as “表层经历” can still be valid, directly
+        # observable disclosure evidence.  This threshold is intentionally
+        # lower than the leakage detector's distinctive-clause threshold:
+        # here the fact has already been authorized for this turn.
+        if len(normalize_disclosure_text(item)) >= 4
+    ]
+    for clause in clauses:
+        normalized_clause = normalize_disclosure_text(clause)
+        if normalized_clause in normalized_utterance:
+            return clause
+    if _fuzzy_disclosure_overlap(normalized_utterance, normalized_content):
+        return utterance.strip()
+    return None
+
+
+def _fuzzy_disclosure_overlap(left: str, right: str) -> bool:
+    if min(len(left), len(right)) < 8:
+        return False
+    shared = set(left) & set(right)
+    if len(shared) < 6:
+        return False
+    overlap = len(shared) / min(len(set(left)), len(set(right)))
+    sequence = SequenceMatcher(None, left, right).ratio()
+    return overlap >= 0.6 and sequence >= 0.46

@@ -98,6 +98,12 @@ async def _simulate(args: argparse.Namespace) -> int:
             f"Session {session.session_index}: {session.end_reason}; "
             f"督导={score}; 技能={','.join(session.interventions_used) or '无'}"
         )
+    if result.holistic_report:
+        report = result.holistic_report
+        print(
+            f"整体督导：Counselor={report.counselor_overall:.2f} "
+            f"Client={report.client_overall:.2f}"
+        )
     if visualization:
         print(f"可视化报告：{visualization}")
     return 0

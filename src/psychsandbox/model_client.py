@@ -18,11 +18,18 @@ from .domain import (
     ClientReactionType,
     ClientTurnSignal,
     ClientUtterance,
+    ClinicalSummary,
     CounselorDecision,
     CounselorTurn,
+    ExtractedClientInfo,
+    GoalAssessment,
+    MergedClientProfile,
     ReactionIntensity,
     ResistancePatternType,
     RiskLevel,
+    ScaleItem,
+    ScaleItems,
+    StaticTraits,
     TrustChange,
 )
 
@@ -154,6 +161,9 @@ class MockGateway(ModelGateway):
                 if respected else TrustChange.UNCHANGED,
                 rationale="根据当前联盟和可用内容选择回应方式。",
             )
+        if output_schema is ScaleItems:
+            return _mock_scale_items()
+
         if output_schema is ClientUtterance:
             signal = input_payload.get("turn_signal", {})
             behavior = signal.get("behavior", "simple_response")
@@ -209,6 +219,20 @@ class MockGateway(ModelGateway):
                 "我现在还不想急着做决定，想先把事情说清楚。",
             ]
             return ClientUtterance(utterance=responses[turn % len(responses)])
+
+        schema_name = output_schema.__name__
+        if schema_name == "_ClientInfoGet":
+            return output_schema.model_validate(
+                {"client_info_get": _mock_extracted_client_info(input_payload)}
+            )
+        if schema_name == "_ClientInfoMerge":
+            return output_schema.model_validate(
+                {"client_info_merge": _mock_merged_client_profile(input_payload)}
+            )
+        if schema_name == "_SessionSummaryWrapper":
+            return output_schema.model_validate(
+                {"session_summary": _mock_clinical_summary(input_payload)}
+            )
         raise ValueError(f"MockGateway does not support {output_schema.__name__}")
 
 
@@ -421,6 +445,89 @@ def _strip_fence(text: str) -> str:
             lines.pop()
         return "\n".join(lines)
     return value
+
+
+def _mock_scale_items() -> ScaleItems:
+    return ScaleItems(
+        items=[ScaleItem(item=str(index), score=4.0) for index in range(1, 16)]
+    )
+
+
+def _mock_extracted_client_info(payload: dict[str, Any]) -> dict[str, Any]:
+    """Deterministic mock for E.7. Only fabricates session-one intake fields."""
+    dialogue = str(payload.get("current_session_dialogue", ""))
+    session_number = int(payload.get("current_session_number", 1))
+    return {
+        "static_traits": StaticTraits().model_dump(mode="json"),
+        "main_problem": "在对话中表达当前困扰" if session_number == 1 else "",
+        "topic": "",
+        "core_demands": "希望得到理解并找到改善方向" if session_number == 1 else "",
+        "growth_experiences": [],
+        "theory": {},
+        "source_session": session_number,
+    }
+
+
+def _mock_merged_client_profile(payload: dict[str, Any]) -> dict[str, Any]:
+    """Deterministic E.8 mock: prefer history fields if present, else current."""
+    history = payload.get("history_profile", {})
+    current = payload.get("current_profile", {})
+    merged = {
+        "client_id": str(payload.get("client_id", "")),
+        "static_traits": StaticTraits().model_dump(mode="json"),
+        "main_problem": str(history.get("main_problem") or current.get("main_problem", "")),
+        "topic": str(history.get("topic") or current.get("topic", "")),
+        "core_demands": str(
+            history.get("core_demands") or current.get("core_demands", "")
+        ),
+        "growth_experiences": list(history.get("growth_experiences", []))
+        + [
+            item
+            for item in current.get("growth_experiences", [])
+            if item not in history.get("growth_experiences", [])
+        ],
+        "theory": {**history.get("theory", {}), **current.get("theory", {})},
+        "updated_session": int(payload.get("session_number", 1)),
+    }
+    global_profile = payload.get("global_profile", {})
+    if not merged["client_id"]:
+        merged["client_id"] = str(global_profile.get("client_id", ""))
+    traits_raw = global_profile.get("static_traits", {}) or {}
+    merged["static_traits"] = {
+        key: history.get("static_traits", {}).get(key)
+        or current.get("static_traits", {}).get(key)
+        or ""
+        for key in StaticTraits.model_fields
+    }
+    return merged
+
+
+def _mock_clinical_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    """Deterministic E.9 mock grounded in the session index and objectives."""
+    session_index = int(payload.get("session_index", 1))
+    session_focus = payload.get("session_focus", {})
+    objectives = "; ".join(session_focus.get("objective", []))
+    return {
+        "session_index": session_index,
+        "session_summary_abstract": f"第{session_index}次会谈完成对话，聚焦于目标与感受。",
+        "goal_assessment": {
+            "objective_recap": objectives,
+            "completion_status": "部分达成 (Partially Completed)",
+            "evidence_and_analysis": "mock 模式未引用真实对话证据。",
+        },
+        "client_state_analysis": {
+            "affective_state": "存在一定困扰，但能参与对话。",
+            "behavioral_patterns": "愿意表达，合作度可。",
+            "therapeutic_alliance": "初步建立合作。",
+            "unresolved_points_or_tensions": "",
+            "cognitive_patterns": "",
+            "subconscious_manifestation": "",
+            "personal_agency": "",
+            "existentialism_topic": "",
+            "target_behavior": "",
+        },
+        "homework": [],
+    }
 
 
 def _mock_counselor_response(

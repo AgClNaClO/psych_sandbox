@@ -6,17 +6,17 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 
-from ..agents import (
-    ClientAgent,
+from ..agents.client import ClientAgent
+from ..agents.counselor import CounselorAgent
+from ..datasets import CaseRepository
+from ..evaluation import (
     ClientSimulationEvaluator,
-    CounselorAgent,
-    LLMSupervisorAgent,
+    LongitudinalEvaluator,
+    PsychEvalSupervisor,
     SupervisorAgent,
 )
 from ..client_simulation import ClientSimulator, ClientTurnInput
 from ..client_simulation.prompts import CLIENT_PROMPT_VERSION
-from ..datasets import CaseRepository
-from ..evaluation import LongitudinalEvaluator
 from ..domain import (
     CounselingCase,
     ClientTurnSignal,
@@ -33,10 +33,22 @@ from ..model_client import ModelGateway, create_gateway
 from ..skills import HierarchicalSkillRetriever, SkillRegistry
 from .disclosure import DisclosureGate
 from .memory import MemoryConsolidator
-from .planning import FeedbackPlanBuilder
+from .memory_pipeline import (
+    ClientMergeAgent,
+    DialogueSummaryAgent,
+    MemoryExtractionAgent,
+)
+from .planning import PlanBuilder
 from .safety import SafetyStateMachine
 from .state import StateUpdater
 from .storage import SQLiteStore
+
+
+def _therapy_codes(therapy: str) -> list[str]:
+    """Map sandbox therapy IDs to the PsychEval codes used by E.7/E.8/E.9."""
+    if therapy == "humanistic_existential":
+        return ["het"]
+    return [therapy]
 
 
 class CounselingSandbox:
@@ -77,10 +89,10 @@ class CounselingSandbox:
         self.counselor = CounselorAgent(self.gateway, config.temperature_counselor)
         self.supervisor = SupervisorAgent()
         self.client_evaluator = ClientSimulationEvaluator()
-        self.llm_supervisor = (
-            LLMSupervisorAgent(self.gateway, config.temperature_supervisor)
-            if config.provider != "mock"
-            else None
+        self.holistic_supervisor = PsychEvalSupervisor(
+            self.gateway,
+            config.project_root / "data" / "external" / "psycheval" / "eval" / "prompts_cn",
+            temperature=config.temperature_supervisor,
         )
         self.safety = SafetyStateMachine()
         self.disclosure = DisclosureGate()
@@ -90,7 +102,10 @@ class CounselingSandbox:
         )
         self.consolidator = MemoryConsolidator()
         self.longitudinal = LongitudinalEvaluator()
-        self.plan_builder = FeedbackPlanBuilder()
+        self.plan_builder = PlanBuilder()
+        self.memory_extractor = MemoryExtractionAgent(self.gateway)
+        self.client_merger = ClientMergeAgent(self.gateway)
+        self.summarizer = DialogueSummaryAgent(self.gateway)
         self.store = store or SQLiteStore(config.database_path)
 
     async def run_case(
@@ -139,7 +154,9 @@ class CounselingSandbox:
                 plan = self._plan_for(case, session_index, sessions)
                 memory_before = memory.model_copy(deep=True)
                 initial_state = (
-                    sessions[-1].final_state.model_copy(deep=True)
+                    self.client_simulator.prepare_session_state(
+                        sessions[-1].final_state
+                    )
                     if sessions else case.profile.initial_state.model_copy(deep=True)
                 )
                 session = await self._run_session(case, plan, memory, initial_state)
@@ -150,15 +167,6 @@ class CounselingSandbox:
                 session.client_simulation_report = await self.client_evaluator.evaluate(
                     session
                 )
-                if self.llm_supervisor:
-                    try:
-                        session.llm_supervisor_report = await self.llm_supervisor.evaluate(
-                            session, case=case, memory_before=memory_before
-                        )
-                    except Exception as exc:
-                        session.evaluation_errors.append(
-                            f"llm_supervisor:{type(exc).__name__}:{exc}"
-                        )
                 session.longitudinal_report = self.longitudinal.evaluate(
                     session, sessions
                 )
@@ -168,8 +176,10 @@ class CounselingSandbox:
                 session.next_session_plan = self.plan_builder.build(
                     session.plan,
                     baseline_next,
-                    session.supervisor_report,
                     session.longitudinal_report,
+                )
+                await self._consolidate_memory_pipeline(
+                    case, session, plan, memory
                 )
                 memory = self.consolidator.consolidate(
                     memory, session, next_index=session_index + 1
@@ -220,9 +230,7 @@ class CounselingSandbox:
                 if sessions and sessions[-1].end_reason == "imminent_risk"
                 else "completed"
             )
-            self.store.finish_run(run_id, status=status)
-            notify(f"运行 {run_id} 已结束；状态={status}")
-            return RunResult(
+            result = RunResult(
                 run_id=run_id,
                 case_id=case_id,
                 therapy=selected_therapy,
@@ -230,6 +238,16 @@ class CounselingSandbox:
                 sessions=sessions,
                 final_memory=memory,
             )
+            holistic_report = None
+            try:
+                holistic_report = await self.holistic_supervisor.evaluate(result, case)
+                self.store.save_holistic_report(run_id, holistic_report)
+            except Exception as exc:
+                notify(f"整体督导评估失败：{type(exc).__name__}:{exc}")
+            result.holistic_report = holistic_report
+            self.store.finish_run(run_id, status=status)
+            notify(f"运行 {run_id} 已结束；状态={status}")
+            return result
         except BaseException:
             self.store.finish_run(run_id, status="failed")
             notify(f"运行 {run_id} 失败；状态已记录为 failed")
@@ -426,6 +444,39 @@ class CounselingSandbox:
             f"第{plan.session_index}次会谈围绕{'、'.join(plan.objectives[:2])}展开；"
             f"使用技能 {', '.join(dict.fromkeys(interventions)) or '支持性探索'}；"
             f"来访者末段表达：{' / '.join(client_points)}"
+        )
+
+    async def _consolidate_memory_pipeline(
+        self,
+        case: CounselingCase,
+        session: SessionRecord,
+        plan: SessionPlan,
+        memory: SessionMemory,
+    ) -> None:
+        """Run the PsychEval E.7/E.8/E.9 post-session consolidation pipeline.
+
+        E.7 extracts only what the client actually disclosed in this session,
+        E.8 merges it into the counselor's longitudinal, ground-truth-gated
+        profile, and E.9 writes the evidence-bound clinical summary that bridges
+        to the next session.
+        """
+        therapy_codes = _therapy_codes(case.therapy)
+        extracted = await self.memory_extractor.extract(
+            session.messages,
+            therapy_codes,
+            session.session_index,
+        )
+        memory.evolving_profile = await self.client_merger.merge(
+            memory.evolving_profile,
+            extracted,
+            case.profile,
+            therapy_codes,
+        )
+        session.clinical_summary = await self.summarizer.summarize(
+            session.session_index,
+            session.messages,
+            plan,
+            therapy_codes,
         )
 
     def _append_jsonl(self, trajectory: Trajectory) -> None:

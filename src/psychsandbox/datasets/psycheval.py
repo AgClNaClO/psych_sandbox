@@ -17,6 +17,7 @@ from ..domain import (
     FivePsFormulation,
     HiddenFact,
     MetaSkill,
+    ResistancePatternType,
     SessionPlan,
     SessionStage,
     StaticTraits,
@@ -426,11 +427,58 @@ class PsychEvalAdapter:
             if isinstance(item, dict)
             and str(item.get("compensatory_strategies", "")).strip()
         ]
+        coping_text = " ".join(coping)
+        preferred: list[ResistancePatternType] = []
+        resistance_cues = (
+            (("分析", "反思", "想清楚", "讲道理"), ResistancePatternType.INTELLECTUALIZING),
+            (("回避", "逃避", "放弃", "沉默", "不愿"), ResistancePatternType.MINIMAL_TALK),
+            (("顺从", "听从", "言听计从", "讨好"), ResistancePatternType.COMPLIANCE_WITHOUT_ENGAGEMENT),
+            (("证明", "否认", "争辩", "反驳"), ResistancePatternType.DEFENSIVENESS),
+        )
+        for cues, pattern in resistance_cues:
+            if any(cue in coping_text for cue in cues):
+                preferred.append(pattern)
+
+        generic_tags = {
+            "影响", "关系", "事情", "感觉", "问题",
+            "经历", "成长", "过去", "情境", "发生", "当时",
+        }
+        triggers = [
+            tag
+            for fact in sorted(hidden, key=lambda item: item.sensitivity, reverse=True)
+            if fact.sensitivity >= 0.6
+            for tag in fact.activation_tags
+            if tag not in generic_tags
+        ]
+        emotion_source = " ".join(
+            [
+                str(info.get("main_problem", "")),
+                *(
+                    str(item.get("event", ""))
+                    + " "
+                    + str(item.get("automatic_thoughts", ""))
+                    for item in info.get("special_situations", [])
+                    if isinstance(item, dict)
+                ),
+            ]
+        )
+        emotions = [
+            term
+            for term in (
+                "焦虑", "紧张", "担心", "害怕", "低落", "无助",
+                "愤怒", "烦躁", "羞耻", "内疚", "悲伤", "孤独",
+            )
+            if term in emotion_source
+        ]
         return ClientRelationalProfile(
             core_belief_theme="；".join(beliefs[:3]),
+            self_response_pattern="；".join(coping[:3]),
+            therapy_triggers=list(dict.fromkeys(triggers))[:5],
             coping_patterns=list(dict.fromkeys(coping))[:5],
+            preferred_resistance_patterns=list(dict.fromkeys(preferred))[:3],
+            emotional_range=emotions[:6],
             source_fact_ids=[item.fact_id for item in hidden],
-            confidence=0.45 if beliefs or coping else 0,
+            confidence=0.6 if beliefs or coping else 0,
         )
 
 
@@ -603,7 +651,9 @@ def _upgrade_case_for_simulation(case: CounselingCase) -> CounselingCase:
             "personality": BigFive() if legacy_prior else profile.personality,
             "relational": (
                 PsychEvalAdapter._relational_profile(source_info, upgraded)
-                if profile.relational.confidence == 0
+                if profile.relational.confidence <= 0.45
+                and not profile.relational.preferred_resistance_patterns
+                and not profile.relational.therapy_triggers
                 else profile.relational
             ),
             "initial_state": (

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-from collections import defaultdict
 from collections.abc import Mapping
 from typing import Protocol
 
@@ -77,7 +76,7 @@ class DisclosureGate:
                 continue
             candidates.append((fact, matched, current_level + 1))
 
-        candidates, ambiguous = self._resolve_ambiguity(candidates)
+        candidates, ambiguous = self._resolve_ambiguity(candidates, text)
         for fact, matched, next_level in candidates:
             activated.append(fact.fact_id)
             evidence[fact.fact_id] = matched
@@ -118,26 +117,45 @@ class DisclosureGate:
     @staticmethod
     def _resolve_ambiguity(
         candidates: list[tuple[HiddenFact, list[str], int]],
+        text: str = "",
     ) -> tuple[list[tuple[HiddenFact, list[str], int]], list[str]]:
-        """Do not arbitrarily unlock several facts matched by identical generic tags."""
+        """Select one fact globally; tied best candidates require clarification."""
 
-        by_category: dict[str, list[tuple[HiddenFact, list[str], int]]] = defaultdict(list)
-        for candidate in candidates:
-            by_category[candidate[0].category].append(candidate)
-        resolved: list[tuple[HiddenFact, list[str], int]] = []
-        ambiguous: list[str] = []
-        for group in by_category.values():
-            if len(group) == 1:
-                resolved.extend(group)
-                continue
-            best_score = max(len(set(matched)) for _, matched, _ in group)
-            best = [item for item in group if len(set(item[1])) == best_score]
-            evidence_sets = {tuple(sorted(set(item[1]))) for item in best}
-            if len(best) > 1 and len(evidence_sets) == 1:
-                ambiguous.extend(item[0].fact_id for item in best)
-                continue
-            resolved.extend(best)
-        return resolved, ambiguous
+        if len(candidates) <= 1:
+            return candidates, []
+        generic = {
+            "影响", "关系", "事情", "感觉", "问题",
+            "经历", "成长", "过去", "情境", "发生", "当时",
+        }
+        growth_cues = ("成长", "经历", "过去", "小时候")
+        situation_cues = ("情境", "发生", "当时", "想法", "脑中", "假设", "应对")
+
+        def score(candidate: tuple[HiddenFact, list[str], int]) -> int:
+            fact, matched, _ = candidate
+            unique = set(matched)
+            specific_count = sum(tag not in generic for tag in unique)
+            generic_count = len(unique) - specific_count
+            cue_bonus = 0
+            if fact.category == "growth_experience" and any(
+                cue in text for cue in growth_cues
+            ):
+                cue_bonus = 2
+            elif fact.category == "cbt_special_situation" and any(
+                cue in text for cue in situation_cues
+            ):
+                cue_bonus = 2
+            return specific_count * 3 + generic_count + cue_bonus
+
+        scores = [score(candidate) for candidate in candidates]
+        best_score = max(scores)
+        best = [
+            candidate
+            for candidate, candidate_score in zip(candidates, scores, strict=True)
+            if candidate_score == best_score
+        ]
+        if len(best) == 1:
+            return best, []
+        return [], [candidate[0].fact_id for candidate in best]
 
     def allowed(
         self,
@@ -156,13 +174,18 @@ class DisclosureGate:
         session_index: int,
         turn_index: int,
         retrieved_facts: list[HiddenFact] | None = None,
+        evidence_by_fact_id: Mapping[str, str] | None = None,
     ) -> list[UnlockedFact]:
         index = {fact.fact_id: fact for fact in profile.hidden_facts}
         active = {fact.fact_id: fact for fact in retrieved_facts or []}
+        evidence = evidence_by_fact_id or {}
         return [
             UnlockedFact(
                 fact_id=fact_id,
-                content=active.get(fact_id, index[fact_id]).content,
+                content=(
+                    evidence.get(fact_id)
+                    or active.get(fact_id, index[fact_id]).content
+                ),
                 evidence_session=session_index,
                 evidence_turn=turn_index,
                 disclosure_level=active.get(fact_id, index[fact_id]).disclosure_level,

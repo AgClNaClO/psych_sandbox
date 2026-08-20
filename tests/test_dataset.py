@@ -92,3 +92,8 @@ def test_adapter_builds_source_grounded_layered_memories():
     assert growth.source_field == "client_info.growth_experiences[0]"
     assert case.profile.initial_state.arousal == 0.7
     assert case.profile.relational.core_belief_theme == "只有表现好才有价值"
+    assert case.profile.relational.attachment_pattern == "unspecified"
+    assert case.profile.personality.openness == 0.5
+    assert case.profile.relational.preferred_resistance_patterns
+    assert case.profile.relational.emotional_range
+    assert case.profile.relational.confidence == 0.6

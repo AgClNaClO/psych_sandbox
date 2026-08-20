@@ -24,14 +24,17 @@ from psychsandbox.domain import (
     CounselorDecision,
     CounselorTurn,
     DisclosureDecision,
+    HiddenFact,
     RiskAssessment,
     RiskLevel,
     TrustChange,
     SessionMemory,
+    UnlockedFact,
     UnlockedClientProfile,
 )
 from psychsandbox.model_client import MockGateway
 from psychsandbox.runtime import DisclosureGate, StateUpdater
+from psychsandbox.runtime.leakage import PrematureDisclosureGuard
 from psychsandbox.skills import HierarchicalSkillRetriever, SkillRegistry
 
 
@@ -247,7 +250,7 @@ class CountingMockGateway(MockGateway):
 
 
 def test_client_prompts_are_versioned_and_reexported():
-    assert CLIENT_PROMPT_VERSION == "psycheval_patientact_v3"
+    assert CLIENT_PROMPT_VERSION == "psycheval_patientact_v4"
     assert CLIENT_PLANNER_SYSTEM is CANONICAL_CLIENT_PLANNER_SYSTEM
     assert CLIENT_UTTERANCE_SYSTEM is CANONICAL_CLIENT_UTTERANCE_SYSTEM
 
@@ -397,6 +400,226 @@ def test_ordinary_follow_up_does_not_change_trust(sample_case):
     )
 
     assert signal.trust_change is TrustChange.UNCHANGED
+
+
+class SelectivePlannerGateway(MockGateway):
+    def __init__(self, selected_fact_id):
+        self.selected_fact_id = selected_fact_id
+
+    async def complete_structured(self, **kwargs):
+        if kwargs["output_schema"] is ClientTurnSignal:
+            return ClientTurnSignal(retrieved_fact_ids=[self.selected_fact_id])
+        return await super().complete_structured(**kwargs)
+
+
+def test_planner_fact_selection_constrains_utterance_payload(sample_case):
+    facts = sample_case.profile.hidden_facts[:2]
+    agent = ClientAgent(SelectivePlannerGateway(facts[0].fact_id))
+    disclosure = DisclosureDecision(retrieved=facts)
+    signal = asyncio.run(
+        agent.plan_turn(
+            profile=sample_case.profile,
+            state=sample_case.profile.initial_state,
+            counselor_message="请说一件最相关的经历。",
+            recent_messages=[],
+            disclosure=disclosure,
+            recent_signals=[],
+            turn_index=1,
+        )
+    )
+    payload = agent.build_utterance_payload(
+        profile=sample_case.profile,
+        state=sample_case.profile.initial_state,
+        counselor_message="请说一件最相关的经历。",
+        recent_messages=[],
+        disclosure=disclosure,
+        signal=signal,
+        turn_index=1,
+    )
+
+    assert signal.retrieved_fact_ids == [facts[0].fact_id]
+    assert [item["fact_id"] for item in payload["available_memories"]] == [
+        facts[0].fact_id
+    ]
+
+
+class UnsupportedDisclosureGateway(MockGateway):
+    def __init__(self, fact_id):
+        self.fact_id = fact_id
+
+    async def complete_structured(self, **kwargs):
+        if kwargs["output_schema"] is ClientUtterance:
+            return ClientUtterance(
+                utterance="我今天只是有点累。",
+                disclosed_fact_ids=[self.fact_id],
+            )
+        return await super().complete_structured(**kwargs)
+
+
+def test_unspoken_fact_id_is_not_accepted_as_disclosure(sample_case):
+    fact = sample_case.profile.hidden_facts[0]
+    agent = ClientAgent(UnsupportedDisclosureGateway(fact.fact_id))
+    generation, metadata = asyncio.run(
+        agent.generate_utterance(
+            profile=sample_case.profile,
+            state=sample_case.profile.initial_state,
+            counselor_message="可以说说吗？",
+            recent_messages=[],
+            disclosure=DisclosureDecision(retrieved=[fact]),
+            signal=ClientTurnSignal(retrieved_fact_ids=[fact.fact_id]),
+            already_disclosed_ids=set(),
+            turn_index=1,
+        )
+    )
+
+    assert generation.disclosed_fact_ids == []
+    assert metadata["attempts"][0]["unsubstantiated_fact_ids"] == [fact.fact_id]
+    assert metadata["disclosed_evidence"] == {}
+
+
+def test_disclosure_memory_uses_spoken_evidence_not_full_layer(sample_case):
+    fact = sample_case.profile.hidden_facts[0].model_copy(
+        update={
+            "content": "表层经历；更私密的意义",
+            "disclosure_layers": ["表层经历；更私密的意义"],
+        }
+    )
+    confirmed, rejected, evidence = PrematureDisclosureGuard().substantiate(
+        "我现在能说的是表层经历。",
+        [fact.fact_id],
+        [fact],
+    )
+    unlocked = DisclosureGate().unlock(
+        sample_case.profile.model_copy(update={"hidden_facts": [fact]}),
+        confirmed,
+        session_index=1,
+        turn_index=2,
+        retrieved_facts=[fact],
+        evidence_by_fact_id=evidence,
+    )
+
+    assert rejected == []
+    assert unlocked[0].content == "表层经历"
+    assert "更私密" not in unlocked[0].content
+
+
+def test_known_memories_are_available_without_being_new_disclosures(sample_case):
+    fact = sample_case.profile.hidden_facts[0]
+    known = UnlockedFact(
+        fact_id=fact.fact_id,
+        content="这是我上次已经说过的部分。",
+        evidence_session=1,
+        evidence_turn=2,
+        disclosure_level=len(fact.disclosure_layers),
+    )
+    payload = ClientAgent(MockGateway()).build_utterance_payload(
+        profile=sample_case.profile,
+        state=sample_case.profile.initial_state,
+        counselor_message="上次那件事后来怎么样？",
+        recent_messages=[],
+        disclosure=DisclosureDecision(),
+        signal=ClientTurnSignal(),
+        turn_index=1,
+        known_memories=[known],
+    )
+
+    assert payload["available_memories"] == []
+    assert payload["known_memories"][0]["content"] == known.content
+
+
+def test_known_evidence_does_not_authorize_unspoken_same_layer_detail(sample_case):
+    fact = sample_case.profile.hidden_facts[0].model_copy(
+        update={
+            "content": "我说过的表层经历；我没有说过的私密意义",
+            "disclosure_layers": ["我说过的表层经历；我没有说过的私密意义"],
+        }
+    )
+    unauthorized = ClientAgent(MockGateway())._unauthorized_remainders(
+        [fact],
+        {},
+        ["我说过的表层经历"],
+    )
+
+    assert len(unauthorized) == 1
+    assert "私密意义" in unauthorized[0].content
+    assert "表层经历" not in unauthorized[0].content
+
+
+def test_public_main_problem_is_not_treated_as_private_leak(repository):
+    case = repository.get("psycheval-cbt-020")
+    agent = ClientAgent(MockGateway())
+    unauthorized = agent._unauthorized_remainders(
+        case.profile.hidden_facts,
+        {},
+        agent._public_authorized_texts(case.profile, []),
+    )
+    result = PrematureDisclosureGuard().inspect(
+        case.profile.main_problem,
+        [],
+        unauthorized,
+        set(),
+    )
+
+    assert result.leaked is False
+
+
+def test_close_paraphrase_has_fuzzy_leak_signal():
+    fact = HiddenFact(
+        fact_id="semantic",
+        content="小学时父亲经常把我关在门外罚站",
+    )
+    result = PrematureDisclosureGuard().inspect(
+        "小学的时候父亲总把我关在门外罚站。",
+        [],
+        [fact],
+        set(),
+    )
+
+    assert result.leaked is True
+    assert any(
+        reason.startswith("fuzzy_clause:")
+        for reason in result.matches[fact.fact_id]
+    )
+
+
+def test_cross_category_overlap_selects_one_best_fact(sample_case):
+    state = sample_case.profile.initial_state.model_copy(
+        update={
+            "trust": 1.0,
+            "topic_readiness": {
+                fact.topic_key: 1.0 for fact in sample_case.profile.hidden_facts
+            },
+        }
+    )
+    decision = DisclosureGate().evaluate(
+        sample_case.profile,
+        state,
+        "实习工作时发生了什么？",
+        {},
+    )
+
+    assert [fact.fact_id for fact in decision.retrieved] == [
+        "psycheval-cbt-001:situation:1"
+    ]
+
+
+def test_trust_signal_is_not_double_counted_by_text_markers():
+    state = ClientState(trust=0.5)
+    counselor = CounselorTurn(
+        decision=CounselorDecision(
+            assessment="a", state_observation="b", strategy="c"
+        ),
+        response="不着急，我们按你的节奏，也可以先不谈。",
+    )
+    updated, features = StateUpdater().update(
+        state,
+        counselor,
+        ClientGeneration(utterance="好。"),
+        ClientTurnSignal(trust_change=TrustChange.SLIGHT_INCREASE),
+    )
+
+    assert updated.trust == 0.53
+    assert features["interaction_features"]["respected_boundary"] == 1.0
 
 
 class AlwaysLeakingGateway(MockGateway):

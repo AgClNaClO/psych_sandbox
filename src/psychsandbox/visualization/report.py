@@ -4,7 +4,7 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-from ..domain import RunResult, SessionRecord
+from ..domain import HolisticEvaluationReport, RunResult, SessionRecord, ScaleScore
 from .charts import metric_bars, state_line_chart
 
 
@@ -14,7 +14,7 @@ PROCESS_STEPS = (
     ("双重安全门", "输入风险与输出边界检查"),
     ("来访者反应", "披露门控 → 反应 → 行为/抗拒 → 表达"),
     ("状态更新", "信任、痛苦、希望与抗拒"),
-    ("督导与计划", "双侧评分 → 纵向趋势 → 下一计划"),
+    ("督导与计划", "规则督导 → 纵向趋势 → 进度驱动下一计划"),
 )
 
 ICON_BRAIN = (
@@ -70,6 +70,7 @@ def generate_run_report(result: RunResult, output: Path) -> Path:
         for session in result.sessions
         for record in session.turn_records
     )
+    holistic_html = _holistic_section(result.holistic_report)
     html = f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -94,6 +95,7 @@ def generate_run_report(result: RunResult, output: Path) -> Path:
     {_summary_card("高风险事件", str(safety_events), "需人工复核", "⚠️")}
     {_summary_card("暴露泄漏", str(leaks), "越低越好", "🔒")}
   </section>
+  {holistic_html}
   <section class="panel">
     <h2>运行过程</h2>
     <div class="process">{_process_flow()}</div>
@@ -134,6 +136,39 @@ def _process_flow() -> str:
         if index < len(PROCESS_STEPS):
             parts.append('<div class="arrow">→</div>')
     return "".join(parts)
+
+
+def _holistic_section(report: HolisticEvaluationReport | None) -> str:
+    if not report:
+        return ""
+    return f"""
+  <section class="panel">
+    <h2>整体督导评估（PsychEval 多会话后评估）</h2>
+    <p class="muted">Counselor-Level（临床胜任力）与 Client-Level（仿真保真度）评分，均为 0–10。</p>
+    <div class="session-grid">
+      <div>
+        <h4>Counselor-Level（Counselor={report.counselor_overall:.2f}）</h4>
+        {_scale_list(report.counselor_shared)}
+        {_scale_list(report.counselor_specific)}
+      </div>
+      <div>
+        <h4>Client-Level（Client={report.client_overall:.2f}）</h4>
+        {_scale_list(report.client_shared)}
+        {_scale_list(report.client_specific)}
+      </div>
+    </div>
+  </section>"""
+
+
+def _scale_list(scores: list[ScaleScore]) -> str:
+    if not scores:
+        return ""
+    rows = "".join(
+        f"<li><span>{escape(item.name)}</span><strong>{item.score:.2f}</strong>"
+        f"<small>{'共享' if item.category == 'therapy_shared' else '流派专属'}</small></li>"
+        for item in scores
+    )
+    return f'<ul class="scale-list">{rows}</ul>'
 
 
 def _session_section(session: SessionRecord) -> str:
@@ -413,7 +448,13 @@ color:#3730a3;border-radius:99px;padding:4px 12px;font-weight:700;font-size:13px
 .trend{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--line)}
 .delta{width:100%;border-collapse:collapse;margin:8px 0}
 .delta td{padding:6px;border-bottom:1px solid var(--line)}
-.delta td:last-child{text-align:right;font-variant-numeric:tabular-nums;font-weight:600}
+  .delta td:last-child{text-align:right;font-variant-numeric:tabular-nums;font-weight:600}
+  .scale-list{list-style:none;padding:0;margin:0}
+  .scale-list li{display:flex;justify-content:space-between;align-items:center;gap:8px;
+  padding:8px 0;border-bottom:1px solid var(--line)}
+  .scale-list li span{font-weight:600}
+  .scale-list li strong{color:var(--blue);font-variant-numeric:tabular-nums}
+  .scale-list li small{color:var(--muted);font-size:11px}
 .positive{color:var(--green)}.negative{color:var(--red)}
 
 /* ---- Details (collapsible) ---- */

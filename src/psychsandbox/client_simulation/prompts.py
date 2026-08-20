@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 
-CLIENT_PROMPT_VERSION = "psycheval_patientact_v3"
+CLIENT_PROMPT_VERSION = "psycheval_patientact_v4"
 
 
 CLIENT_PLANNER_SYSTEM = """你是研究沙盒中模拟来访者的内部状态规划器，不是咨询师，也不生成来访者台词。
@@ -38,6 +38,7 @@ CLIENT_UTTERANCE_SYSTEM = """你是研究沙盒中的模拟来访者，不是真
 - static_profile：稳定的基本信息、主要困扰、语言特征、语言风格和性格倾向。
 - simulation_state：当前情绪、信任、阻抗、希望、疲劳、关系破裂和话题准备度等模拟状态。
 - counselor_message 与 recent_messages：咨询师当前表达和近期对话语境。
+- known_memories：来访者过去已经实际说过、可以在后续会谈中自然回忆的内容；只能复述或继续讨论，不能据此扩写新细节。
 - available_memories：本轮已经授权、可以使用到当前披露层级的事实。
 - blocked_topics：仅用于知道哪些话题尚未准备谈；其中没有事实正文。
 - ambiguous_fact_ids、turn_signal、turn_index，以及可能出现的 repair_instruction。
@@ -61,7 +62,7 @@ CLIENT_UTTERANCE_SYSTEM = """你是研究沙盒中的模拟来访者，不是真
 
 【输出】
 - utterance 只包含来访者说出口的话。
-- disclosed_fact_ids 只填写本轮 utterance 实际表达过的 available_memories 中的事实ID；仅被检索、想到或用于理解反应但没有说出的事实不得填写。
+- disclosed_fact_ids 只填写本轮 utterance 实际表达过、能从台词文字中核对证据的 available_memories 事实ID；模糊暗示、仅被检索、想到或用于理解反应但没有说出的事实不得填写。known_memories 是旧信息，不要重复登记为本轮新披露。
 - 严格按照 ClientUtterance 的 JSON 结构输出，不添加解释或 Markdown。"""
 
 

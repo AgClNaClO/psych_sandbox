@@ -65,10 +65,14 @@ def test_longitudinal_report_and_feedback_plan_are_persisted(root, tmp_path):
     )
     assert all(session.longitudinal_report for session in result.sessions)
     assert result.sessions[0].longitudinal_report.trend == "baseline"
-    assert any(
+    # 督导评分不再回写下一 session 计划：规划由纵向进度信号驱动。
+    assert not any(
         objective.startswith("督导修复：")
         for objective in result.sessions[0].next_session_plan.objectives
     )
+    assert result.holistic_report is not None
+    assert result.holistic_report.counselor_shared
+    assert result.holistic_report.client_shared
     restored = sandbox.store.load_run(result.run_id)
     assert restored.sessions[1].longitudinal_report is not None
 
@@ -90,14 +94,17 @@ def test_six_session_course_keeps_state_and_memory_continuity(root, tmp_path):
     )
     assert len(result.sessions) == 6
     assert result.final_memory.completed_sessions == 6
-    assert all(
-        current.initial_state == previous.final_state
-        for previous, current in zip(
-            result.sessions[:-1],
-            result.sessions[1:],
-            strict=True,
+    for previous, current in zip(
+        result.sessions[:-1],
+        result.sessions[1:],
+        strict=True,
+    ):
+        assert current.initial_state.model_dump(
+            exclude={"fatigue"}
+        ) == previous.final_state.model_dump(exclude={"fatigue"})
+        assert current.initial_state.fatigue == max(
+            0.1, round(previous.final_state.fatigue - 0.25, 4)
         )
-    )
 
 
 def test_visual_report_contains_process_results_and_turns(root, tmp_path):

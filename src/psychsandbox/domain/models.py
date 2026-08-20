@@ -342,6 +342,74 @@ class SessionPlan(StrictModel):
     completion_threshold: float = Field(default=0.7, ge=0, le=1)
 
 
+class ExtractedClientInfo(StrictModel):
+    """Counselor-visible client information extracted from one session (E.7).
+
+    Mirrors the structure of ``ClientProfile`` but contains only what was
+    actually revealed in the current dialogue. Empty values mean "not
+    mentioned"; unknown facts must never be invented.
+    """
+
+    static_traits: StaticTraits = Field(default_factory=StaticTraits)
+    main_problem: str = ""
+    topic: str = ""
+    core_demands: str = ""
+    growth_experiences: list[str] = Field(default_factory=list)
+    theory: dict[str, Any] = Field(default_factory=dict)
+    source_session: int = Field(default=1, ge=1)
+
+
+class MergedClientProfile(StrictModel):
+    """Counselor's longitudinal, deduplicated memory of a client (E.8).
+
+    This is the merge of previously-known plus newly-extracted information,
+    controlled by ground truth so that hallucinated or contradicting entries
+    are dropped. It never contains facts the counselor has not observed.
+    """
+
+    client_id: str
+    static_traits: StaticTraits = Field(default_factory=StaticTraits)
+    main_problem: str = ""
+    topic: str = ""
+    core_demands: str = ""
+    growth_experiences: list[str] = Field(default_factory=list)
+    theory: dict[str, Any] = Field(default_factory=dict)
+    updated_session: int = Field(default=1, ge=1)
+
+
+class GoalAssessment(StrictModel):
+    objective_recap: str = ""
+    completion_status: str = ""
+    evidence_and_analysis: str = ""
+
+
+class ClientStateAnalysis(StrictModel):
+    affective_state: str = ""
+    behavioral_patterns: str = ""
+    therapeutic_alliance: str = ""
+    unresolved_points_or_tensions: str = ""
+    cognitive_patterns: str = ""
+    subconscious_manifestation: str = ""
+    personal_agency: str = ""
+    existentialism_topic: str = ""
+    target_behavior: str = ""
+
+
+class ClinicalSummary(StrictModel):
+    """Structured clinical summary bridging consecutive sessions (E.9).
+
+    This is the counselor's long-term memory written by an external clinical
+    supervisor.  Every field must be grounded in the current session dialogue;
+    forward-looking diagnostic conclusions are forbidden.
+    """
+
+    session_index: int = Field(ge=1)
+    session_summary_abstract: str = ""
+    goal_assessment: GoalAssessment = Field(default_factory=GoalAssessment)
+    client_state_analysis: ClientStateAnalysis = Field(default_factory=ClientStateAnalysis)
+    homework: list[str] = Field(default_factory=list)
+
+
 class SessionMemory(StrictModel):
     case_id: str
     completed_sessions: int = Field(default=0, ge=0)
@@ -356,6 +424,7 @@ class SessionMemory(StrictModel):
     relationship_events: list[str] = Field(default_factory=list)
     between_session_context: list[str] = Field(default_factory=list)
     last_client_closing: str = ""
+    evolving_profile: MergedClientProfile | None = None
 
 
 class Message(StrictModel):
@@ -435,6 +504,61 @@ class ClientSimulationReport(StrictModel):
     created_at: str = Field(default_factory=utc_now)
 
 
+class ScaleItem(StrictModel):
+    """Single item rating returned by a PsychEval instrument prompt."""
+
+    item: str
+    score: float
+
+
+class ScaleItems(StrictModel):
+    """Wrapper for the official `{"items": [...]}` output format."""
+
+    items: list[ScaleItem] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_items(cls, data: Any) -> Any:
+        if isinstance(data, list):
+            return {"items": data}
+        return data
+
+
+class ScaleScore(StrictModel):
+    """Aggregated 0-10 score for one PsychEval instrument.
+
+    ``item_scores`` preserves raw per-item ratings (usually 1-5) keyed by item
+    number string, while ``score`` carries the normalized, direction-adjusted
+    0-10 summary used for reporting.
+    """
+
+    name: str
+    level: Literal["counselor", "client"]
+    category: Literal["therapy_shared", "therapy_specific"]
+    direction: Literal["higher_better", "lower_better"]
+    score: float = Field(ge=0, le=10)
+    item_scores: dict[str, float] = Field(default_factory=dict)
+
+
+class HolisticEvaluationReport(StrictModel):
+    """Post-trajectory external supervision result aligned with PsychEval.
+
+    This is produced once after all sessions finish, separating evaluation
+    (this report) from planning (MemoryConsolidator / PlanBuilder).
+    """
+
+    run_id: str
+    case_id: str
+    therapy: str
+    counselor_shared: list[ScaleScore] = Field(default_factory=list)
+    counselor_specific: list[ScaleScore] = Field(default_factory=list)
+    client_shared: list[ScaleScore] = Field(default_factory=list)
+    client_specific: list[ScaleScore] = Field(default_factory=list)
+    counselor_overall: float = Field(ge=0, le=10)
+    client_overall: float = Field(ge=0, le=10)
+    created_at: str = Field(default_factory=utc_now)
+
+
 class SessionRecord(StrictModel):
     session_id: str
     session_index: int
@@ -445,6 +569,7 @@ class SessionRecord(StrictModel):
     decisions: list[CounselorDecision] = Field(default_factory=list)
     turn_records: list[dict[str, Any]] = Field(default_factory=list)
     summary: str
+    clinical_summary: ClinicalSummary | None = None
     newly_unlocked_fact_ids: list[str] = Field(default_factory=list)
     interventions_used: list[str] = Field(default_factory=list)
     risk_events: list[RiskAssessment] = Field(default_factory=list)
@@ -488,6 +613,7 @@ class RunResult(StrictModel):
     seed: int
     sessions: list[SessionRecord]
     final_memory: SessionMemory
+    holistic_report: HolisticEvaluationReport | None = None
     created_at: str = Field(default_factory=utc_now)
 
 

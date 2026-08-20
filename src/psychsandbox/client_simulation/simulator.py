@@ -54,6 +54,8 @@ class ClientSimulator:
     accounting, leakage checks, and state transition.
     """
 
+    SESSION_FATIGUE_RECOVERY = 0.25
+
     def __init__(
         self,
         agent: ClientAgent,
@@ -98,6 +100,7 @@ class ClientSimulator:
             signal=signal,
             already_disclosed_ids=set(),
             disclosed_levels=disclosed_levels,
+            known_memories=turn.unlocked_facts,
             turn_index=turn.turn_index,
         )
         unlocked = self.disclosure.unlock(
@@ -106,6 +109,7 @@ class ClientSimulator:
             session_index=turn.session_index,
             turn_index=turn.turn_index,
             retrieved_facts=disclosure.retrieved,
+            evidence_by_fact_id=leakage.get("disclosed_evidence", {}),
         )
         state_after, state_update = self.state_updater.update(
             turn.state,
@@ -141,8 +145,30 @@ class ClientSimulator:
         for fact in new:
             previous = merged.get(fact.fact_id)
             if previous is None or fact.disclosure_level > previous.disclosure_level:
-                merged[fact.fact_id] = fact
+                if previous is None or previous.content in fact.content:
+                    merged[fact.fact_id] = fact
+                elif fact.content in previous.content:
+                    merged[fact.fact_id] = fact.model_copy(
+                        update={"content": previous.content}
+                    )
+                else:
+                    merged[fact.fact_id] = fact.model_copy(
+                        update={"content": f"{previous.content}；{fact.content}"}
+                    )
         return list(merged.values())
+
+    @staticmethod
+    def prepare_session_state(state: ClientState) -> ClientState:
+        """Carry longitudinal state while allowing short-term fatigue to recover."""
+
+        return state.model_copy(
+            update={
+                "fatigue": round(
+                    max(0.1, state.fatigue - ClientSimulator.SESSION_FATIGUE_RECOVERY),
+                    4,
+                )
+            }
+        )
 
     @staticmethod
     def start_session(

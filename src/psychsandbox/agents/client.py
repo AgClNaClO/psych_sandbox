@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from ..client_simulation.prompts import (
@@ -19,9 +20,10 @@ from ..domain import (
     HiddenFact,
     Message,
     ResistancePatternType,
+    UnlockedFact,
 )
 from ..model_client import ModelGateway
-from ..runtime.leakage import PrematureDisclosureGuard
+from ..runtime.leakage import PrematureDisclosureGuard, normalize_disclosure_text
 
 
 THERAPEUTIC_BEHAVIORS = {
@@ -91,8 +93,8 @@ class ClientAgent:
             for item in signal.blocked_fact_ids
             if item in {fact.fact_id for fact in disclosure.blocked}
         ]
-        signal.blocked_fact_ids = [item.fact_id for item in disclosure.blocked]
-        signal.retrieved_fact_ids = [item.fact_id for item in disclosure.retrieved]
+        if disclosure.ambiguous_fact_ids:
+            signal.retrieved_fact_ids = []
         return self._apply_pullback(signal, state, recent_signals)
 
     async def generate_utterance(
@@ -107,19 +109,32 @@ class ClientAgent:
         already_disclosed_ids: set[str],
         turn_index: int,
         disclosed_levels: dict[str, int] | None = None,
+        known_memories: list[UnlockedFact] | None = None,
     ) -> tuple[ClientGeneration, dict[str, Any]]:
         known_levels = dict(disclosed_levels or {})
         for item in already_disclosed_ids:
             fact = next((fact for fact in profile.hidden_facts if fact.fact_id == item), None)
             if fact is not None:
                 known_levels.setdefault(item, len(fact.disclosure_layers))
+        selected_ids = set(signal.retrieved_fact_ids)
+        if disclosure.ambiguous_fact_ids:
+            selected_ids.clear()
+        allowed_facts = [
+            item for item in disclosure.retrieved if item.fact_id in selected_ids
+        ]
         allowed_levels = {
             item.fact_id: max(known_levels.get(item.fact_id, 0), item.disclosure_level)
-            for item in disclosure.retrieved
+            for item in allowed_facts
         }
         allowed_ids = set(allowed_levels)
+        public_texts = self._public_authorized_texts(profile, known_memories or [])
         unauthorized = self._unauthorized_remainders(
-            profile.hidden_facts, known_levels | allowed_levels
+            profile.hidden_facts,
+            # Current authorized layers may be spoken now.  Earlier sessions
+            # authorize only their stored evidence text, not the rest of the
+            # canonical layer that was never actually verbalized.
+            allowed_levels,
+            public_texts,
         )
         attempts: list[dict[str, Any]] = []
         utterance: ClientUtterance | None = None
@@ -137,18 +152,22 @@ class ClientAgent:
                     signal=signal,
                     turn_index=turn_index,
                     repair_instruction=repair_instruction,
+                    known_memories=known_memories or [],
                 ),
                 output_schema=ClientUtterance,
                 temperature=self.temperature,
             )
             raw_utterance = ClientUtterance.model_validate(result)
             declared_fact_ids = list(raw_utterance.disclosed_fact_ids)
+            confirmed_ids, unsubstantiated_ids, disclosed_evidence = (
+                self.leakage_guard.substantiate(
+                    raw_utterance.utterance,
+                    declared_fact_ids,
+                    allowed_facts,
+                )
+            )
             utterance = raw_utterance.model_copy(
-                update={
-                    "disclosed_fact_ids": [
-                        item for item in declared_fact_ids if item in allowed_ids
-                    ]
-                }
+                update={"disclosed_fact_ids": confirmed_ids}
             )
             check = self.leakage_guard.inspect(
                 utterance.utterance,
@@ -156,7 +175,14 @@ class ClientAgent:
                 unauthorized,
                 allowed_ids,
             )
-            attempts.append({"attempt": attempt + 1, **check.as_dict()})
+            attempts.append(
+                {
+                    "attempt": attempt + 1,
+                    **check.as_dict(),
+                    "unsubstantiated_fact_ids": unsubstantiated_ids,
+                    "disclosed_evidence": disclosed_evidence,
+                }
+            )
             if not check.leaked:
                 break
             repair_instruction = (
@@ -175,6 +201,10 @@ class ClientAgent:
             "attempts": attempts,
             "retry_count": max(0, len(attempts) - 1),
             "used_fallback": used_fallback,
+            "disclosed_evidence": (
+                {} if used_fallback or not attempts
+                else attempts[-1]["disclosed_evidence"]
+            ),
         }
 
     def build_utterance_payload(
@@ -188,6 +218,7 @@ class ClientAgent:
         signal: ClientTurnSignal,
         turn_index: int,
         repair_instruction: str = "",
+        known_memories: list[UnlockedFact] | None = None,
     ) -> dict[str, Any]:
         traits = profile.static_traits
         payload: dict[str, Any] = {
@@ -207,8 +238,15 @@ class ClientAgent:
             "recent_messages": [
                 item.model_dump(mode="json") for item in recent_messages[-8:]
             ],
+            "known_memories": [
+                item.model_dump(mode="json")
+                for item in (known_memories or [])[-12:]
+            ],
             "available_memories": [
-                item.model_dump(mode="json") for item in disclosure.retrieved
+                item.model_dump(mode="json")
+                for item in disclosure.retrieved
+                if item.fact_id in set(signal.retrieved_fact_ids)
+                and not disclosure.ambiguous_fact_ids
             ],
             "blocked_topics": [
                 item.model_dump(mode="json") for item in disclosure.blocked
@@ -223,8 +261,11 @@ class ClientAgent:
 
     @staticmethod
     def _unauthorized_remainders(
-        facts: list[HiddenFact], authorized_levels: dict[str, int]
+        facts: list[HiddenFact],
+        authorized_levels: dict[str, int],
+        public_texts: list[str] | None = None,
     ) -> list[HiddenFact]:
+        public = normalize_disclosure_text(" ".join(public_texts or []))
         remaining: list[HiddenFact] = []
         for fact in facts:
             level = authorized_levels.get(fact.fact_id, 0)
@@ -233,9 +274,35 @@ class ClientAgent:
             final = fact.disclosure_layers[-1]
             authorized = fact.disclosure_layers[level - 1] if level else ""
             hidden_text = final[len(authorized):].lstrip(" ，。！？；,!?;")
-            if hidden_text:
-                remaining.append(fact.model_copy(update={"content": hidden_text}))
+            clauses = [
+                item.strip()
+                for item in re.split(r"(?<=[，。！？；,.!?;])", hidden_text)
+                if item.strip()
+                and normalize_disclosure_text(item) not in public
+            ]
+            if clauses:
+                remaining.append(
+                    fact.model_copy(update={"content": "".join(clauses)})
+                )
         return remaining
+
+    @staticmethod
+    def _public_authorized_texts(
+        profile: ClientProfile,
+        known_memories: list[UnlockedFact],
+    ) -> list[str]:
+        traits = profile.static_traits
+        return [
+            str(traits.name),
+            str(traits.age),
+            str(traits.gender),
+            str(traits.occupation),
+            traits.language_features,
+            profile.main_problem,
+            profile.topic,
+            profile.language_style,
+            *(item.content for item in known_memories),
+        ]
 
     async def respond(
         self,

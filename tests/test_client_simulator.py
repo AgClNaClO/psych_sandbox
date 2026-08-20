@@ -5,6 +5,7 @@ import asyncio
 from psychsandbox.agents import ClientAgent
 from psychsandbox.client_simulation import ClientSimulator, ClientTurnInput
 from psychsandbox.domain import (
+    ClientState,
     CounselorDecision,
     CounselorTurn,
     SessionMemory,
@@ -21,6 +22,23 @@ def _counselor(response: str) -> CounselorTurn:
             strategy="澄清",
         ),
         response=response,
+    )
+
+
+def test_session_boundary_recovers_fatigue_without_resetting_longitudinal_state():
+    previous = ClientState(
+        trust=0.63,
+        distress=0.71,
+        hope=0.44,
+        fatigue=0.82,
+        topic_readiness={"work": 0.55},
+    )
+
+    recovered = ClientSimulator.prepare_session_state(previous)
+
+    assert recovered.fatigue == 0.57
+    assert recovered.model_dump(exclude={"fatigue"}) == previous.model_dump(
+        exclude={"fatigue"}
     )
 
 
@@ -77,6 +95,30 @@ def test_simulator_owns_progressive_disclosure_pipeline(sample_case):
     merged = simulator.merge_unlocked(first.newly_unlocked, second.newly_unlocked)
     assert len(merged) == 1
     assert merged[0].content == "表层经历；更私密的意义"
+
+
+def test_merge_unlocked_preserves_separate_spoken_evidence_fragments():
+    from psychsandbox.domain import UnlockedFact
+
+    first = UnlockedFact(
+        fact_id="fact:1",
+        content="我上次只说了表层经历",
+        evidence_session=1,
+        evidence_turn=2,
+        disclosure_level=1,
+    )
+    second = first.model_copy(
+        update={
+            "content": "这次补充了它对我的意义",
+            "evidence_session": 2,
+            "evidence_turn": 3,
+            "disclosure_level": 2,
+        }
+    )
+
+    merged = ClientSimulator.merge_unlocked([first], [second])
+
+    assert merged[0].content == "我上次只说了表层经历；这次补充了它对我的意义"
 
 
 def test_session_opening_does_not_reuse_context_dependent_name_answer(sample_case):

@@ -46,7 +46,12 @@ def test_each_turn_has_safety_and_decision(sandbox):
 
 def test_state_continues_across_sessions(sandbox):
     result = asyncio.run(sandbox.run_case("psycheval-cbt-007", session_count=2))
-    assert result.sessions[1].initial_state == result.sessions[0].final_state
+    previous = result.sessions[0].final_state
+    current = result.sessions[1].initial_state
+    assert current.fatigue == max(0.1, round(previous.fatigue - 0.25, 4))
+    assert current.model_dump(exclude={"fatigue"}) == previous.model_dump(
+        exclude={"fatigue"}
+    )
 
 
 def test_sqlite_resume_boundary(sandbox):

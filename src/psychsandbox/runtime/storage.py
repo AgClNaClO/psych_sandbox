@@ -4,7 +4,14 @@ import json
 import sqlite3
 from pathlib import Path
 
-from ..domain import RunResult, SessionMemory, SessionRecord, Trajectory, utc_now
+from ..domain import (
+    HolisticEvaluationReport,
+    RunResult,
+    SessionMemory,
+    SessionRecord,
+    Trajectory,
+    utc_now,
+)
 
 
 SCHEMA = """
@@ -44,6 +51,9 @@ CREATE TABLE IF NOT EXISTS client_evaluations (
 CREATE TABLE IF NOT EXISTS trajectories (
   trajectory_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, session_index INTEGER NOT NULL,
   trajectory_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS holistic_evaluations (
+  run_id TEXT PRIMARY KEY, report_json TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS skills (
   skill_id TEXT PRIMARY KEY, skill_json TEXT NOT NULL
@@ -143,6 +153,15 @@ class SQLiteStore:
         )
         self.connection.commit()
 
+    def save_holistic_report(
+        self, run_id: str, report: HolisticEvaluationReport
+    ) -> None:
+        self.connection.execute(
+            "INSERT OR REPLACE INTO holistic_evaluations VALUES (?,?)",
+            (run_id, report.model_dump_json()),
+        )
+        self.connection.commit()
+
     def load_memory(self, run_id: str) -> SessionMemory | None:
         row = self.connection.execute(
             "SELECT memory_json FROM memories WHERE run_id=? ORDER BY session_index DESC LIMIT 1",
@@ -165,6 +184,7 @@ class SQLiteStore:
         memory = self.load_memory(run_id)
         if memory is None:
             raise ValueError(f"Run {run_id} has no session boundary to restore")
+        holistic = self.load_holistic_report(run_id)
         return RunResult(
             run_id=run_id,
             case_id=row["case_id"],
@@ -172,8 +192,16 @@ class SQLiteStore:
             seed=row["seed"],
             sessions=self.load_sessions(run_id),
             final_memory=memory,
+            holistic_report=holistic,
             created_at=row["created_at"],
         )
+
+    def load_holistic_report(self, run_id: str) -> HolisticEvaluationReport | None:
+        row = self.connection.execute(
+            "SELECT report_json FROM holistic_evaluations WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+        return HolisticEvaluationReport.model_validate_json(row[0]) if row else None
 
     def evaluation_rows(self, run_id: str) -> list[dict]:
         rows = self.connection.execute(

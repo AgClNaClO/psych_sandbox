@@ -1,10 +1,12 @@
 from .client_realism import ClientSimulationEvaluator
 from .longitudinal import LongitudinalEvaluator
+from .psycheval_supervisor import PsychEvalSupervisor
 from .rule_session import RuleSessionEvaluator
 
 __all__ = [
     "ClientSimulationEvaluator",
     "LongitudinalEvaluator",
+    "PsychEvalSupervisor",
     "RuleSessionEvaluator",
     "SupervisorAgent",
 ]

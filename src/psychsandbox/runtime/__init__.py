@@ -1,7 +1,7 @@
 from .disclosure import DisclosureGate
 from .dialogue_guard import BoundarySignal, DialogueLoopGuard
 from .leakage import PrematureDisclosureGuard
-from .planning import FeedbackPlanBuilder
+from .planning import PlanBuilder
 from .safety import SafetyStateMachine
 from .state import StateUpdater
 from .storage import SQLiteStore
@@ -11,7 +11,7 @@ __all__ = [
     "BoundarySignal",
     "DisclosureGate",
     "DialogueLoopGuard",
-    "FeedbackPlanBuilder",
+    "PlanBuilder",
     "PrematureDisclosureGuard",
     "SafetyStateMachine",
     "SQLiteStore",
