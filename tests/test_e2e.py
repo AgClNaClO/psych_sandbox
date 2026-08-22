@@ -10,18 +10,18 @@ from psychsandbox.domain import SandboxConfig, SkillStatus, SkillVersion
 from psychsandbox.evolution import SkillEvolutionManager
 from psychsandbox.model_client import ModelGateway
 from psychsandbox.runtime import CounselingSandbox, SQLiteStore
+from tests.deterministic_gateway import DeterministicGateway
 
 
 @pytest.fixture
 def sandbox(root, tmp_path):
     config = SandboxConfig(
         project_root=root,
-        provider="mock",
         max_turns_per_session=2,
         database_path=tmp_path / "test.sqlite3",
         trace_dir=tmp_path / "traces",
     )
-    return CounselingSandbox(config)
+    return CounselingSandbox(config, gateway=DeterministicGateway())
 
 
 def test_three_session_end_to_end(sandbox):
@@ -115,14 +115,15 @@ def test_old_session_json_without_client_report_still_loads(sandbox):
 def test_patientact_pipeline_can_be_disabled(root, tmp_path):
     config = SandboxConfig(
         project_root=root,
-        provider="mock",
         max_turns_per_session=1,
         patientact_enabled=False,
         database_path=tmp_path / "disabled.sqlite3",
         trace_dir=tmp_path / "disabled-traces",
     )
     result = asyncio.run(
-        CounselingSandbox(config).run_case("psycheval-cbt-009", session_count=1)
+        CounselingSandbox(
+            config, gateway=DeterministicGateway()
+        ).run_case("psycheval-cbt-009", session_count=1)
     )
     signal = result.sessions[0].turn_records[0]["client_turn_signal"]
     assert signal["rationale"].startswith("PATIENTACT internal planning disabled")
@@ -138,7 +139,6 @@ class FailingGateway(ModelGateway):
 def test_failed_run_is_persisted(root, tmp_path):
     config = SandboxConfig(
         project_root=root,
-        provider="mock",
         max_turns_per_session=1,
         database_path=tmp_path / "failed.sqlite3",
         trace_dir=tmp_path / "failed-traces",

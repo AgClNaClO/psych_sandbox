@@ -32,7 +32,7 @@ from psychsandbox.domain import (
     UnlockedFact,
     UnlockedClientProfile,
 )
-from psychsandbox.model_client import MockGateway
+from tests.deterministic_gateway import DeterministicGateway
 from psychsandbox.runtime import DisclosureGate, StateUpdater
 from psychsandbox.runtime.leakage import PrematureDisclosureGuard
 from psychsandbox.skills import HierarchicalSkillRetriever, SkillRegistry
@@ -189,7 +189,7 @@ def test_counselor_payload_has_no_full_profile(sample_case):
         case_id=sample_case.case_id,
         unlocked_profile=UnlockedClientProfile(client_id=sample_case.profile.client_id),
     )
-    payload = CounselorAgent(MockGateway()).build_payload(
+    payload = CounselorAgent(DeterministicGateway()).build_payload(
         memory=memory,
         plan=sample_case.global_plan[0],
         client_message="你好",
@@ -204,12 +204,12 @@ def test_counselor_payload_has_no_full_profile(sample_case):
         assert fact.content not in dumped
 
 
-def test_mock_gateway_structured_output(sample_case):
+def test_deterministic_gateway_structured_output(sample_case):
     memory = SessionMemory(
         case_id=sample_case.case_id,
         unlocked_profile=UnlockedClientProfile(client_id=sample_case.profile.client_id),
     )
-    result = asyncio.run(CounselorAgent(MockGateway()).respond(
+    result = asyncio.run(CounselorAgent(DeterministicGateway()).respond(
         memory=memory,
         plan=sample_case.global_plan[0],
         client_message="我很焦虑",
@@ -226,7 +226,7 @@ def test_high_risk_counselor_routes_to_safety(sample_case):
         case_id=sample_case.case_id,
         unlocked_profile=UnlockedClientProfile(client_id=sample_case.profile.client_id),
     )
-    result = asyncio.run(CounselorAgent(MockGateway()).respond(
+    result = asyncio.run(CounselorAgent(DeterministicGateway()).respond(
         memory=memory,
         plan=sample_case.global_plan[0],
         client_message="我想自杀",
@@ -238,7 +238,7 @@ def test_high_risk_counselor_routes_to_safety(sample_case):
     assert "安全" in result.response
 
 
-class CountingMockGateway(MockGateway):
+class CountingDeterministicGateway(DeterministicGateway):
     def __init__(self):
         self.calls = []
         self.requests = []
@@ -305,7 +305,7 @@ def test_client_utterance_prompt_contract():
 
 
 def test_client_two_stage_calls_and_strict_utterance_payload(sample_case):
-    gateway = CountingMockGateway()
+    gateway = CountingDeterministicGateway()
     agent = ClientAgent(gateway)
     disclosure = DisclosureDecision()
     signal = asyncio.run(agent.plan_turn(
@@ -355,7 +355,7 @@ def test_ambiguous_facts_request_clarification_without_disclosure(sample_case):
         retrieved=facts,
         ambiguous_fact_ids=[fact.fact_id for fact in facts],
     )
-    agent = ClientAgent(MockGateway())
+    agent = ClientAgent(DeterministicGateway())
     signal = asyncio.run(
         agent.plan_turn(
             profile=sample_case.profile,
@@ -388,7 +388,7 @@ def test_ambiguous_facts_request_clarification_without_disclosure(sample_case):
 
 def test_ordinary_follow_up_does_not_change_trust(sample_case):
     signal = asyncio.run(
-        ClientAgent(MockGateway()).plan_turn(
+        ClientAgent(DeterministicGateway()).plan_turn(
             profile=sample_case.profile,
             state=sample_case.profile.initial_state,
             counselor_message="最近怎么样？",
@@ -402,7 +402,7 @@ def test_ordinary_follow_up_does_not_change_trust(sample_case):
     assert signal.trust_change is TrustChange.UNCHANGED
 
 
-class SelectivePlannerGateway(MockGateway):
+class SelectivePlannerGateway(DeterministicGateway):
     def __init__(self, selected_fact_id):
         self.selected_fact_id = selected_fact_id
 
@@ -443,7 +443,7 @@ def test_planner_fact_selection_constrains_utterance_payload(sample_case):
     ]
 
 
-class UnsupportedDisclosureGateway(MockGateway):
+class UnsupportedDisclosureGateway(DeterministicGateway):
     def __init__(self, fact_id):
         self.fact_id = fact_id
 
@@ -512,7 +512,7 @@ def test_known_memories_are_available_without_being_new_disclosures(sample_case)
         evidence_turn=2,
         disclosure_level=len(fact.disclosure_layers),
     )
-    payload = ClientAgent(MockGateway()).build_utterance_payload(
+    payload = ClientAgent(DeterministicGateway()).build_utterance_payload(
         profile=sample_case.profile,
         state=sample_case.profile.initial_state,
         counselor_message="上次那件事后来怎么样？",
@@ -534,7 +534,7 @@ def test_known_evidence_does_not_authorize_unspoken_same_layer_detail(sample_cas
             "disclosure_layers": ["我说过的表层经历；我没有说过的私密意义"],
         }
     )
-    unauthorized = ClientAgent(MockGateway())._unauthorized_remainders(
+    unauthorized = ClientAgent(DeterministicGateway())._unauthorized_remainders(
         [fact],
         {},
         ["我说过的表层经历"],
@@ -547,7 +547,7 @@ def test_known_evidence_does_not_authorize_unspoken_same_layer_detail(sample_cas
 
 def test_public_main_problem_is_not_treated_as_private_leak(repository):
     case = repository.get("psycheval-cbt-020")
-    agent = ClientAgent(MockGateway())
+    agent = ClientAgent(DeterministicGateway())
     unauthorized = agent._unauthorized_remainders(
         case.profile.hidden_facts,
         {},
@@ -622,7 +622,7 @@ def test_trust_signal_is_not_double_counted_by_text_markers():
     assert features["interaction_features"]["respected_boundary"] == 1.0
 
 
-class AlwaysLeakingGateway(MockGateway):
+class AlwaysLeakingGateway(DeterministicGateway):
     def __init__(self, fact):
         self.fact = fact
         self.utterance_calls = 0
@@ -670,7 +670,7 @@ def test_respectful_and_pushy_messages_diverge(sample_case):
             )
         ]
     )
-    agent = ClientAgent(MockGateway())
+    agent = ClientAgent(DeterministicGateway())
     pushy = asyncio.run(agent.plan_turn(
         profile=sample_case.profile,
         state=sample_case.profile.initial_state,
@@ -706,7 +706,7 @@ def test_blocked_memory_does_not_force_resistance_without_pressure(sample_case):
         ]
     )
     signal = asyncio.run(
-        ClientAgent(MockGateway()).plan_turn(
+        ClientAgent(DeterministicGateway()).plan_turn(
             profile=sample_case.profile,
             state=sample_case.profile.initial_state,
             counselor_message="如果你愿意，可以只说现在能说的部分。",
@@ -721,7 +721,7 @@ def test_blocked_memory_does_not_force_resistance_without_pressure(sample_case):
 
 
 def test_client_pulls_back_after_consecutive_exploration(sample_case):
-    agent = ClientAgent(MockGateway(), pullback_after=2)
+    agent = ClientAgent(DeterministicGateway(), pullback_after=2)
     prior = [
         ClientTurnSignal(behavior=ClientBehaviorType.COGNITIVE_EXPLORATION),
         ClientTurnSignal(behavior=ClientBehaviorType.AFFECTIVE_EXPLORATION),

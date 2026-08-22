@@ -63,19 +63,14 @@ def _project_path(root: Path, value: str | Path | None) -> Path | None:
 
 def default_config(root: Path = PROJECT_ROOT) -> SandboxConfig:
     raw = load_runtime(root)
-    model_config = load_models(root)
     patientact = raw.get("patientact", {})
     temperatures = raw.get("temperature", {})
-    local = model_config.get("local", {})
     return SandboxConfig(
         project_root=root,
-        provider=raw.get("provider", "mock"),
         seed=raw.get("seed", 42),
         max_turns_per_session=raw.get("max_turns_per_session", 8),
         database_path=_project_path(root, raw.get("database_path")),
         trace_dir=_project_path(root, raw.get("trace_dir")),
-        local_model_name=local.get("model_name", ""),
-        local_device=local.get("device", "auto"),
         temperature_client=temperatures.get("client", 0.8),
         temperature_client_planner=temperatures.get("client_planner", 0.1),
         temperature_counselor=temperatures.get("counselor", 0.4),

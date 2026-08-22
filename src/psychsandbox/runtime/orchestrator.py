@@ -62,9 +62,6 @@ class CounselingSandbox:
     ):
         self.config = config
         self.gateway = gateway or create_gateway(
-            config.provider,
-            local_model_name=config.local_model_name,
-            local_device=config.local_device,
             diagnostic_dir=config.trace_dir / "diagnostics",
         )
         self.repository = repository or CaseRepository(

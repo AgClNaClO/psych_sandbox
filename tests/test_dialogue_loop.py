@@ -11,8 +11,8 @@ from psychsandbox.domain import (
     SkillCandidate,
     UnlockedClientProfile,
 )
-from psychsandbox.model_client import MockGateway
 from psychsandbox.runtime import CounselingSandbox, DialogueLoopGuard, DisclosureGate
+from tests.deterministic_gateway import DeterministicGateway
 
 
 def _memory_for(sample_case) -> SessionMemory:
@@ -62,7 +62,7 @@ def test_shared_activation_tags_are_reported_as_ambiguous(sample_case):
 def test_counselor_respects_explicit_topic_boundary(sample_case):
     client_message = "我不太想现在谈这个。我们能不能先说说别的？"
     result = asyncio.run(
-        CounselorAgent(MockGateway()).respond(
+        CounselorAgent(DeterministicGateway()).respond(
             memory=_memory_for(sample_case),
             plan=sample_case.global_plan[0],
             client_message=client_message,
@@ -80,7 +80,7 @@ def test_counselor_respects_explicit_topic_boundary(sample_case):
 def test_repeated_boundary_triggers_relationship_repair(sample_case):
     client_message = "我不太想现在谈这个。我们能不能先说说别的？"
     result = asyncio.run(
-        CounselorAgent(MockGateway()).respond(
+        CounselorAgent(DeterministicGateway()).respond(
             memory=_memory_for(sample_case),
             plan=sample_case.global_plan[0],
             client_message=client_message,
@@ -114,11 +114,11 @@ def test_original_case_does_not_enter_refusal_loop(root, tmp_path):
     sandbox = CounselingSandbox(
         SandboxConfig(
             project_root=root,
-            provider="mock",
             max_turns_per_session=4,
             database_path=tmp_path / "dialogue-loop.sqlite3",
             trace_dir=tmp_path / "dialogue-loop-traces",
-        )
+        ),
+        gateway=DeterministicGateway(),
     )
     result = asyncio.run(
         sandbox.run_case("psycheval-cbt-001", session_count=1)

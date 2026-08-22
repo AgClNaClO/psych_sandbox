@@ -11,7 +11,7 @@ from psychsandbox.domain import (
     SessionMemory,
     UnlockedClientProfile,
 )
-from psychsandbox.model_client import MockGateway
+from tests.deterministic_gateway import DeterministicGateway
 
 
 def _counselor(response: str) -> CounselorTurn:
@@ -58,7 +58,7 @@ def test_simulator_owns_progressive_disclosure_pipeline(sample_case):
     state = profile.initial_state.model_copy(
         update={"trust": 0.8, "topic_readiness": {"unique_experience": 0.8}}
     )
-    simulator = ClientSimulator(ClientAgent(MockGateway()))
+    simulator = ClientSimulator(ClientAgent(DeterministicGateway()))
 
     first = asyncio.run(
         simulator.respond(

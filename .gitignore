@@ -1,9 +1,17 @@
+# Python caches and generated package metadata
 __pycache__/
 *.py[cod]
+*.egg-info/
 .pytest_cache/
 .pytest_tmp-*/
+
+# Machine-local Python environment and credentials
 .venv/
 .env
+.env.*
+!.env.example
+
+# Downloaded datasets and generated run artifacts
 runs/
 data/external/
 data/processed/

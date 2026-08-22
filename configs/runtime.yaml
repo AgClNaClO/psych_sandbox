@@ -1,5 +1,4 @@
 seed: 42
-provider: mock
 max_turns_per_session: 8
 session_count: 3
 temperature:

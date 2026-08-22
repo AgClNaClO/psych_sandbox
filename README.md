@@ -11,7 +11,7 @@
 
 ## 快速开始
 
-以下命令适用于 Windows CMD。Mock 模式不需要 API 密钥，可用于快速验证完整流程：
+以下命令适用于 Windows CMD。运行前请先根据 `.env.example` 配置 API 密钥、接口地址和各角色模型：
 
 ```bat
 git clone https://github.com/AgClNaClO/psych_sandbox.git
@@ -22,7 +22,7 @@ python -m pip install -e ".[dev]"
 pytest -q
 psych-sandbox data fetch psycheval
 psych-sandbox data convert --therapy cbt
-psych-sandbox simulate --case psycheval-cbt-001 --sessions 3 --provider mock
+psych-sandbox simulate --case psycheval-cbt-001 --sessions 3
 ```
 
 `data fetch` 需要访问网络；如果本地已经生成 `data\processed\psycheval`，可以跳过
@@ -52,7 +52,7 @@ psych-sandbox visualize --run run-xxxxxxxxxxxx
 - 督导反馈不再回写下一 session 计划：下一计划由纵向进度信号（目标完成度 + 状态差值）驱动。
 - 新增单文件 HTML 可视化报告，集中呈现运行流程、状态曲线、督导指标、
   信息披露、安全检查和完整对话。
-- 自动化测试扩展至 108 项，覆盖多会话连续性、SQLite 恢复、信息隔离、安全分流、
+- 自动化测试覆盖多会话连续性、SQLite 恢复、信息隔离、安全分流、
   API 结构化输出、失败状态持久化与 CLI 进度反馈。
 
 ## 1. 项目要解决什么问题
@@ -84,7 +84,7 @@ SQLite、JSONL 轨迹和后续经验池
 
 ## 2. 当前完成情况
 
-第一阶段“最小可运行沙盒”的代码和 Mock 工程验证已经完成：
+第一阶段“最小可运行沙盒”的代码和 API 调用链已经完成：
 
 - 转换 PsychEval 官方 148 个 CBT 案例。
 - 提取 346 个元技能和 1171 个原子技能，保留官方原子 `skill_id`。
@@ -104,13 +104,9 @@ SQLite、JSONL 轨迹和后续经验池
   进度驱动的下一次计划。
 - 每次 CLI 仿真自动生成单文件 HTML 报告，展示流程、状态曲线、督导指标、
   披露/安全过程和完整对话。
-- 支持 Mock、OpenAI 兼容 API 和本地 Transformers 三种模型后端。
-- 108 项自动化测试全部通过，无跳过测试。
-- 已完成 10 个案例、30 个 session 的 Mock 基线实验。
-
-Mock 基线平均规则督导分为 7.889，未检测到提前泄漏和规则级安全违规。
-这只是工程基线，不代表真实咨询效果。真实 API、三随机种子、30 案例正式实验和人工评审
-仍需要在后续实验阶段完成。
+- 生产运行统一使用 OpenAI-compatible API，不提供离线或本地模型后端。
+- 自动化测试覆盖 API 契约和主要控制流程。
+- 三随机种子、30 案例正式实验和人工评审仍需要在后续实验阶段完成。
 
 ## 3. 项目中的三个智能体
 
@@ -169,7 +165,7 @@ PatientAct 参数采用“有证据才派生”的原则：核心信念、显式
 每 session 结束后运行确定性规则督导，用于审计与安全门控，不参与下一 session 规划。
 整条多 session 轨迹全部结束后，再运行一次与 PsychEval 对齐的整体督导：直接使用官方
 `eval/prompts_cn` 量表提示词，给出 Counselor-Level（临床胜任力）与 Client-Level
-（仿真保真度）评分。整体督导在 Mock 与 API 模式下都会运行；规则督导与整体督导分开
+（仿真保真度）评分。规则督导与整体督导分开
 保存，不会用一个总分覆盖具体证据和违规项。
 
 ## 4. 核心架构
@@ -188,7 +184,7 @@ src/psychsandbox/
 ├── experience/      通过安全门槛的经验池
 ├── evolution/       技能审核、晋升、弃用和回滚状态机
 ├── training/        SFT 与 DPO 数据导出
-├── model_client.py  Mock、API 和本地模型网关
+├── model_client.py  OpenAI-compatible API 网关
 └── cli.py           数据、案例、仿真和报告命令
 ```
 
@@ -323,14 +319,14 @@ psych-sandbox cases list --therapy cbt
 
 正常情况下会看到 `psycheval-cbt-001` 到 `psycheval-cbt-148`。
 
-## 7. 运行 Mock 仿真
+## 7. 运行 API 仿真
 
-Mock 模式不需要 API 密钥，适合测试、答辩演示和验证控制流程。
+运行前必须配置第 10 节列出的 API 环境变量。
 
 运行一个案例的 3 次连续咨询：
 
 ```bat
-psych-sandbox simulate --case psycheval-cbt-001 --sessions 3 --provider mock
+psych-sandbox simulate --case psycheval-cbt-001 --sessions 3
 ```
 
 限制每个 session 最多 4 轮：
@@ -339,7 +335,6 @@ psych-sandbox simulate --case psycheval-cbt-001 --sessions 3 --provider mock
 psych-sandbox simulate ^
   --case psycheval-cbt-001 ^
   --sessions 3 ^
-  --provider mock ^
   --max-turns 4 ^
   --seed 42
 ```
@@ -350,7 +345,6 @@ psych-sandbox simulate ^
 psych-sandbox simulate ^
   --case psycheval-cbt-001 ^
   --sessions 3 ^
-  --provider mock ^
   --json
 ```
 
@@ -400,7 +394,6 @@ JSONL 适合后续统计分析、经验回放和训练数据转换。
 psych-sandbox simulate ^
   --case psycheval-cbt-001 ^
   --sessions 3 ^
-  --provider mock ^
   --resume-run run-xxxxxxxxxxxx
 ```
 
@@ -452,7 +445,6 @@ set MODEL_MAX_TOKENS=4096
 psych-sandbox simulate ^
   --case psycheval-cbt-001 ^
   --sessions 3 ^
-  --provider api ^
   --max-turns 6 ^
   --seed 42
 ```
@@ -473,39 +465,10 @@ setx COUNSELOR_MODEL "咨询师模型名称"
 
 出于安全考虑，不建议用 `setx` 长期保存 API 密钥。
 
-## 11. 本地模型模式
-
-本地模式是后续 QLoRA 模型的推理入口，需要额外依赖：
-
-```bat
-python -m pip install -e ".[local]"
-```
-
-当前机器为 8GB 显存时，建议从 3B/4B 指令模型的 4-bit 量化推理开始。本地运行示例：
-
-```bat
-psych-sandbox simulate ^
-  --case psycheval-cbt-001 ^
-  --sessions 1 ^
-  --provider local ^
-  --local-model 模型仓库名或本地路径 ^
-  --local-device auto
-```
-
-Python API 的 `default_config()` 会读取 `configs\runtime.yaml` 中的路径、温度和
-PATIENTACT 参数，以及 `configs\models.yaml` 中的本地模型配置。CLI 以命令行参数为准。
-本地 7B/14B 训练不属于第一阶段验收内容。
-
-## 12. 运行自动化测试
+## 11. 运行自动化测试
 
 ```bat
 pytest -q
-```
-
-当前预期结果：
-
-```text
-108 passed
 ```
 
 测试覆盖：
@@ -519,7 +482,7 @@ pytest -q
   会谈间疲劳恢复、自然回撤和独立仿真评估。
 - 四级风险和输出安全检查。
 - 层级技能父子关系、过滤和确定性检索。
-- Mock 结构化输出。
+- 测试专用确定性网关下的控制流程，不提供生产运行入口。
 - API JSON Schema 请求、非法 JSON 修复重试与本地诊断记录。
 - ECNU `auto` 模式按角色区分 `ecnu-plus`/`ecnu-turbo` 与 `ecnu-max`。
 - 连续 3-session 运行。
@@ -531,9 +494,9 @@ pytest -q
 - 结构化 5Ps、双流派适配、纵向报告和进度驱动计划。
 - HTML 过程/结果可视化与整体督导展示。
 - 技能审核、晋升和回滚约束。
-- YAML 默认配置读取与本地模型 CLI 参数。
+- YAML 默认配置与 API-only CLI 参数。
 
-## 13. 数据和存储边界
+## 12. 数据和存储边界
 
 以下目录默认被 `.gitignore` 忽略：
 
@@ -552,7 +515,7 @@ PsychEval 采用 CC BY-NC 4.0，本项目对其数据的使用限于非商业教
 确定性划分、派生元技能 ID 和仿真人格先验，但不会伪造官方缺失的原子技能 ID。
 详见 [NOTICE.md](NOTICE.md) 和 [THIRD_PARTY_LICENSES](THIRD_PARTY_LICENSES/README.md)。
 
-## 14. 与 PsychEval、PsychAgent 的关系
+## 13. 与 PsychEval、PsychAgent 的关系
 
 ### PsychEval
 
@@ -574,7 +537,7 @@ PsychAgent 论文用于指导第三阶段的经验积累和自进化设计，包
 技能版本化和训练数据生成。目前没有声称完整复现其训练系统。项目已经实现经验池、
 技能生命周期、SFT/DPO 数据导出接口，但还没有完成正式 QLoRA 或偏好训练实验。
 
-## 15. 后续阶段怎么做
+## 14. 后续阶段怎么做
 
 ### 第二阶段：多流派和督导反馈闭环
 
@@ -601,10 +564,9 @@ PsychAgent 论文用于指导第三阶段的经验积累和自进化设计，包
 - 人工评测：两名心理学背景评审者，至少评审 30 个合成或脱敏 sessions。
 - 报告均值、标准差、置信区间、失败案例和加权 Kappa。
 
-更完整的研究路线见 [docs/ROADMAP.md](docs/ROADMAP.md)，当前 Mock 基线见
-[reports/phase1_mock_baseline.md](reports/phase1_mock_baseline.md)。
+更完整的研究路线见 [docs/ROADMAP.md](docs/ROADMAP.md)。
 
-## 16. 常见问题
+## 15. 常见问题
 
 ### CMD 提示“不是内部或外部命令”
 
@@ -631,11 +593,8 @@ psych-sandbox data convert --therapy cbt
 
 ### 提示缺少 `MODEL_API_KEY`
 
-只有 `--provider api` 需要密钥。无密钥演示请使用：
-
-```bat
-psych-sandbox simulate --case psycheval-cbt-001 --sessions 3 --provider mock
-```
+所有仿真运行都通过 API 完成，因此必须设置 `MODEL_API_KEY`、`CLIENT_MODEL` 和
+`COUNSELOR_MODEL`。请参考第 10 节配置兼容接口。
 
 ### API 返回的不是合法 JSON
 

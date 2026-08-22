@@ -19,7 +19,6 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "coverage>=7.0"]
-local = ["transformers>=4.45", "accelerate>=1.0", "bitsandbytes>=0.44"]
 training = ["transformers>=4.45", "datasets>=3.0", "peft>=0.13", "trl>=0.11"]
 
 [project.scripts]

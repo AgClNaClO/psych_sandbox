@@ -625,14 +625,11 @@ class MemoryRecord(StrictModel):
 
 class SandboxConfig(StrictModel):
     project_root: Path
-    provider: Literal["mock", "api", "local"] = "mock"
     seed: int = 42
     max_turns_per_session: int = Field(default=8, ge=1, le=50)
     database_path: Path | None = None
     trace_dir: Path | None = None
     processed_dataset_dir: Path | None = None
-    local_model_name: str = ""
-    local_device: str = "auto"
     temperature_client: float = Field(default=0.8, ge=0, le=2)
     temperature_client_planner: float = Field(default=0.1, ge=0, le=2)
     temperature_counselor: float = Field(default=0.4, ge=0, le=2)

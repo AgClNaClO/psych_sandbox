@@ -8,17 +8,18 @@ from psychsandbox.domain import SandboxConfig, SessionStage
 from psychsandbox.runtime import CounselingSandbox
 from psychsandbox.therapies import get_therapy_profile, list_therapy_profiles
 from psychsandbox.visualization import generate_run_report
+from tests.deterministic_gateway import DeterministicGateway
 
 
 def _sandbox(root, tmp_path, *, max_turns: int = 2) -> CounselingSandbox:
     return CounselingSandbox(
         SandboxConfig(
             project_root=root,
-            provider="mock",
             max_turns_per_session=max_turns,
             database_path=tmp_path / "phase1.sqlite3",
             trace_dir=tmp_path / "traces",
-        )
+        ),
+        gateway=DeterministicGateway(),
     )
 
 
