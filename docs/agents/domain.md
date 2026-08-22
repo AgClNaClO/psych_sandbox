@@ -1,51 +1,36 @@
-# Domain Docs
+# Domain and module map
 
-How the engineering skills should consume this repo's domain documentation when exploring the codebase.
+Read this file when changing simulation flow, information permissions, therapy adapters, evaluation or
+persistence.
 
-## Before exploring, read these
+## Stable terms
 
-- **`CONTEXT.md`** at the repo root, or
-- **`CONTEXT-MAP.md`** at the repo root if it exists: it points at one `CONTEXT.md` per context. Read each one relevant to the topic.
-- **`docs/adr/`**: read ADRs that touch the area you're about to work in. In multi-context repos, also check `src/<context>/docs/adr/` for context-scoped decisions.
+- **Case**: one source-grounded runnable record from `data/<therapy>`.
+- **Session**: one bounded consultation containing several counselor/client turns and consolidation.
+- **Plan**: the current therapy stage, objectives, allowed meta skills and carry-over strategy.
+- **Memory**: spoken evidence, evolving profile, summaries, unresolved items and skill history. A hidden fact is
+  not memory until client wording supplies verifiable evidence.
+- **Counselor review**: session-boundary API assessment of goal evidence and, when needed, a revised strategy.
+- **Rule evaluation**: deterministic per-session audit; it does not choose the next plan.
+- **Holistic supervision**: API PsychEval scoring once after all sessions; it does not choose the next plan.
 
-If any of these files don't exist, **proceed silently**. Don't flag their absence; don't suggest creating them upfront. The `/domain-modeling` skill (reached via `/grill-with-docs` and `/improve-codebase-architecture`) creates them lazily when terms or decisions actually get resolved.
+## Ownership
 
-## File structure
+| Path | Owns |
+|---|---|
+| `domain/` | Pydantic contracts for cases, plans, turns, memory, evaluation and results |
+| `datasets/` | five-therapy conversion and runnable-case indexing |
+| `therapies/` | therapy identifiers, stages, objectives and metric mapping |
+| `agents/` | client planning/generation and counselor plan→act→observe→respond/review |
+| `skills/` | skill registry and exact-ID catalog observation |
+| `runtime/` | orchestration, disclosure, safety, state, memory and storage |
+| `evaluation/` | rule, client-simulation, longitudinal and holistic evaluation |
+| `visualization/` | read-only HTML/SVG reporting from normalized results |
 
-Single-context repo (most repos):
+## Cross-module invariants
 
-```
-/
-├── CONTEXT.md
-├── docs/adr/
-│   ├── 0001-event-sourced-orders.md
-│   └── 0002-postgres-for-write-model.md
-└── src/
-```
-
-Multi-context repo (presence of `CONTEXT-MAP.md` at the root):
-
-```
-/
-├── CONTEXT-MAP.md
-├── docs/adr/                          ← system-wide decisions
-└── src/
-    ├── ordering/
-    │   ├── CONTEXT.md
-    │   └── docs/adr/                  ← context-specific decisions
-    └── billing/
-        ├── CONTEXT.md
-        └── docs/adr/
-```
-
-## Use the glossary's vocabulary
-
-When your output names a domain concept (in an issue title, a refactor proposal, a hypothesis, a test name), use the term as defined in `CONTEXT.md`. Don't drift to synonyms the glossary explicitly avoids.
-
-If the concept you need isn't in the glossary yet, that's a signal: either you're inventing language the project doesn't use (reconsider) or there's a real gap (note it for `/domain-modeling`).
-
-## Flag ADR conflicts
-
-If your output contradicts an existing ADR, surface it explicitly rather than silently overriding:
-
-> _Contradicts ADR-0007 (event-sourced orders), but worth reopening because…_
+1. Counselor-visible context is assembled from disclosed evidence and allowed memory only.
+2. Client language generation receives planner-authorized new facts plus already spoken evidence only.
+3. Semantic strategy choice stays with the model; code validates IDs and enforces hard boundaries.
+4. The next plan combines counselor review with longitudinal stage action, not evaluator scores.
+5. SQLite, JSONL and HTML represent the same normalized `RunResult` contracts.

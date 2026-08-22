@@ -1,128 +1,55 @@
 # `prompts/`
 
-本目录适合想理解模型输入、修改提示词或排查行为变化来源的读者；在调整咨询风格、评测标准或技能检索提示之前建议先看这里。
+本目录共有 93 个提示词资产。它们并非全部进入当前 `psych-sandbox` 运行链：46 个被文件加载器
+实际消费，47 个作为 Psych-new 来源模板或尚未接入的评测参考保留。
 
-## 目录简介
+## 实际使用情况
 
-`prompts/` 保存项目当前使用的提示词资产。这里既有 Jinja2 模板，也有直接拼接给模型的纯文本评分提示。它们分别被不同模块加载：
+| 类别 | 文件数 | 当前状态 | 实际入口 |
+|---|---:|---|---|
+| `eval/` 中代码映射的量表 | 46 | 已使用 | `src/psychsandbox/evaluation/psycheval_supervisor.py` |
+| `eval/` 其余量表/对话评测 | 14 | 未接入 | 无当前运行入口 |
+| `psychagent/` | 29 | 未接入 | 来源于 Psych-new 的生成/技能模板 |
+| `public/` | 3 | 未接入 | 来源于 Psych-new 的公共上下文模板 |
+| `client/dialogue.jinja2` | 1 | 未接入 | 来源于 Psych-new 的来访者模板 |
 
-- `src/sample/core/prompt_manager.py`
-- `src/sample/prompt_manager.py`
-- `src/sample/skill_manager.py`
-- `src/eval/utils.py`
+因此，“仓库中存在”不等于“当前 API 调用会读取”。当前咨询师、来访者和会后记忆生成提示词
+是版本化 Python 常量：
 
-这意味着提示词目录不是“附属文档”，而是运行逻辑的一部分。
+- 咨询师规划、ReAct 执行和会后自评：`src/psychsandbox/agents/counselor.py`
+- 来访者规划与语言生成：`src/psychsandbox/client_simulation/prompts.py`
+- E.7 信息提取、E.8 档案合并、E.9 临床摘要：`src/psychsandbox/runtime/memory_pipeline.py`
 
-## 该目录在整个项目中的作用
+## 已使用的 `eval/` 量表
 
-从功能上看，`prompts/` 可以分成三层：
+`src/psychsandbox/runtime/orchestrator.py` 将 `prompts/eval` 传给 `PsychEvalSupervisor`。一个 case 的
+全部 session 完成后，督导师按流派选择以下文件，注入来访者背景和整条可见对话，再调用
+`SUPERVISOR_MODEL`：
 
-- 生成层：驱动来访者模拟、咨询师对话、summary 与 profile 更新
-- 技能层：在开启技能库时，为技能筛选与技能改写提供提示
-- 评测层：为各量表或维度评分方法提供标准化评分提示
+| 层级 | 共享量表 | 流派专属量表 |
+|---|---|---|
+| Counselor-Level | WAI、HTAIS、RRO、`custom_dim` 四维 | BT→MITI；CBT→CTRS；HET→TES；PDT→PSC；PMT→EFT-TFS |
+| Client-Level | SCL-90、PANAS、RRO、SRS | BT→STAI；CBT→BDI-II；HET→CCT；PDT→IPO；PMT→SFBT |
 
-`sample` 和 `rft` 主要消费生成层与技能层，`eval` 主要消费评测层。
+完整文件名以 `psycheval_supervisor.py` 中 `Instrument.prompt_files` 为唯一映射来源。部分上游文件名
+包含弯引号，加载器会在同一目录做规范化文件名匹配。整体量表结果不回写下一 session 计划。
 
-## 主要文件和子目录
+## 保留但未接入的文件
 
-### `public/`
+- `psychagent/<therapy>/counsel|summary|profile/`：Psych-new 的五流派生成模板。
+- `psychagent/skill/`：Psych-new 的技能选择与改写模板。
+- `public/` 和 `client/`：Psych-new 的公共上下文及来访者生成模板。
+- `eval/PHQ_9`、`dialogue_*`、`human_eval`、`plan_consistency` 和
+  `human_vs_llm_eval.txt`：当前 `Instrument` 映射未引用的评测模板。
 
-供 `src/sample/core/prompt_manager.py` 使用的公共提示词：
+这些文件当前只用于来源对照。要接入其中任何文件，必须先建立明确加载入口、输入/输出契约和
+测试；仅修改模板内容不会改变当前仿真行为。
 
-- `counselor_system.jinja2`
-- `session_opening.jinja2`
-- `public_recap.jinja2`
+## 维护检查
 
-这组模板定义的是“跨 modality 共享”的公共上下文，例如公开背景、历史摘要、作业回顾和开场语。
+1. 修改已使用量表时，对照 `Instrument.prompt_files`，确保路径和大小写一致。
+2. 修改 Python 内嵌生成提示词时，同步更新其版本常量和结构化输出测试。
+3. 新接入保留模板时，先更新本表中的文件数量和状态，再更新根 README 的资源边界。
 
-### `client/`
-
-- `dialogue.jinja2`
-
-这是来访者模拟器的核心输入模板，由 `ClientSimulator.generate_client_utterance()` 调用。模板里会拼入：
-
-- `intake_profile`
-- 历史摘要
-- 上轮作业
-- 咨询师最近一句话
-
-如果你想调整来访者说话方式，优先从这里开始。
-
-### `psychagent/`
-
-这是 `sample` 与 `rft` 最直接相关的一组 modality 提示词。当前包含：
-
-- `bt/`
-- `cbt/`
-- `het/`
-- `pdt/`
-- `pmt/`
-- `skill/`
-
-每个 modality 目录都遵循固定结构：
-
-```text
-<modality>/
-  counsel/system.jinja2
-  summary/system.jinja2
-  summary/user.jinja2
-  profile/system.jinja2
-  profile/user.jinja2
-```
-
-这个结构不是约定俗成，而是 `src/sample/prompt_manager.py` 直接按路径硬编码读取的。如果你改目录名或文件名，运行会直接失败。
-
-其中需要特别注意：
-
-- `counsel/system.jinja2` 通常要求模型输出 `<think>` 与 `<response>` 两段
-- `src/sample/runner.py` 在 `_chat_with_retry()` 中会提取 `<response>` 作为真实写入 transcript 的内容
-- `skill/select_skill/` 和 `skill/rewrite/` 会由 `src/sample/skill_manager.py` 加载，并固定参与 coarse filter / turn-level retrieval 流程
-
-### `eval/`
-
-这是 `src.eval` 的评分提示词目录。大多数方法都采用：
-
-```text
-prompts/eval/<method_name>/<prompt_name>.txt
-```
-
-例如：
-
-- `ctrs/collaboration.txt`
-- `miti/empathy.txt`
-- `psc/transference.txt`
-- `tes/warmth.txt`
-
-也有少数文件直接放在 `prompts/eval/` 根下，例如：
-
-- `human_vs_llm_eval.txt`
-
-这是因为 `src/eval/utils.py` 的 `load_prompt()` 同时支持“子目录模式”和“直接文件模式”。
-
-## 与其他目录的关系
-
-- 与 [`../src/`](../src/) 强耦合：目录结构和文件名会被代码直接引用。
-- 与 [`../configs/`](../configs/) 配合：技能相关提示词路径可以通过 runtime 配置覆盖。
-- 与 [`../data/`](../data/) 配合：数据文件提供 prompt 渲染时注入的 profile、history 和 dialogue 内容。
-
-## 阅读建议或使用入口
-
-如果你想快速建立整体认知，推荐按下面顺序阅读：
-
-1. 先看 `public/counselor_system.jinja2` 和 `client/dialogue.jinja2`，理解公共对话约束。
-2. 再看某一个 modality 的 `psychagent/<modality>/counsel/system.jinja2`、`summary/user.jinja2`、`profile/user.jinja2`，理解 `sample` / `rft` 如何组织一次 session。
-3. 最后对照 [`../src/eval/methods/`](../src/eval/methods/) 查看 `eval/` 中的方法提示词。
-
-## 注意事项
-
-- 目录里既有 `.jinja2` 模板，也有 `.txt` 纯文本提示；不要把二者混为一类处理。
-- `psychagent/<modality>/...` 的目录层级和文件名是 `src/sample/prompt_manager.py` 的输入契约，不建议随意调整。
-- `eval` 提示词的组织方式以 `src/eval/utils.py::load_prompt()` 为准。并不是所有方法都必须在自己的子目录里有同名文件。
-- 技能相关提示词虽然在仓库中存在，但当前示例 runtime 默认关闭技能库加载；如果没有外部技能资产，仅修改这些 prompt 不会让功能自动可用。
-
-## 相关目录
-
-- [根 README](../README.md)
-- [`../configs/`](../configs/)
-- [`../data/`](../data/)
-- [`../src/`](../src/)
+相关说明见根目录 [README](../README.md)、[Phase 1 数据流](../docs/PHASE1_IMPLEMENTATION.md)和
+[第三方声明](../NOTICE.md)。

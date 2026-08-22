@@ -1,5 +1,8 @@
 # PsychEval 官方 GitHub 源码核查笔记
 
+> 文档性质：这是对上游固定提交的历史核查记录，不是本仓库当前运行说明。本地实现入口、
+> 资源使用状态和流程边界以根 `README.md`、`docs/PHASE1_IMPLEMENTATION.md` 与当前源码为准。
+
 核查对象：官方仓库 `ECNU-ICALK/PsychEval`，固定提交 [`e04df535749e5bca76fcc45d9a85f3f46a082d91`](https://github.com/ECNU-ICALK/PsychEval/commit/e04df535749e5bca76fcc45d9a85f3f46a082d91)。以下只写仓库源码和数据能够直接验证的事实。
 
 ## 最重要的边界

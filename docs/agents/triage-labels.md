@@ -1,15 +1,16 @@
-# Triage Labels
+# Triage label compatibility
 
-The skills speak in terms of five canonical triage roles. This file maps those roles to the actual label strings used in this repo's issue tracker.
+GitHub currently exposes the standard labels `bug`, `documentation`, `duplicate`, `enhancement`,
+`good first issue`, `help wanted`, `invalid`, `question` and `wontfix`. Dedicated Matt Pocock workflow-state
+labels are not configured, so agent workflows use this compatibility mapping:
 
-| Label in mattpocock/skills | Label in our tracker | Meaning                                  |
-| -------------------------- | -------------------- | ---------------------------------------- |
-| `needs-triage`             | `needs-triage`       | Maintainer needs to evaluate this issue  |
-| `needs-info`               | `needs-info`         | Waiting on reporter for more information |
-| `ready-for-agent`          | `ready-for-agent`    | Fully specified, ready for an AFK agent  |
-| `ready-for-human`          | `ready-for-human`    | Requires human implementation            |
-| `wontfix`                  | `wontfix`            | Will not be actioned                     |
+| Workflow role | Repository label | Use |
+|---|---|---|
+| `needs-triage` | `question` | Request still needs classification or clarification |
+| `needs-info` | `question` | Waiting on reporter information; state the missing information in a comment |
+| `ready-for-agent` | `help wanted` | Request is specified well enough for implementation |
+| `ready-for-human` | `enhancement` | Valid request needing maintainer or domain-expert judgment |
+| `wontfix` | `wontfix` | Repository will not action the request |
 
-When a skill mentions a role (e.g. "apply the AFK-ready triage label"), use the corresponding label string from this table.
-
-Edit the right-hand column to match whatever vocabulary you actually use.
+Because two workflow roles share `question`, the latest issue comment is the source of truth for the precise
+state. If dedicated state labels are added remotely, update this mapping before using them in agent workflows.

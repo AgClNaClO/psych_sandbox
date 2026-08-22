@@ -65,7 +65,7 @@ psych-sandbox visualize --run run-xxxxxxxxxxxx
 - 只生成自然语言回复，无法解释本轮选择了什么咨询技能。
 - 模型可能提前知道来访者尚未披露的经历，造成隐藏信息泄漏。
 - 缺少独立督导师，无法形成“咨询—评分—反馈—调整”的闭环。
-  - 遇到自伤、他伤等高风险表达时，仍可能继续进行普通咨询练习。
+- 遇到自伤、他伤等高风险表达时，仍可能继续进行普通咨询练习。
 - 高质量会谈经验不能沉淀为可回放数据、技能版本或训练样本。
 
 本项目针对这些问题实现以下闭环：
@@ -191,6 +191,17 @@ src/psychsandbox/
 └── cli.py           可选数据刷新、案例、仿真和报告命令
 ```
 
+### `src` 与 `tests` 分别负责什么
+
+- `src/psychsandbox/` 是可安装的生产包：定义领域模型、数据适配、API 智能体、运行时编排、
+  评测、持久化和可视化。`psych-sandbox` CLI 最终进入这里；生产仿真只接受真实
+  OpenAI-compatible API 网关。
+- `tests/` 是验证层：用 `tests/deterministic_gateway.py` 提供离线、可重复的 API 测试替身，
+  覆盖控制流、结构化输出、五流派隔离、披露/安全、连续 session、恢复和报告。测试替身不能由
+  生产 CLI 选择，也不代表真实模型质量。
+
+二者共享 `src` 中的公开契约，但职责方向相反：`src` 实现行为，`tests` 证明关键边界没有被破坏。
+
 主要运行流程如下：
 
 1. `prepare_session`
@@ -286,13 +297,19 @@ data\het\                 人本—存在取向原始案例
 data\bt\                  行为取向原始案例
 data\pdt\                 心理动力取向原始案例
 data\pmt\                 后现代取向原始案例
-assets\profiles\          PsychAgent 人物画像
+assets\profiles\          Psych-new sample/rft 画像副本（当前仅作来源对照）
 assets\skills\sect\       分流派、分阶段技能树
-prompts\eval\             整体督导量表提示词
+prompts\eval\             整体督导量表提示词（其中 46 个由当前代码加载）
 ```
 
 当前运行时注册 BT、CBT、HET、PDT、PMT 五个适配器。`data\integrative` 仍作为资源保留，
 但在具有独立技能树和评估标准之前不会冒充其中任一流派。
+
+提示词目录共有 93 个资产，但没有被“完全利用”：当前文件加载链只消费 46 个
+`prompts/eval` 量表。另 14 个评测模板以及 `psychagent` 29 个、`public` 3 个、`client` 1 个
+Psych-new 模板仅作来源参考。咨询师、来访者和 E.7/E.8/E.9 当前生成提示词分别以内嵌、版本化
+Python 常量存在于 `agents/counselor.py`、`client_simulation/prompts.py` 和
+`runtime/memory_pipeline.py`。完整映射见 [prompts/README.md](prompts/README.md)。
 
 ### 6.1 可选：重新下载官方数据
 
@@ -536,7 +553,8 @@ checkpoints\
 ```
 
 其中 `data\external` 与 `data\processed` 是可重新生成的下载/转换缓存；仓库内的
-`data\<therapy>`、`assets` 和 `prompts` 是当前版本的固定研究资源。项目不采集真实医疗记录、
+`data\<therapy>`、`assets` 和 `prompts` 是固定研究资源，但只有上述明确标为运行入口的子集
+会被当前代码加载。项目不采集真实医疗记录、
 真实咨询录音或真实求助者隐私。人工评测应仅使用公开案例、合成资料或经过批准的脱敏材料。
 
 PsychEval 采用 CC BY-NC 4.0，本项目对其数据的使用限于非商业教学研究。转换器增加了统一字段、
@@ -612,12 +630,14 @@ python -m psychsandbox --help
 
 ### 提示找不到案例
 
-先执行数据下载和转换：
+先确认使用完整仓库、当前目录为仓库根目录，并检查随仓库分发的病例：
 
 ```bat
-psych-sandbox data fetch psycheval
-psych-sandbox data convert --therapy cbt
+dir data\cbt\1.json
+psych-sandbox cases list --therapy cbt
 ```
+
+`data fetch` 和 `data convert` 是刷新/重建工具，不是读取仓库内五流派病例的前置步骤。
 
 ### 提示缺少 `MODEL_API_KEY`
 
