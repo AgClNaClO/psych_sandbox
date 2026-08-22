@@ -31,7 +31,7 @@ def root() -> Path:
 
 @pytest.fixture(scope="session")
 def repository(root: Path) -> CaseRepository:
-    return CaseRepository(root / "data/processed/psycheval", root / "data/profiles")
+    return CaseRepository.from_project(root)
 
 
 @pytest.fixture(scope="session")

@@ -5,6 +5,10 @@ __pycache__/
 .pytest_cache/
 .pytest_tmp-*/
 
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+
 # Machine-local Python environment and credentials
 .venv/
 .env

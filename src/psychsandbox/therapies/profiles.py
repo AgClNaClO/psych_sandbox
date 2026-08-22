@@ -96,13 +96,110 @@ HUMANISTIC_EXISTENTIAL = TherapyProfile(
 )
 
 
+BEHAVIORAL = TherapyProfile(
+    therapy_id="behavioral",
+    display_name="行为取向（BT）",
+    counselor_role="behavioral counselor",
+    conceptualization_focus="可观察的目标行为、前因、功能、后果以及维持行为的强化循环",
+    therapy_metric="miti_lite",
+    stage_goals={
+        SessionStage.CONCEPTUALIZATION: (
+            "建立合作关系并操作化目标行为",
+            "识别行为发生的前因、功能和后果",
+        ),
+        SessionStage.INTERVENTION: (
+            "设计可分级实施的行为练习",
+            "调整回避与强化循环并追踪结果",
+        ),
+        SessionStage.CONSOLIDATION: (
+            "巩固有效行为和自我监测方法",
+            "形成维持与复发预防计划",
+        ),
+    },
+)
+
+
+PSYCHODYNAMIC = TherapyProfile(
+    therapy_id="psychodynamic",
+    display_name="心理动力学取向（PDT）",
+    counselor_role="psychodynamic counselor",
+    conceptualization_focus="核心冲突、客体关系、情感、防御机制和关系中的重复模式",
+    therapy_metric="psc_lite",
+    stage_goals={
+        SessionStage.CONCEPTUALIZATION: (
+            "建立稳定的治疗框架和联盟",
+            "识别核心冲突、关系模式与主要防御",
+        ),
+        SessionStage.INTERVENTION: (
+            "在可承受范围内深化情感体验",
+            "探索当下关系中的重复模式与防御功能",
+        ),
+        SessionStage.CONSOLIDATION: (
+            "整合对冲突和关系模式的新理解",
+            "准备处理分离、结束与模式复现",
+        ),
+    },
+)
+
+
+POSTMODERN = TherapyProfile(
+    therapy_id="postmodern",
+    display_name="后现代取向（PMT）",
+    counselor_role="postmodern counselor",
+    conceptualization_focus="问题外化、例外事件、优势资源、偏好故事与来访者定义的改变",
+    therapy_metric="eft_tfs_lite",
+    stage_goals={
+        SessionStage.CONCEPTUALIZATION: (
+            "建立平等合作的关系",
+            "澄清来访者希望改变的方向并将人与问题分开",
+        ),
+        SessionStage.INTERVENTION: (
+            "寻找例外、资源和已经发生的微小改变",
+            "扩展更有力量的偏好故事与可行下一步",
+        ),
+        SessionStage.CONSOLIDATION: (
+            "见证并巩固来访者的能力和新叙事",
+            "形成由来访者定义的维持方案",
+        ),
+    },
+)
+
+
 _PROFILES = {
+    BEHAVIORAL.therapy_id: BEHAVIORAL,
     CBT.therapy_id: CBT,
     HUMANISTIC_EXISTENTIAL.therapy_id: HUMANISTIC_EXISTENTIAL,
+    PSYCHODYNAMIC.therapy_id: PSYCHODYNAMIC,
+    POSTMODERN.therapy_id: POSTMODERN,
 }
 
 
+_ALIASES = {
+    "bt": "behavioral",
+    "cbt": "cbt",
+    "het": "humanistic_existential",
+    "pdt": "psychodynamic",
+    "pmt": "postmodern",
+    "behavioral": "behavioral",
+    "humanistic_existential": "humanistic_existential",
+    "psychodynamic": "psychodynamic",
+    "postmodern": "postmodern",
+}
+
+
+def normalize_therapy_id(therapy_id: str) -> str:
+    normalized = str(therapy_id).strip().lower().replace("-", "_")
+    try:
+        return _ALIASES[normalized]
+    except KeyError as exc:
+        supported = ", ".join(("bt", "cbt", "het", "pdt", "pmt"))
+        raise ValueError(
+            f"Unsupported therapy {therapy_id!r}; supported codes: {supported}"
+        ) from exc
+
+
 def get_therapy_profile(therapy_id: str) -> TherapyProfile:
+    therapy_id = normalize_therapy_id(therapy_id)
     try:
         return _PROFILES[therapy_id]
     except KeyError as exc:

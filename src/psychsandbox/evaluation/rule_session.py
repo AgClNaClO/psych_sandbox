@@ -61,9 +61,14 @@ class RuleSessionEvaluator:
 
     @staticmethod
     def _therapy_specific(text: str, therapy: str) -> EvaluationMetric:
-        if therapy == "humanistic_existential":
-            return RuleSessionEvaluator._tes(text)
-        return RuleSessionEvaluator._ctrs(text)
+        evaluators = {
+            "behavioral": RuleSessionEvaluator._miti,
+            "cbt": RuleSessionEvaluator._ctrs,
+            "humanistic_existential": RuleSessionEvaluator._tes,
+            "psychodynamic": RuleSessionEvaluator._psc,
+            "postmodern": RuleSessionEvaluator._eft_tfs,
+        }
+        return evaluators.get(therapy, RuleSessionEvaluator._ctrs)(text)
 
     @staticmethod
     def _ctrs(text: str) -> EvaluationMetric:
@@ -95,6 +100,54 @@ class RuleSessionEvaluator:
             score=min(10, 2 + sum(dimensions.values()) * 1.6),
             evidence=[key for key, hit in dimensions.items() if hit],
             reason="按共情、自主、经验聚焦、一致性和意义探索五项可观察行为评分。",
+        )
+
+    @staticmethod
+    def _miti(text: str) -> EvaluationMetric:
+        dimensions = {
+            "伙伴关系": any(x in text for x in ("一起", "你愿意", "你觉得")),
+            "共情": any(x in text for x in ("听起来", "理解", "不容易")),
+            "支持自主": any(x in text for x in ("选择", "由你", "你的节奏")),
+            "唤起改变": any(x in text for x in ("改变", "好处", "希望")),
+            "行为计划": any(x in text for x in ("尝试", "行动", "记录", "练习")),
+        }
+        return EvaluationMetric(
+            name="miti_lite",
+            score=min(10, 2 + sum(dimensions.values()) * 1.6),
+            evidence=[key for key, hit in dimensions.items() if hit],
+            reason="按伙伴关系、共情、自主、改变语言和行为计划五项可观察行为评分。",
+        )
+
+    @staticmethod
+    def _psc(text: str) -> EvaluationMetric:
+        dimensions = {
+            "情感深化": any(x in text for x in ("感受", "情绪", "此刻")),
+            "冲突理解": any(x in text for x in ("一方面", "另一方面", "矛盾")),
+            "防御功能": any(x in text for x in ("保护", "应对", "避开")),
+            "关系模式": any(x in text for x in ("关系", "类似", "反复")),
+            "当下关系": any(x in text for x in ("我们之间", "和我谈", "在这里")),
+        }
+        return EvaluationMetric(
+            name="psc_lite",
+            score=min(10, 2 + sum(dimensions.values()) * 1.6),
+            evidence=[key for key, hit in dimensions.items() if hit],
+            reason="按情感、冲突、防御、关系模式和当下关系五项可观察行为评分。",
+        )
+
+    @staticmethod
+    def _eft_tfs(text: str) -> EvaluationMetric:
+        dimensions = {
+            "合作立场": any(x in text for x in ("一起", "你觉得", "由你")),
+            "问题外化": any(x in text for x in ("这个问题", "影响你", "控制")),
+            "寻找例外": any(x in text for x in ("例外", "不一样", "没有发生")),
+            "发现资源": any(x in text for x in ("力量", "做到", "资源", "撑过")),
+            "偏好未来": any(x in text for x in ("希望", "未来", "下一步")),
+        }
+        return EvaluationMetric(
+            name="eft_tfs_lite",
+            score=min(10, 2 + sum(dimensions.values()) * 1.6),
+            evidence=[key for key, hit in dimensions.items() if hit],
+            reason="按合作、外化、例外、资源和偏好未来五项可观察行为评分。",
         )
 
     @staticmethod

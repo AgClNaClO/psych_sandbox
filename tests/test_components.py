@@ -152,7 +152,7 @@ def test_trust_changes_only_from_turn_signal():
 
 
 def test_skill_parent_child_integrity(root):
-    registry = SkillRegistry.from_json(root / "data/processed/psycheval/skills.json")
+    registry = SkillRegistry.from_project(root)
     assert all(
         skill.meta_skill_id in registry.meta_skills
         for skill in registry.atomic_skills.values()
@@ -160,7 +160,7 @@ def test_skill_parent_child_integrity(root):
 
 
 def test_retrieval_is_deterministic(root, sample_case):
-    registry = SkillRegistry.from_json(root / "data/processed/psycheval/skills.json")
+    registry = SkillRegistry.from_project(root)
     retriever = HierarchicalSkillRetriever(registry)
     args = {
         "plan": sample_case.global_plan[0],
@@ -175,7 +175,7 @@ def test_retrieval_is_deterministic(root, sample_case):
 
 
 def test_high_risk_returns_no_skills(root, sample_case):
-    registry = SkillRegistry.from_json(root / "data/processed/psycheval/skills.json")
+    registry = SkillRegistry.from_project(root)
     result = HierarchicalSkillRetriever(registry).retrieve(
         plan=sample_case.global_plan[0],
         client_message="危险",

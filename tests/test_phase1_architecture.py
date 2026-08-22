@@ -5,6 +5,10 @@ import asyncio
 import pytest
 
 from psychsandbox.domain import SandboxConfig, SessionStage
+from psychsandbox.evaluation.psycheval_supervisor import (
+    _specific_counselor_instruments,
+    _specific_client_instruments,
+)
 from psychsandbox.runtime import CounselingSandbox
 from psychsandbox.therapies import get_therapy_profile, list_therapy_profiles
 from psychsandbox.visualization import generate_run_report
@@ -35,20 +39,75 @@ def test_converted_case_has_complete_five_ps(sample_case):
     assert formulation.source_fields
 
 
-def test_phase_one_has_two_registered_therapy_profiles():
+def test_phase_one_has_five_registered_therapy_profiles():
     ids = {item.therapy_id for item in list_therapy_profiles()}
-    assert ids == {"cbt", "humanistic_existential"}
+    assert ids == {
+        "behavioral",
+        "cbt",
+        "humanistic_existential",
+        "psychodynamic",
+        "postmodern",
+    }
     assert get_therapy_profile("humanistic_existential").therapy_metric == "tes_lite"
+    assert get_therapy_profile("bt").therapy_id == "behavioral"
 
 
-def test_humanistic_case_runs_with_therapy_specific_skills(root, tmp_path):
+@pytest.mark.parametrize(
+    ("therapy_id", "counselor_instrument", "client_instrument"),
+    [
+        ("behavioral", "miti", "stai"),
+        ("cbt", "ctrs", "bdi_ii"),
+        ("humanistic_existential", "tes", "cct"),
+        ("psychodynamic", "psc", "ipo"),
+        ("postmodern", "eft_tfs", "sfbt"),
+    ],
+)
+def test_each_therapy_uses_its_configured_holistic_instruments(
+    therapy_id, counselor_instrument, client_instrument
+):
+    assert set(_specific_counselor_instruments(therapy_id)) == {
+        counselor_instrument
+    }
+    assert set(_specific_client_instruments(therapy_id)) == {client_instrument}
+
+
+@pytest.mark.parametrize(
+    (
+        "therapy_code",
+        "therapy_id",
+        "metric_name",
+        "counselor_instrument",
+        "client_instrument",
+    ),
+    [
+        ("bt", "behavioral", "miti_lite", "miti", "stai"),
+        ("cbt", "cbt", "ctrs_lite", "ctrs", "bdi_ii"),
+        ("het", "humanistic_existential", "tes_lite", "tes", "cct"),
+        ("pdt", "psychodynamic", "psc_lite", "psc", "ipo"),
+        ("pmt", "postmodern", "eft_tfs_lite", "eft_tfs", "sfbt"),
+    ],
+)
+def test_each_therapy_runs_with_specific_skills_and_metric(
+    root,
+    tmp_path,
+    therapy_code,
+    therapy_id,
+    metric_name,
+    counselor_instrument,
+    client_instrument,
+):
     sandbox = _sandbox(root, tmp_path)
     result = asyncio.run(
-        sandbox.run_case("humanistic_work_stress_01", session_count=2)
+        sandbox.run_case(
+            f"psycheval-{therapy_code}-001",
+            therapy=therapy_code,
+            session_count=1,
+        )
     )
-    assert result.therapy == "humanistic_existential"
+    assert result.therapy == therapy_id
+    assert result.sessions[0].interventions_used
     assert all(
-        skill_id.startswith("het_")
+        skill_id.startswith(f"psychagent:{therapy_code}:skill:")
         for session in result.sessions
         for skill_id in session.interventions_used
     )
@@ -56,7 +115,14 @@ def test_humanistic_case_runs_with_therapy_specific_skills(root, tmp_path):
         metric.name
         for metric in result.sessions[0].supervisor_report.metrics
     }
-    assert "tes_lite" in metric_names
+    assert metric_name in metric_names
+    assert result.holistic_report is not None
+    assert {item.name for item in result.holistic_report.counselor_specific} == {
+        counselor_instrument
+    }
+    assert {item.name for item in result.holistic_report.client_specific} == {
+        client_instrument
+    }
 
 
 def test_longitudinal_report_and_feedback_plan_are_persisted(root, tmp_path):

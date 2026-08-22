@@ -99,13 +99,6 @@ def _specific_counselor_instruments(therapy: str) -> dict[str, Instrument]:
         }
     if therapy == "behavioral":
         return {
-            "eft_tfs": Instrument(
-                "eft_tfs", "counselor", "therapy_specific", "higher_better",
-                ("eft_tfs/EFT_TFS.txt",),
-            ),
-        }
-    if therapy == "postmodern":
-        return {
             "miti": Instrument(
                 "miti", "counselor", "therapy_specific", "higher_better",
                 (
@@ -114,6 +107,13 @@ def _specific_counselor_instruments(therapy: str) -> dict[str, Instrument]:
                     "miti/partnership.txt",
                     "miti/softening sustain talk.txt",
                 ),
+            ),
+        }
+    if therapy == "postmodern":
+        return {
+            "eft_tfs": Instrument(
+                "eft_tfs", "counselor", "therapy_specific", "higher_better",
+                ("eft_tfs/EFT_TFS.txt",),
             ),
         }
     return {}

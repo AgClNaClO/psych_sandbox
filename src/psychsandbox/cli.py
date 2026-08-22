@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from .datasets import CaseRepository, convert_psycheval, fetch_psycheval
 from .domain import SandboxConfig
 from .runtime import CounselingSandbox, SQLiteStore
+from .therapies import normalize_therapy_id
 from .visualization import generate_run_report
 
 
@@ -26,7 +27,9 @@ def build_parser() -> argparse.ArgumentParser:
     fetch = data_commands.add_parser("fetch")
     fetch.add_argument("dataset", choices=["psycheval"])
     convert = data_commands.add_parser("convert")
-    convert.add_argument("--therapy", choices=["cbt"], default="cbt")
+    convert.add_argument(
+        "--therapy", choices=["bt", "cbt", "het", "pdt", "pmt"], default="cbt"
+    )
 
     cases = commands.add_parser("cases")
     case_commands = cases.add_subparsers(dest="cases_command", required=True)
@@ -142,18 +145,19 @@ def main() -> int:
         if args.data_command == "fetch":
             print(fetch_psycheval(root / "data" / "external" / "psycheval"))
         else:
+            source_dir = root
+            if not (source_dir / "data" / args.therapy).is_dir():
+                source_dir = root / "data" / "external" / "psycheval"
             manifest = convert_psycheval(
-                root / "data" / "external" / "psycheval",
+                source_dir,
                 root / "data" / "processed" / "psycheval",
                 therapy=args.therapy,
             )
             print(json.dumps(manifest, ensure_ascii=False, indent=2))
         return 0
     if args.command == "cases":
-        repository = CaseRepository(
-            root / "data" / "processed" / "psycheval", root / "data" / "profiles"
-        )
-        for case in repository.list(args.therapy):
+        repository = CaseRepository.from_project(root)
+        for case in repository.list(normalize_therapy_id(args.therapy)):
             print(f"{case.case_id}\t{case.profile.topic}\t{len(case.global_plan)} sessions")
         return 0
     if args.command == "simulate":

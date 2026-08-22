@@ -31,6 +31,7 @@ from ..domain import (
 )
 from ..model_client import ModelGateway, create_gateway
 from ..skills import HierarchicalSkillRetriever, SkillRegistry
+from ..therapies import normalize_therapy_id
 from .disclosure import DisclosureGate
 from .memory import MemoryConsolidator
 from .memory_pipeline import (
@@ -46,9 +47,13 @@ from .storage import SQLiteStore
 
 def _therapy_codes(therapy: str) -> list[str]:
     """Map sandbox therapy IDs to the PsychEval codes used by E.7/E.8/E.9."""
-    if therapy == "humanistic_existential":
-        return ["het"]
-    return [therapy]
+    return [{
+        "behavioral": "bt",
+        "cbt": "cbt",
+        "humanistic_existential": "het",
+        "psychodynamic": "pdt",
+        "postmodern": "pmt",
+    }[normalize_therapy_id(therapy)]]
 
 
 class CounselingSandbox:
@@ -64,17 +69,10 @@ class CounselingSandbox:
         self.gateway = gateway or create_gateway(
             diagnostic_dir=config.trace_dir / "diagnostics",
         )
-        self.repository = repository or CaseRepository(
-            config.processed_dataset_dir,
-            config.project_root / "data" / "profiles",
+        self.repository = repository or CaseRepository.from_project(
+            config.project_root
         )
-        skills_path = config.processed_dataset_dir / "skills.json"
-        if not skills_path.exists():
-            skills_path = config.project_root / "data" / "skills" / "cbt.json"
-        self.registry = SkillRegistry.from_json(skills_path)
-        for extra in sorted((config.project_root / "data" / "skills").glob("*.json")):
-            if extra.resolve() != skills_path.resolve() and extra.name != "cbt.json":
-                self.registry = self.registry.merge(SkillRegistry.from_json(extra))
+        self.registry = SkillRegistry.from_project(config.project_root)
         self.retriever = HierarchicalSkillRetriever(self.registry)
         self.client = ClientAgent(
             self.gateway,
@@ -88,7 +86,7 @@ class CounselingSandbox:
         self.client_evaluator = ClientSimulationEvaluator()
         self.holistic_supervisor = PsychEvalSupervisor(
             self.gateway,
-            config.project_root / "data" / "external" / "psycheval" / "eval" / "prompts_cn",
+            config.project_root / "prompts" / "eval",
             temperature=config.temperature_supervisor,
         )
         self.safety = SafetyStateMachine()
@@ -116,7 +114,7 @@ class CounselingSandbox:
     ) -> RunResult:
         random.seed(seed)
         case = self.repository.get(case_id)
-        selected_therapy = therapy or case.therapy
+        selected_therapy = normalize_therapy_id(therapy) if therapy else case.therapy
         if selected_therapy != case.therapy:
             raise ValueError(
                 f"Case {case_id} supports {case.therapy}, not {selected_therapy}"

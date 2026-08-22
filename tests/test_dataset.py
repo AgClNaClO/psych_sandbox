@@ -1,34 +1,45 @@
 from __future__ import annotations
 
-import json
+import pytest
 
-from psychsandbox.datasets.psycheval import PsychEvalAdapter, _case_split
+from psychsandbox.datasets.psycheval import (
+    PsychEvalAdapter,
+    _case_split,
+    convert_psycheval,
+)
 
 
 def test_official_case_count(repository):
     assert len(repository.list("cbt")) == 148
 
 
-def test_manifest_counts(root):
-    manifest = json.loads(
-        (root / "data/processed/psycheval/manifest.json").read_text(encoding="utf-8")
-    )
-    assert manifest["case_count"] == 148
-    assert sum(manifest["split_counts"].values()) == 148
+@pytest.mark.parametrize(
+    ("therapy_code", "expected_count"),
+    [("bt", 43), ("cbt", 148), ("het", 50), ("pdt", 50), ("pmt", 50)],
+)
+def test_bundled_supported_source_counts(root, therapy_code, expected_count):
+    assert len(list((root / "data" / therapy_code).glob("*.json"))) == expected_count
 
 
-def test_manifest_revision_pinned(root):
-    manifest = json.loads(
-        (root / "data/processed/psycheval/manifest.json").read_text(encoding="utf-8")
-    )
-    assert len(manifest["revision"]) == 40
+@pytest.mark.parametrize(
+    ("therapy_code", "expected_count"),
+    [("bt", 43), ("cbt", 148), ("het", 50), ("pdt", 50), ("pmt", 50)],
+)
+def test_converter_supports_each_therapy(
+    root, tmp_path, therapy_code, expected_count
+):
+    output = tmp_path / therapy_code
+    manifest = convert_psycheval(root, output, therapy=therapy_code)
+    assert manifest["therapy"] == therapy_code
+    assert manifest["case_count"] == expected_count
+    assert (output / "all.jsonl").exists()
+    assert sum(manifest["split_counts"].values()) == expected_count
 
 
-def test_manifest_noncommercial_license(root):
-    manifest = json.loads(
-        (root / "data/processed/psycheval/manifest.json").read_text(encoding="utf-8")
-    )
-    assert manifest["license"] == "CC BY-NC 4.0"
+def test_supported_raw_case_ids_are_unique(repository):
+    case_ids = [case.case_id for case in repository.list()]
+    assert len(case_ids) == 341
+    assert len(case_ids) == len(set(case_ids))
 
 
 def test_case_sessions_ordered(sample_case):
@@ -45,16 +56,35 @@ def test_split_is_case_deterministic():
     assert _case_split("psycheval-cbt-001") == _case_split("psycheval-cbt-001")
 
 
-def test_no_case_crosses_splits(root):
-    split_ids = {}
-    for split in ("train", "validation", "test"):
-        lines = (root / f"data/processed/psycheval/{split}.jsonl").read_text(
-            encoding="utf-8"
-        ).splitlines()
-        split_ids[split] = {json.loads(line)["case_id"] for line in lines}
-    assert not (split_ids["train"] & split_ids["validation"])
-    assert not (split_ids["train"] & split_ids["test"])
-    assert not (split_ids["validation"] & split_ids["test"])
+def test_raw_case_ids_are_scoped_by_therapy(repository):
+    ids_by_code = {
+        code: {case.case_id for case in repository.list(code)}
+        for code in ("bt", "cbt", "het", "pdt", "pmt")
+    }
+    for code, case_ids in ids_by_code.items():
+        assert all(case_id.startswith(f"psycheval-{code}-") for case_id in case_ids)
+    for index, code in enumerate(ids_by_code):
+        for other in list(ids_by_code)[index + 1 :]:
+            assert ids_by_code[code].isdisjoint(ids_by_code[other])
+
+
+@pytest.mark.parametrize(
+    ("therapy_code", "expected_category"),
+    [
+        ("bt", "bt_target_behavior"),
+        ("cbt", "cbt_special_situation"),
+        ("het", "het_existential_topic"),
+        ("pdt", "pdt_core_conflict"),
+        ("pmt", "pmt_force_field"),
+    ],
+)
+def test_each_therapy_builds_source_grounded_hidden_facts(
+    repository, therapy_code, expected_category
+):
+    case = repository.get(f"psycheval-{therapy_code}-001")
+    assert any(fact.category == expected_category for fact in case.profile.hidden_facts)
+    assert all(fact.source_field for fact in case.profile.hidden_facts)
+    assert all(fact.disclosure_layers for fact in case.profile.hidden_facts)
 
 
 def test_adapter_builds_source_grounded_layered_memories():

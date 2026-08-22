@@ -1,7 +1,7 @@
 # 基于 PsychEval/PsychAgent 的心理咨询多智能体研究沙盒
 
 本项目是一个面向大学生创新创业训练、智能体研究和心理咨询对话评测的实验系统。
-它把 PsychEval 中的多会话 CBT 案例、人物画像和咨询技能转换为可运行的多智能体环境，
+它把 PsychEval/PsychAgent 中 BT、CBT、HET、PDT、PMT 五流派的多会话案例、人物画像和咨询技能转换为可运行的多智能体环境，
 让“模拟来访者—咨询师—督导师”能够连续完成多次会谈，并记录记忆、技能选择、状态变化、
 风险判断和督导评分。
 
@@ -20,13 +20,11 @@ python -m venv .venv
 call .venv\Scripts\activate.bat
 python -m pip install -e ".[dev]"
 pytest -q
-psych-sandbox data fetch psycheval
-psych-sandbox data convert --therapy cbt
 psych-sandbox simulate --case psycheval-cbt-001 --sessions 3
 ```
 
-`data fetch` 需要访问网络；如果本地已经生成 `data\processed\psycheval`，可以跳过
-数据下载和转换。
+仓库已包含运行所需的 `data/`、`assets/` 和 `prompts/`，首次运行不需要下载或转换数据。
+`data fetch` 与 `data convert` 仅用于重新获取或生成兼容的 PsychEval 数据。
 
 仿真结束后，终端会输出 `run-xxxxxxxxxxxx` 格式的运行编号，并自动生成
 `runs\run-xxxxxxxxxxxx.html`。该报告可直接在浏览器中离线打开；也可以随时重新生成：
@@ -37,6 +35,8 @@ psych-sandbox visualize --run run-xxxxxxxxxxxx
 
 ## v0.3.0 更新重点
 
+- 将运行时扩充为行为（BT）、认知行为（CBT）、人本—存在（HET）、心理动力（PDT）和
+  后现代（PMT）五流派；每个流派使用独立病例字段、技能树、概念化重点和专属评估指标。
 - 新增 CBT 与人本—存在取向的独立 `TherapyProfile`，避免混用不同流派的数据与评估标准。
 - 将模拟来访者拆分为内部状态规划和自然语言表达两个阶段，增加话题边界、阻抗、
   提前披露防护及对话循环修复。当前来访者提示词版本为 `psycheval_patientact_v4`。
@@ -63,15 +63,15 @@ psych-sandbox visualize --run run-xxxxxxxxxxxx
 - 只生成自然语言回复，无法解释本轮选择了什么咨询技能。
 - 模型可能提前知道来访者尚未披露的经历，造成隐藏信息泄漏。
 - 缺少独立督导师，无法形成“咨询—评分—反馈—调整”的闭环。
-- 遇到自伤、他伤等高风险表达时，仍可能继续进行普通 CBT 练习。
+  - 遇到自伤、他伤等高风险表达时，仍可能继续进行普通咨询练习。
 - 高质量会谈经验不能沉淀为可回放数据、技能版本或训练样本。
 
 本项目针对这些问题实现以下闭环：
 
 ```text
-PsychEval CBT 案例
+五流派 PsychEval/PsychAgent 案例
         ↓
-模拟来访者 ↔ CBT 咨询师
+模拟来访者 ↔ 对应流派咨询师
         ↓
 安全检查 + 状态更新 + 信息披露门控
         ↓
@@ -84,14 +84,13 @@ SQLite、JSONL 轨迹和后续经验池
 
 ## 2. 当前完成情况
 
-第一阶段“最小可运行沙盒”的代码和 API 调用链已经完成：
+“最小可运行沙盒”的代码和 API 调用链已经完成：
 
-- 转换 PsychEval 官方 148 个 CBT 案例。
-- 提取 346 个元技能和 1171 个原子技能，保留官方原子 `skill_id`。
-- 按案例进行确定性训练集、验证集和测试集划分：108/19/21。
+- 当前直接加载 341 个五流派原始案例：BT 43、CBT 148、HET 50、PDT 50、PMT 50。
+- 加载 677 个元技能和 4481 个原子技能，保留 PsychAgent 原始技能 ID 并增加稳定流派前缀。
+- 可选转换器按案例进行确定性训练集、验证集和测试集划分。
 - 将 PsychEval 原始字段转换为带来源字段的结构化 5Ps 个案概念化。
-- 支持 CBT 与人本—存在取向两个独立 `TherapyProfile`；后者仅使用合成案例和
-  第一阶段演示技能，不冒充 PsychEval 官方流派数据。
+- 支持五个独立 `TherapyProfile`，病例、阶段技能和评估量表不会跨流派混用。
 - 支持单个案例连续运行 6–10 个 session，并验证状态与记忆连续性。
 - 支持从 SQLite 中最近一个 session 边界恢复运行。
 - 咨询师只能读取已解锁信息，不能读取完整来访者档案。
@@ -140,7 +139,7 @@ PatientAct 参数采用“有证据才派生”的原则：核心信念、显式
 
 ### 3.2 多流派咨询师
 
-第一阶段提供 CBT 与人本—存在取向两个适配器。咨询师智能体只能看到：
+当前提供 BT、CBT、HET、PDT、PMT 五个适配器。咨询师智能体只能看到：
 
 - 来访者已经明确说出的信息。
 - 已解锁档案。
@@ -156,15 +155,15 @@ PatientAct 参数采用“有证据才派生”的原则：核心信念、显式
 督导师拥有审计视图，可以查看完整档案、会谈计划、对话和技能决策。第一阶段评估六个维度：
 
 - `wai_lite`：目标、任务和关系联盟。
-- `ctrs_lite` / `tes_lite`：分别检查 CBT 或人本—存在取向的可观察流派行为。
+- `miti_lite`、`ctrs_lite`、`tes_lite`、`psc_lite`、`eft_tfs_lite`：检查五流派各自的可观察行为。
 - `stage_consistency`：干预是否符合当前咨询阶段。
 - `persona_consistency`：来访者人设和跨 session 一致性。
 - `hidden_information_leakage`：咨询师是否提前使用隐藏信息。
 - `ethics_and_safety`：高风险场景是否停止普通干预并进行安全分流。
 
 每 session 结束后运行确定性规则督导，用于审计与安全门控，不参与下一 session 规划。
-整条多 session 轨迹全部结束后，再运行一次与 PsychEval 对齐的整体督导：直接使用官方
-`eval/prompts_cn` 量表提示词，给出 Counselor-Level（临床胜任力）与 Client-Level
+整条多 session 轨迹全部结束后，再运行一次与 PsychEval 对齐的整体督导：直接使用
+`prompts/eval` 中的量表提示词，给出 Counselor-Level（临床胜任力）与 Client-Level
 （仿真保真度）评分。规则督导与整体督导分开
 保存，不会用一个总分覆盖具体证据和违规项。
 
@@ -173,7 +172,7 @@ PatientAct 参数采用“有证据才派生”的原则：核心信念、显式
 ```text
 src/psychsandbox/
 ├── domain/          Pydantic 统一领域模型
-├── datasets/        PsychEval 下载、转换、划分和案例仓库
+├── datasets/        PsychEval/PsychAgent 原始数据适配与案例仓库
 ├── agents/          来访者、咨询师门面与可选 LLM 督导
 ├── client_simulation/ 来访者激活、渐进披露、反应、语言和状态的统一接口
 ├── therapies/       治疗流派定义、概念化焦点与阶段目标
@@ -185,7 +184,7 @@ src/psychsandbox/
 ├── evolution/       技能审核、晋升、弃用和回滚状态机
 ├── training/        SFT 与 DPO 数据导出
 ├── model_client.py  OpenAI-compatible API 网关
-└── cli.py           数据、案例、仿真和报告命令
+└── cli.py           可选数据刷新、案例、仿真和报告命令
 ```
 
 主要运行流程如下：
@@ -271,9 +270,25 @@ psych-sandbox --help
 python -m psychsandbox --help
 ```
 
-## 6. 下载和转换 PsychEval
+## 6. 数据资源与可选刷新
 
-### 6.1 下载官方数据
+项目默认直接读取以下已随仓库提供的资源：
+
+```text
+data\cbt\                 CBT 原始案例
+data\het\                 人本—存在取向原始案例
+data\bt\                  行为取向原始案例
+data\pdt\                 心理动力取向原始案例
+data\pmt\                 后现代取向原始案例
+assets\profiles\          PsychAgent 人物画像
+assets\skills\sect\       分流派、分阶段技能树
+prompts\eval\             整体督导量表提示词
+```
+
+当前运行时注册 BT、CBT、HET、PDT、PMT 五个适配器。`data\integrative` 仍作为资源保留，
+但在具有独立技能树和评估标准之前不会冒充其中任一流派。
+
+### 6.1 可选：重新下载官方数据
 
 ```bat
 psych-sandbox data fetch psycheval
@@ -291,13 +306,16 @@ data\external\psycheval\
 e04df535749e5bca76fcc45d9a85f3f46a082d91
 ```
 
-### 6.2 转换 CBT 案例
+### 6.2 可选：生成单流派 processed 数据
 
 ```bat
 psych-sandbox data convert --therapy cbt
 ```
 
-转换结果位于：
+`--therapy` 可取 `bt`、`cbt`、`het`、`pdt`、`pmt`。该命令生成单流派可重建缓存；
+再次以其他流派运行会替换同一缓存，正常仿真会直接读取仓库内全部原始病例，不依赖该缓存。
+
+转换结果作为可重建缓存写入：
 
 ```text
 data\processed\psycheval\
@@ -311,6 +329,8 @@ data\processed\psycheval\
 
 `manifest.json` 保存案例数量、技能数量、上游提交、许可证、集合划分和源文件摘要。
 
+正常运行不依赖该目录；案例仓库会优先兼容 processed 数据，并直接读取仓库内的原始案例。
+
 ### 6.3 检查案例
 
 ```bat
@@ -318,6 +338,7 @@ psych-sandbox cases list --therapy cbt
 ```
 
 正常情况下会看到 `psycheval-cbt-001` 到 `psycheval-cbt-148`。
+也可以将 `cbt` 替换为 `bt`、`het`、`pdt` 或 `pmt`。
 
 ## 7. 运行 API 仿真
 
@@ -491,7 +512,7 @@ pytest -q
 - SQLite 恢复和 JSONL 输出。
 - 六维规则督导报告与多会话后整体督导（PsychEval 量表）持久化。
 - E.7/E.8/E.9 记忆流水线（信息披露提取、ground-truth 门控档案合并、临床摘要）。
-- 结构化 5Ps、双流派适配、纵向报告和进度驱动计划。
+- 结构化 5Ps、五流派适配、纵向报告和进度驱动计划。
 - HTML 过程/结果可视化与整体督导展示。
 - 技能审核、晋升和回滚约束。
 - YAML 默认配置与 API-only CLI 参数。
@@ -508,7 +529,8 @@ outputs\
 checkpoints\
 ```
 
-原因是原始数据、转换数据、实验轨迹和模型权重不应直接进入代码仓库。项目不采集真实医疗记录、
+其中 `data\external` 与 `data\processed` 是可重新生成的下载/转换缓存；仓库内的
+`data\<therapy>`、`assets` 和 `prompts` 是当前版本的固定研究资源。项目不采集真实医疗记录、
 真实咨询录音或真实求助者隐私。人工评测应仅使用公开案例、合成资料或经过批准的脱敏材料。
 
 PsychEval 采用 CC BY-NC 4.0，本项目对其数据的使用限于非商业教学研究。转换器增加了统一字段、
@@ -521,7 +543,7 @@ PsychEval 采用 CC BY-NC 4.0，本项目对其数据的使用限于非商业教
 
 PsychEval 是本项目第一阶段的主要数据和技能来源。本项目直接借鉴并保留：
 
-- CBT 人物画像。
+- BT、CBT、HET、PDT、PMT 五流派人物画像。
 - 三阶段/多 session 咨询计划。
 - session 目标。
 - persona links 和 case materials。
@@ -539,12 +561,12 @@ PsychAgent 论文用于指导第三阶段的经验积累和自进化设计，包
 
 ## 14. 后续阶段怎么做
 
-### 第二阶段：多流派和督导反馈闭环
+### 后续流派与督导反馈闭环
 
 - EFT 明确定义为 Emotion-Focused Therapy。
 - 不把 PsychEval 的 HET 或 BT 数据直接重命名为 EFT。
 - 建立独立 EFT 技能库，并由心理学背景人员复核。
-- 支持 CBT、EFT 和 integrative 三种 `TherapyProfile`。
+- 在存在独立病例、技能库和评估标准后再增加 EFT 与 integrative `TherapyProfile`。
 - 对比“有督导反馈”和“无督导反馈”，验证反馈是否改变下一次 session 计划。
 
 ### 第三阶段：经验积累和自进化

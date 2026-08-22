@@ -129,6 +129,16 @@ class DisclosureGate:
         }
         growth_cues = ("成长", "经历", "过去", "小时候")
         situation_cues = ("情境", "发生", "当时", "想法", "脑中", "假设", "应对")
+        category_cues = {
+            "bt_target_behavior": ("行为", "前因", "回避", "后果", "练习"),
+            "het_existential_topic": ("意义", "选择", "存在", "体验", "生活"),
+            "het_contact_model": ("关系", "需要", "接触", "靠近", "拒绝"),
+            "pdt_core_conflict": ("愿望", "害怕", "冲突", "一方面", "另一方面"),
+            "pdt_object_relation": ("自己", "他人", "关系", "感受"),
+            "pdt_response_pattern": ("触发", "反应", "模式", "防御"),
+            "pmt_exception_event": ("例外", "不同", "做到", "改变"),
+            "pmt_force_field": ("资源", "力量", "阻碍", "改变"),
+        }
 
         def score(candidate: tuple[HiddenFact, list[str], int]) -> int:
             fact, matched, _ = candidate
@@ -142,6 +152,10 @@ class DisclosureGate:
                 cue_bonus = 2
             elif fact.category == "cbt_special_situation" and any(
                 cue in text for cue in situation_cues
+            ):
+                cue_bonus = 2
+            elif any(
+                cue in text for cue in category_cues.get(fact.category, ())
             ):
                 cue_bonus = 2
             return specific_count * 3 + generic_count + cue_bonus

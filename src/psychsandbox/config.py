@@ -19,10 +19,7 @@ def load_yaml(path: Path) -> dict[str, Any]:
 
 
 def load_case(case_id: str, root: Path = PROJECT_ROOT) -> CounselingCase:
-    return CaseRepository(
-        root / "data" / "processed" / "psycheval",
-        root / "data" / "profiles",
-    ).get(case_id)
+    return CaseRepository.from_project(root).get(case_id)
 
 
 def load_profile(case_id: str, root: Path = PROJECT_ROOT):
@@ -31,14 +28,7 @@ def load_profile(case_id: str, root: Path = PROJECT_ROOT):
 
 
 def load_skill_registry(root: Path = PROJECT_ROOT) -> SkillRegistry:
-    path = root / "data" / "processed" / "psycheval" / "skills.json"
-    if not path.exists():
-        path = root / "data" / "skills" / "cbt.json"
-    registry = SkillRegistry.from_json(path)
-    for extra in sorted((root / "data" / "skills").glob("*.json")):
-        if extra.resolve() != path.resolve() and extra.name != "cbt.json":
-            registry = registry.merge(SkillRegistry.from_json(extra))
-    return registry
+    return SkillRegistry.from_project(root)
 
 
 def load_skills(root: Path = PROJECT_ROOT):
