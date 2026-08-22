@@ -21,7 +21,9 @@ from psychsandbox.domain import (
     ClientState,
     ClientTurnSignal,
     ClientUtterance,
+    CounselorAction,
     CounselorDecision,
+    CounselorPlanning,
     CounselorTurn,
     DisclosureDecision,
     HiddenFact,
@@ -35,7 +37,7 @@ from psychsandbox.domain import (
 from tests.deterministic_gateway import DeterministicGateway
 from psychsandbox.runtime import DisclosureGate, StateUpdater
 from psychsandbox.runtime.leakage import PrematureDisclosureGuard
-from psychsandbox.skills import HierarchicalSkillRetriever, SkillRegistry
+from psychsandbox.skills import SkillCatalog, SkillRegistry
 
 
 def test_disclosure_rejects_low_trust(sample_case):
@@ -159,29 +161,35 @@ def test_skill_parent_child_integrity(root):
     )
 
 
-def test_retrieval_is_deterministic(root, sample_case):
+def test_skill_catalog_observes_selected_meta_without_ranking(root, sample_case):
     registry = SkillRegistry.from_project(root)
-    retriever = HierarchicalSkillRetriever(registry)
-    args = {
-        "plan": sample_case.global_plan[0],
-        "client_message": "我很焦虑，想理解自动想法",
-        "risk": RiskAssessment(level=RiskLevel.LOW),
-    }
-    first = retriever.retrieve(**args)
-    second = retriever.retrieve(**args)
-    assert [x.skill_id for x in first.atomic_skills] == [
-        x.skill_id for x in second.atomic_skills
-    ]
-
-
-def test_high_risk_returns_no_skills(root, sample_case):
-    registry = SkillRegistry.from_project(root)
-    result = HierarchicalSkillRetriever(registry).retrieve(
+    catalog = SkillCatalog(registry)
+    risk = RiskAssessment(level=RiskLevel.LOW)
+    meta = catalog.available_meta(plan=sample_case.global_plan[0], risk=risk)
+    observation = catalog.observe(
         plan=sample_case.global_plan[0],
-        client_message="危险",
+        risk=risk,
+        action=CounselorAction.LOOKUP_SKILLS,
+        selected_meta_skill_ids=[meta[0].meta_skill_id],
+    )
+
+    assert meta
+    assert observation.status == "skills_found"
+    assert observation.selected_meta_skill_ids == [meta[0].meta_skill_id]
+    assert observation.atomic_skills
+    assert all(
+        item.meta_skill_id == meta[0].meta_skill_id
+        for item in observation.atomic_skills
+    )
+
+
+def test_high_risk_catalog_returns_no_skills(root, sample_case):
+    registry = SkillRegistry.from_project(root)
+    result = SkillCatalog(registry).available_meta(
+        plan=sample_case.global_plan[0],
         risk=RiskAssessment(level=RiskLevel.HIGH),
     )
-    assert result.atomic_skills == []
+    assert result == []
 
 
 def test_counselor_payload_has_no_full_profile(sample_case):
@@ -189,12 +197,11 @@ def test_counselor_payload_has_no_full_profile(sample_case):
         case_id=sample_case.case_id,
         unlocked_profile=UnlockedClientProfile(client_id=sample_case.profile.client_id),
     )
-    payload = CounselorAgent(DeterministicGateway()).build_payload(
+    payload = CounselorAgent(DeterministicGateway()).build_context_payload(
         memory=memory,
         plan=sample_case.global_plan[0],
         client_message="你好",
         recent_messages=[],
-        candidates=__import__("psychsandbox.domain", fromlist=["SkillCandidate"]).SkillCandidate(),
         risk=RiskAssessment(level=RiskLevel.LOW),
         counselor_turn_count=0,
     )
@@ -204,21 +211,28 @@ def test_counselor_payload_has_no_full_profile(sample_case):
         assert fact.content not in dumped
 
 
-def test_deterministic_gateway_structured_output(sample_case):
+def test_counselor_uses_plan_then_react_observation(root, sample_case):
     memory = SessionMemory(
         case_id=sample_case.case_id,
         unlocked_profile=UnlockedClientProfile(client_id=sample_case.profile.client_id),
     )
-    result = asyncio.run(CounselorAgent(DeterministicGateway()).respond(
+    gateway = CountingDeterministicGateway()
+    result = asyncio.run(CounselorAgent(
+        gateway,
+        SkillCatalog(SkillRegistry.from_project(root)),
+    ).respond(
         memory=memory,
         plan=sample_case.global_plan[0],
         client_message="我很焦虑",
         recent_messages=[],
-        candidates=__import__("psychsandbox.domain", fromlist=["SkillCandidate"]).SkillCandidate(),
         risk=RiskAssessment(level=RiskLevel.LOW),
         counselor_turn_count=0,
     ))
     assert result.response
+    assert gateway.calls == [CounselorPlanning, CounselorTurn]
+    assert result.planning.action is CounselorAction.LOOKUP_SKILLS
+    assert result.observation.status == "skills_found"
+    assert result.decision.selected_atomic_skill_ids
 
 
 def test_high_risk_counselor_routes_to_safety(sample_case):
@@ -231,7 +245,6 @@ def test_high_risk_counselor_routes_to_safety(sample_case):
         plan=sample_case.global_plan[0],
         client_message="我想自杀",
         recent_messages=[],
-        candidates=__import__("psychsandbox.domain", fromlist=["SkillCandidate"]).SkillCandidate(),
         risk=RiskAssessment(level=RiskLevel.HIGH),
         counselor_turn_count=0,
     ))

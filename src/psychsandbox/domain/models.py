@@ -29,6 +29,12 @@ class RiskLevel(StrEnum):
     IMMINENT = "imminent"
 
 
+class CounselorAction(StrEnum):
+    LOOKUP_SKILLS = "lookup_skills"
+    RESPOND_WITHOUT_SKILL = "respond_without_skill"
+    END_SESSION = "end_session"
+
+
 class SkillStatus(StrEnum):
     CANDIDATE = "candidate"
     REPLAYED = "replayed"
@@ -323,12 +329,6 @@ class SkillVersion(StrictModel):
     created_at: str = Field(default_factory=utc_now)
 
 
-class SkillCandidate(StrictModel):
-    meta_skills: list[MetaSkill] = Field(default_factory=list)
-    atomic_skills: list[AtomicSkill] = Field(default_factory=list)
-    scores: dict[str, float] = Field(default_factory=dict)
-
-
 class SessionPlan(StrictModel):
     session_index: int = Field(ge=1)
     therapy: str = "cbt"
@@ -339,6 +339,7 @@ class SessionPlan(StrictModel):
     target_meta_skill_ids: list[str] = Field(default_factory=list)
     target_atomic_skill_ids: list[str] = Field(default_factory=list)
     forbidden_actions: list[str] = Field(default_factory=list)
+    strategy: str = ""
     completion_threshold: float = Field(default=0.7, ge=0, le=1)
 
 
@@ -454,9 +455,44 @@ class CounselorDecision(StrictModel):
     end_session: bool = False
 
 
+class CounselorPlanning(StrictModel):
+    """Auditable planning summary; never a dump of private model reasoning."""
+
+    reasoning_summary: str
+    current_goal: str
+    plan_steps: list[str] = Field(min_length=1, max_length=6)
+    action: CounselorAction
+    selected_meta_skill_ids: list[str] = Field(default_factory=list, max_length=3)
+    action_input: str = ""
+
+
+class CounselorObservation(StrictModel):
+    action: CounselorAction
+    status: Literal["skills_found", "no_skills_requested", "invalid_selection"]
+    selected_meta_skill_ids: list[str] = Field(default_factory=list)
+    atomic_skills: list[AtomicSkill] = Field(default_factory=list)
+    note: str = ""
+
+
 class CounselorTurn(StrictModel):
     decision: CounselorDecision
     response: str
+    planning: CounselorPlanning | None = None
+    observation: CounselorObservation | None = None
+
+
+class CounselorSessionReview(StrictModel):
+    """Counselor self-review used to decide whether and how to replan."""
+
+    goals_achieved: bool
+    goal_progress: float = Field(ge=0, le=1)
+    evidence: list[str] = Field(default_factory=list, max_length=6)
+    unmet_objectives: list[str] = Field(default_factory=list)
+    improvement_areas: list[str] = Field(default_factory=list)
+    replanning_required: bool
+    revised_strategy: str = ""
+    next_objectives: list[str] = Field(default_factory=list, max_length=8)
+    target_meta_skill_ids: list[str] = Field(default_factory=list, max_length=3)
 
 
 class ClientGeneration(StrictModel):
@@ -570,6 +606,7 @@ class SessionRecord(StrictModel):
     turn_records: list[dict[str, Any]] = Field(default_factory=list)
     summary: str
     clinical_summary: ClinicalSummary | None = None
+    counselor_review: CounselorSessionReview | None = None
     newly_unlocked_fact_ids: list[str] = Field(default_factory=list)
     interventions_used: list[str] = Field(default_factory=list)
     risk_events: list[RiskAssessment] = Field(default_factory=list)

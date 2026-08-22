@@ -41,7 +41,24 @@ def test_each_turn_has_safety_and_decision(sandbox):
     session = result.sessions[0]
     assert session.risk_events
     assert session.decisions
+    assert session.turn_records[0]["planning"]["action"] == "lookup_skills"
+    assert session.turn_records[0]["observation"]["status"] == "skills_found"
     assert session.turn_records[0]["state_update"]["rule_delta"]
+
+
+def test_counselor_reviews_progress_and_replans_unmet_goals(sandbox):
+    result = asyncio.run(sandbox.run_case("psycheval-cbt-003", session_count=1))
+    session = result.sessions[0]
+
+    assert session.counselor_review is not None
+    assert session.counselor_review.goals_achieved is False
+    assert session.counselor_review.replanning_required is True
+    assert session.counselor_review.evidence
+    assert session.next_session_plan is not None
+    assert session.next_session_plan.strategy == session.counselor_review.revised_strategy
+    assert session.next_session_plan.target_meta_skill_ids == (
+        session.counselor_review.target_meta_skill_ids
+    )
 
 
 def test_state_continues_across_sessions(sandbox):

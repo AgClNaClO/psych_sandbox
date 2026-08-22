@@ -30,7 +30,7 @@ from ..domain import (
     UnlockedClientProfile,
 )
 from ..model_client import ModelGateway, create_gateway
-from ..skills import HierarchicalSkillRetriever, SkillRegistry
+from ..skills import SkillCatalog, SkillRegistry
 from ..therapies import normalize_therapy_id
 from .disclosure import DisclosureGate
 from .memory import MemoryConsolidator
@@ -73,7 +73,7 @@ class CounselingSandbox:
             config.project_root
         )
         self.registry = SkillRegistry.from_project(config.project_root)
-        self.retriever = HierarchicalSkillRetriever(self.registry)
+        self.skill_catalog = SkillCatalog(self.registry)
         self.client = ClientAgent(
             self.gateway,
             config.temperature_client,
@@ -81,7 +81,11 @@ class CounselingSandbox:
             pullback_after=config.client_pullback_after,
             leak_retry_limit=config.disclosure_leak_retry_limit,
         )
-        self.counselor = CounselorAgent(self.gateway, config.temperature_counselor)
+        self.counselor = CounselorAgent(
+            self.gateway,
+            self.skill_catalog,
+            config.temperature_counselor,
+        )
         self.supervisor = SupervisorAgent()
         self.client_evaluator = ClientSimulationEvaluator()
         self.holistic_supervisor = PsychEvalSupervisor(
@@ -168,10 +172,21 @@ class CounselingSandbox:
                 baseline_next = self._baseline_next_plan(
                     case, session, session_index + 1
                 )
+                provisional_next = self.plan_builder.build(
+                    session.plan,
+                    baseline_next,
+                    session.longitudinal_report,
+                )
+                session.counselor_review = await self.counselor.review_session(
+                    session=session,
+                    memory=memory,
+                    baseline_next=provisional_next,
+                )
                 session.next_session_plan = self.plan_builder.build(
                     session.plan,
                     baseline_next,
                     session.longitudinal_report,
+                    session.counselor_review,
                 )
                 await self._consolidate_memory_pipeline(
                     case, session, plan, memory
@@ -190,12 +205,13 @@ class CounselingSandbox:
                         "temperature_client": self.config.temperature_client,
                         "temperature_client_planner": self.config.temperature_client_planner,
                         "temperature_counselor": self.config.temperature_counselor,
+                        "counselor_pipeline": "plan_react_review_v1",
                         "client_pipeline": (
                             CLIENT_PROMPT_VERSION
                             if self.config.patientact_enabled
                             else "direct_generation_v1"
                         ),
-                        "trace_schema_version": 2,
+                        "trace_schema_version": 3,
                     },
                     memory_before=memory_before,
                     plan=plan,
@@ -269,16 +285,12 @@ class CounselingSandbox:
             client_text = messages[-1].content
             risk = self.safety.assess_input(client_text)
             risks.append(risk)
-            candidates = self.retriever.retrieve(
-                plan=plan, client_message=client_text, risk=risk
-            )
             state_before = state.model_dump(mode="json")
             counselor_turn = await self.counselor.respond(
                 memory=memory,
                 plan=plan,
                 client_message=client_text,
                 recent_messages=[m.model_dump(mode="json") for m in messages],
-                candidates=candidates,
                 risk=risk,
                 counselor_turn_count=turn_index - 1,
             )
@@ -298,12 +310,8 @@ class CounselingSandbox:
                 turn_records.append({
                     "turn_index": turn_index,
                     "client_input": client_text,
-                    "candidate_meta_skill_ids": [
-                        item.meta_skill_id for item in candidates.meta_skills
-                    ],
-                    "candidate_atomic_skill_ids": [
-                        item.skill_id for item in candidates.atomic_skills
-                    ],
+                    "planning": counselor_turn.planning.model_dump(mode="json"),
+                    "observation": counselor_turn.observation.model_dump(mode="json"),
                     "decision": counselor_turn.decision.model_dump(mode="json"),
                     "input_safety": risk.model_dump(mode="json"),
                     "output_safety": output_risk.model_dump(mode="json"),
@@ -348,12 +356,8 @@ class CounselingSandbox:
             turn_records.append({
                 "turn_index": turn_index,
                 "client_input": client_text,
-                "candidate_meta_skill_ids": [
-                    item.meta_skill_id for item in candidates.meta_skills
-                ],
-                "candidate_atomic_skill_ids": [
-                    item.skill_id for item in candidates.atomic_skills
-                ],
+                "planning": counselor_turn.planning.model_dump(mode="json"),
+                "observation": counselor_turn.observation.model_dump(mode="json"),
                 "decision": counselor_turn.decision.model_dump(mode="json"),
                 "disclosure_decision": disclosure.model_dump(mode="json"),
                 "client_turn_signal": signal.model_dump(mode="json"),

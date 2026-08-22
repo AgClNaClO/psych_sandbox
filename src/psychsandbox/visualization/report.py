@@ -10,11 +10,11 @@ from .charts import metric_bars, state_line_chart
 
 PROCESS_STEPS = (
     ("会谈准备", "读取允许记忆、阶段与目标"),
-    ("咨询师行动", "评估 → 选技能 → 定策略 → 回复"),
+    ("咨询师 ReAct", "规划 → 查询技能 → 观察 → 选策略 → 回复"),
     ("双重安全门", "输入风险与输出边界检查"),
     ("来访者反应", "披露门控 → 反应 → 行为/抗拒 → 表达"),
     ("状态更新", "信任、痛苦、希望与抗拒"),
-    ("督导与计划", "规则督导 → 纵向趋势 → 进度驱动下一计划"),
+    ("会后闭环", "咨询师自评 → 未达目标再规划 → 规则督导与纵向趋势"),
 )
 
 ICON_BRAIN = (
@@ -177,10 +177,23 @@ def _session_section(session: SessionRecord) -> str:
     longitudinal = session.longitudinal_report
     trend = longitudinal.trend if longitudinal else "n/a"
     action = longitudinal.stage_action if longitudinal else "n/a"
-    feedback = (
-        "".join(f"<li>{escape(item)}</li>" for item in report.feedback)
-        if report and report.feedback
-        else "<li>本次规则督导未生成低分修复项</li>"
+    review = session.counselor_review
+    review_status = (
+        "暂无"
+        if review is None
+        else "目标已达到"
+        if review.goals_achieved
+        else "目标未完全达到"
+    )
+    review_items = []
+    if review:
+        review_items.extend(review.evidence)
+        review_items.extend(review.improvement_areas)
+        if review.revised_strategy:
+            review_items.append(f"调整策略：{review.revised_strategy}")
+    review_html = (
+        "".join(f"<li>{escape(item)}</li>" for item in review_items)
+        or "<li>暂无咨询师会后自评</li>"
     )
     # Build thinking summary from turn records
     thinking_cards = _session_thinking_summary(session)
@@ -205,12 +218,12 @@ def _session_section(session: SessionRecord) -> str:
       <div class="trend"><span>趋势</span><strong>{escape(trend)}</strong></div>
       <div class="trend"><span>阶段动作</span><strong>{escape(action)}</strong></div>
       {_delta_table(session)}
-      <h4>反馈进入下一计划</h4>
-      <ul>{feedback}</ul>
+      <h4>咨询师会后自评：{escape(review_status)}</h4>
+      <ul>{review_html}</ul>
     </div>
   </div>
   <details open>
-    <summary>{ICON_BRAIN} 咨询师内部思考过程（{len(session.turn_records)} turns）</summary>
+    <summary>{ICON_BRAIN} 咨询师可审计规划与决策（{len(session.turn_records)} turns）</summary>
     <div class="thinking-grid">{thinking_cards}</div>
   </details>
   <details open>
@@ -229,6 +242,8 @@ def _session_thinking_summary(session: SessionRecord) -> str:
     cards = []
     for record in session.turn_records:
         decision = record.get("decision", {})
+        planning = record.get("planning", {})
+        observation = record.get("observation", {})
         turn = record.get("turn_index", "?")
         assessment = decision.get("assessment", "")
         strategy = decision.get("strategy", "")
@@ -236,6 +251,11 @@ def _session_thinking_summary(session: SessionRecord) -> str:
         skills = decision.get("selected_atomic_skill_ids", [])
         risk = decision.get("risk_level", "low")
         progress = decision.get("goal_progress", 0)
+        reasoning = planning.get("reasoning_summary", "")
+        action_name = planning.get("action", "—")
+        plan_steps = planning.get("plan_steps", [])
+        observation_status = observation.get("status", "—")
+        observed_count = len(observation.get("atomic_skills", []))
 
         risk_class = ""
         risk_label = ""
@@ -260,6 +280,16 @@ def _session_thinking_summary(session: SessionRecord) -> str:
             f'<span class="progress-tag">目标进度 {progress:.0%}</span>'
             f'</div>'
             f'<div class="thinking-body">'
+            f'<div class="thinking-item">'
+            f'<strong>🧭 Reasoning / Planning</strong>'
+            f'<p>{escape(reasoning)}</p>'
+            f'<p>{escape(" → ".join(plan_steps))}</p>'
+            f'</div>'
+            f'<div class="thinking-item">'
+            f'<strong>⚙️ Action / Observation</strong>'
+            f'<p>{escape(str(action_name))} → {escape(str(observation_status))} '
+            f'({observed_count} skills)</p>'
+            f'</div>'
             f'<div class="thinking-item">'
             f'<strong>📋 评估</strong>'
             f'<p>{escape(assessment)}</p>'
@@ -318,6 +348,8 @@ def _turn_timeline(session: SessionRecord) -> str:
 
 def _turn_card(record: dict[str, Any]) -> str:
     decision = record.get("decision", {})
+    planning = record.get("planning", {})
+    observation = record.get("observation", {})
     signal = record.get("client_turn_signal", {})
     disclosure = record.get("disclosure_decision", {})
     input_safety = record.get("input_safety", {})
@@ -330,6 +362,9 @@ def _turn_card(record: dict[str, Any]) -> str:
     return (
         '<div class="turn-card">'
         f'<div class="turn-index">Turn {escape(str(record.get("turn_index", "?")))}</div>'
+        f"<p><b>规划动作：</b>{escape(str(planning.get('action', '—')))}</p>"
+        f"<p><b>观察结果：</b>{escape(str(observation.get('status', '—')))}，"
+        f"{len(observation.get('atomic_skills', []))} 个技能</p>"
         f"<p><b>目标/策略：</b>{escape(str(decision.get('strategy', '—')))}</p>"
         f"<p><b>技能：</b>{escape(', '.join(skills) or '无')}</p>"
         f"<p><b>来访者信号：</b>{escape(str(signal.get('reaction', '—')))} / "

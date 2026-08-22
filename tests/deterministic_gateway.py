@@ -10,7 +10,10 @@ from psychsandbox.domain import (
     ClientReactionType,
     ClientTurnSignal,
     ClientUtterance,
+    CounselorAction,
     CounselorDecision,
+    CounselorPlanning,
+    CounselorSessionReview,
     CounselorTurn,
     ReactionIntensity,
     ResistancePatternType,
@@ -38,8 +41,23 @@ class DeterministicGateway(ModelGateway):
         temperature: float,
     ) -> BaseModel:
         del role, system_prompt, temperature
+        if output_schema is CounselorPlanning:
+            meta = input_payload.get("meta_skill_catalog", [])[:1]
+            meta_ids = [item["meta_skill_id"] for item in meta]
+            return CounselorPlanning(
+                reasoning_summary="来访者正在表达当前困扰，需要围绕本次目标分步推进。",
+                current_goal="先确认体验，再澄清一个与会谈目标有关的具体点。",
+                plan_steps=["确认当前体验", "查询可用技能", "选择一个低压力问题"],
+                action=(
+                    CounselorAction.LOOKUP_SKILLS
+                    if meta_ids
+                    else CounselorAction.RESPOND_WITHOUT_SKILL
+                ),
+                selected_meta_skill_ids=meta_ids,
+                action_input="查看所选元技能下的原子技能。",
+            )
         if output_schema is CounselorTurn:
-            skills = input_payload.get("candidate_atomic_skills", [])
+            skills = input_payload.get("observation", {}).get("atomic_skills", [])
             selected = skills[:1]
             ids = [item["skill_id"] for item in selected]
             metas = list(dict.fromkeys(item["meta_skill_id"] for item in selected))
@@ -59,6 +77,42 @@ class DeterministicGateway(ModelGateway):
                     input_payload.get("session_stage", ""),
                     turn,
                 ),
+            )
+        if output_schema is CounselorSessionReview:
+            decisions = input_payload.get("counselor_decisions", [])
+            progress = max(
+                (float(item.get("goal_progress", 0)) for item in decisions),
+                default=0.0,
+            )
+            goals_achieved = progress >= 0.7
+            objectives = input_payload.get("session_plan", {}).get("objectives", [])[:8]
+            next_meta = input_payload.get("next_meta_skill_catalog", [])[:1]
+            dialogue = input_payload.get("dialogue", [])
+            evidence = [
+                item.get("content", "")
+                for item in dialogue[-2:]
+                if item.get("content")
+            ]
+            return CounselorSessionReview(
+                goals_achieved=goals_achieved,
+                goal_progress=progress,
+                evidence=evidence,
+                unmet_objectives=[] if goals_achieved else objectives,
+                improvement_areas=[] if goals_achieved else ["放慢节奏并增加协作性核对"],
+                replanning_required=not goals_achieved,
+                revised_strategy=(
+                    ""
+                    if goals_achieved
+                    else "先确认来访者对当前方向的感受，再用一个技能推进未达目标。"
+                ),
+                next_objectives=(
+                    input_payload.get("baseline_next_plan", {}).get("objectives", [])[:8]
+                    if goals_achieved
+                    else objectives
+                ),
+                target_meta_skill_ids=[
+                    item["meta_skill_id"] for item in next_meta
+                ],
             )
         if output_schema is ClientGeneration:
             allowed = input_payload.get("allowed_facts", [])

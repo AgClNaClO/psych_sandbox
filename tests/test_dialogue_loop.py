@@ -8,7 +8,6 @@ from psychsandbox.domain import (
     RiskLevel,
     SandboxConfig,
     SessionMemory,
-    SkillCandidate,
     UnlockedClientProfile,
 )
 from psychsandbox.runtime import CounselingSandbox, DialogueLoopGuard, DisclosureGate
@@ -67,7 +66,6 @@ def test_counselor_respects_explicit_topic_boundary(sample_case):
             plan=sample_case.global_plan[0],
             client_message=client_message,
             recent_messages=[{"role": "client", "content": client_message}],
-            candidates=SkillCandidate(),
             risk=RiskAssessment(level=RiskLevel.LOW),
             counselor_turn_count=1,
         )
@@ -89,7 +87,6 @@ def test_repeated_boundary_triggers_relationship_repair(sample_case):
                 {"role": "counselor", "content": "这对你最直接的影响是什么？"},
                 {"role": "client", "content": client_message},
             ],
-            candidates=SkillCandidate(),
             risk=RiskAssessment(level=RiskLevel.LOW),
             counselor_turn_count=2,
         )
