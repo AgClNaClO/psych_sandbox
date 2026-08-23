@@ -545,6 +545,9 @@ class ScaleItem(StrictModel):
 
     item: str
     score: float
+    evidence_pos: list[str] = Field(default_factory=list)
+    evidence_neg: list[str] = Field(default_factory=list)
+    thought: str = ""
 
 
 class ScaleItems(StrictModel):

@@ -68,6 +68,11 @@ class OpenAICompatibleGateway(ModelGateway):
             base_url=base_url,
             models=self.models,
         )
+        self.json_object_roles = _json_object_roles(
+            mode=structured_mode,
+            models=self.models,
+            json_schema_roles=self.json_schema_roles,
+        )
         self.max_tokens = int(os.getenv("MODEL_MAX_TOKENS", "4096"))
         self.diagnostic_dir = Path(diagnostic_dir) if diagnostic_dir else None
 
@@ -80,6 +85,7 @@ class OpenAICompatibleGateway(ModelGateway):
         user_prompt: str,
         temperature: float,
         output_schema: type[BaseModel],
+        force_json_schema: bool = False,
     ) -> str:
         request: dict[str, Any] = {
             "model": self.models[role],
@@ -90,7 +96,7 @@ class OpenAICompatibleGateway(ModelGateway):
                 {"role": "user", "content": user_prompt},
             ],
         }
-        if role in self.json_schema_roles:
+        if force_json_schema or role in self.json_schema_roles:
             schema_name = re.sub(r"[^a-zA-Z0-9_-]", "_", output_schema.__name__)
             request.update(
                 {
@@ -103,6 +109,12 @@ class OpenAICompatibleGateway(ModelGateway):
                     }
                 }
             )
+            self._last_request_meta = {"response_format": "json_schema", "temperature": temperature}
+        elif role in getattr(self, "json_object_roles", set()):
+            request.update({"response_format": {"type": "json_object"}})
+            self._last_request_meta = {"response_format": "json_object", "temperature": temperature}
+        else:
+            self._last_request_meta = {"response_format": "none", "temperature": temperature}
         result = await self.client.chat.completions.create(**request)
         return result.choices[0].message.content or ""
 
@@ -131,8 +143,9 @@ class OpenAICompatibleGateway(ModelGateway):
                 role=role,
                 system_prompt=system_prompt,
                 user_prompt=json.dumps(payload, ensure_ascii=False),
-                temperature=temperature,
+                temperature=0.1 if attempt > 0 else temperature,
                 output_schema=output_schema,
+                force_json_schema=attempt > 0,
             )
             try:
                 return output_schema.model_validate(json.loads(_strip_fence(text)))
@@ -145,6 +158,16 @@ class OpenAICompatibleGateway(ModelGateway):
                     error=error,
                     text=text,
                 )
+        fallback = _lenient_parse(output_schema, text)
+        if fallback is not None:
+            self._write_invalid_output(
+                role=role,
+                output_schema=output_schema,
+                attempt=3,
+                error="fell back to lenient single-field text parse",
+                text=text,
+            )
+            return fallback
         raise ValueError(
             f"{self.provider_name}/{role} failed {output_schema.__name__}: {error}"
         )
@@ -166,6 +189,7 @@ class OpenAICompatibleGateway(ModelGateway):
             f"{timestamp}-{role}-{output_schema.__name__}-"
             f"attempt-{attempt}-{uuid.uuid4().hex[:8]}.json"
         )
+        meta = getattr(self, "_last_request_meta", {})
         path.write_text(
             json.dumps(
                 {
@@ -174,6 +198,7 @@ class OpenAICompatibleGateway(ModelGateway):
                     "attempt": attempt,
                     "error": error,
                     "raw_response": text,
+                    "request": meta,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -200,6 +225,55 @@ def _structured_output_roles(
         for role, model in models.items()
         if model.strip().lower() in ECNU_JSON_SCHEMA_MODELS
     }
+
+
+def _json_object_roles(
+    *,
+    mode: str,
+    models: dict[str, str],
+    json_schema_roles: set[str],
+) -> set[str]:
+    """Return roles that should use ``response_format={"type": "json_object"}``.
+
+    Some OpenAI-compatible backends accept the looser ``json_object`` mode but
+    reject the stricter ``json_schema`` mode (for example ``ecnu-max``).  The
+    ``off`` mode disables all structured-output hints, while the explicit
+    ``json_schema`` mode keeps every role on the stricter path and therefore
+    leaves nothing for ``json_object``.
+    """
+    if mode == "off":
+        return set()
+    return set(models) - json_schema_roles
+
+
+def _lenient_parse(
+    output_schema: type[BaseModel],
+    text: str,
+) -> BaseModel | None:
+    """Best-effort fallback for schemas whose single required field is a string.
+
+    Some backends (notably ``ecnu-max`` under a strong role-play system prompt)
+    ignore JSON constraints and emit the intended natural-language value
+    directly. For text-oriented schemas (for example ``ClientUtterance``) that
+    value is still meaningful, so we wrap it back into the schema. Schemas with
+    multiple required fields or non-string payloads are left untouched so that
+    genuine validation errors still surface.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return None
+    required = [
+        name
+        for name, field in output_schema.model_fields.items()
+        if field.is_required()
+    ]
+    if len(required) != 1:
+        return None
+    candidate = required[0]
+    try:
+        return output_schema.model_validate({candidate: stripped})
+    except Exception:
+        return None
 
 
 def _strip_fence(text: str) -> str:
