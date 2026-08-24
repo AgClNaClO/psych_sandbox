@@ -299,17 +299,19 @@ data\pdt\                 心理动力取向原始案例
 data\pmt\                 后现代取向原始案例
 assets\profiles\          Psych-new sample/rft 画像副本（当前仅作来源对照）
 assets\skills\sect\       分流派、分阶段技能树
-prompts\eval\             整体督导量表提示词（其中 46 个由当前代码加载）
+prompts\eval\             整体督导量表提示词（46 个，由当前代码加载）
+prompts\counselor\        咨询师规划/执行/会后自评生成提示词（由代码加载）
+prompts\simclient\        两阶段模拟来访者（规划、台词）生成提示词（由代码加载）
+prompts\memory\           E.7 提取、E.8 合并、E.9 摘要生成提示词（由代码加载）
 ```
 
 当前运行时注册 BT、CBT、HET、PDT、PMT 五个适配器。`data\integrative` 仍作为资源保留，
 但在具有独立技能树和评估标准之前不会冒充其中任一流派。
 
-提示词目录共有 93 个资产，但没有被“完全利用”：当前文件加载链只消费 46 个
-`prompts/eval` 量表。另 14 个评测模板以及 `psychagent` 29 个、`public` 3 个、`client` 1 个
-Psych-new 模板仅作来源参考。咨询师、来访者和 E.7/E.8/E.9 当前生成提示词分别以内嵌、版本化
-Python 常量存在于 `agents/counselor.py`、`client_simulation/prompts.py` 和
-`runtime/memory_pipeline.py`。完整映射见 [prompts/README.md](prompts/README.md)。
+提示词目录共有 54 个资产，全部由当前文件加载链消费：46 个 `prompts/eval` 量表，另有
+8 个生成提示词（`prompts/counselor/`、`prompts/simclient/`、`prompts/memory/`）由
+`psychsandbox/prompts.py` 的 `load_prompt` 在模块导入时读取。完整映射见
+[prompts/README.md](prompts/README.md)。
 
 ### 6.1 可选：重新下载官方数据
 

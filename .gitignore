@@ -22,3 +22,4 @@ data/processed/
 outputs/
 checkpoints/
 *.sqlite3
+struct.txt

@@ -14,45 +14,15 @@ from ..domain import (
     SessionRecord,
 )
 from ..model_client import ModelGateway
+from ..prompts import load_prompt
 from ..runtime.dialogue_guard import DialogueLoopGuard
 from ..skills import SkillCatalog, SkillRegistry
 from ..therapies import get_therapy_profile
 
-
-COUNSELOR_PLANNER_SYSTEM = """
-你是咨询师智能体的规划器。对输入进行分步分析后，只输出 CounselorPlanning JSON，
-不要生成给来访者的回复。采用“先规划、再执行”的方式：
-1. Reasoning：基于当前目标、对话、允许记忆和风险，给出简洁、可审计的 reasoning_summary；
-   不输出私密的逐 token 思维链或冗长独白。
-2. Planning：列出 1-6 个可执行步骤，明确本轮微观目标。
-3. Acting：自主选择 lookup_skills、respond_without_skill 或 end_session。
-4. 若选择 lookup_skills，只能从 meta_skill_catalog 选择最多 3 个 ID，不能编造。
-这里只做规划和行动选择；技能查询结果会在下一步作为 Observation 返回。
-""".strip()
-
-
-COUNSELOR_ACTOR_SYSTEM = """
-你是咨询师智能体的执行器。输入已包含 Planning、Action 和程序返回的 Observation。
-严格依据 Observation 中的原子技能完成本轮决策与回复：
-- 先观察技能查询结果，再选择真正使用的技能；只能选择 observation.atomic_skills 中的 ID。
-- 若 Observation 为空或无效，可以不选技能并作支持性回应，不得编造技能。
-- decision 是面向审计的简洁专业摘要；response 是给来访者的 1-3 句自然中文。
-- response 不出现规划、推理、Action、Observation、技能 ID 或专业流程标签。
-- 尊重来访者边界，不臆测未披露经历；高风险时不得继续普通干预。
-只输出符合 CounselorTurn schema 的 JSON。
-""".strip()
-
-
-COUNSELOR_REVIEW_SYSTEM = """
-你是刚完成本次会谈的咨询师，现在进行会后自评和再规划。
-逐项目核对原会谈目标与完整对话证据，输出 CounselorSessionReview JSON：
-- 明确 goals_achieved 和 0-1 goal_progress；evidence 必须来自实际对话，不得编造。
-- 若目标没有达到，replanning_required 必须为 true，并指出 unmet_objectives、
-  improvement_areas、revised_strategy 和可执行的 next_objectives。
-- 需要调整技能方向时，只能从 next_meta_skill_catalog 选择最多 3 个元技能 ID。
-- 若目标已经达到，说明证据并规划合理的下一阶段，不机械重复原策略。
-输出简洁、可审计的评估摘要，不输出私密逐 token 思维链。
-""".strip()
+# Generation prompts are file-driven assets under ``prompts/counselor/``.
+COUNSELOR_PLANNER_SYSTEM = load_prompt("counselor/planner_system.txt").strip()
+COUNSELOR_ACTOR_SYSTEM = load_prompt("counselor/actor_system.txt").strip()
+COUNSELOR_REVIEW_SYSTEM = load_prompt("counselor/review_system.txt").strip()
 
 
 class CounselorAgent:

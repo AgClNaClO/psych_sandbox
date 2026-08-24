@@ -56,8 +56,10 @@ Counselor-Level/Client-Level 评分；该评分同样不回写计划。
 - 技能树：`assets/skills/sect/`，677 个元技能、4481 个原子技能。
 - `assets/profiles` 是保留的 sample/rft 参考资产，当前病例仓库不递归加载。
 - `data/integrative` 是未注册的保留资源，不出现在可运行 case 列表。
-- `prompts/` 共有 93 个提示词资产；当前文件加载链只消费 46 个整体督导量表。咨询师、来访者
-  和 E.7/E.8/E.9 的当前生成提示词位于对应 Python 模块中。
+- `prompts/` 共有 54 个提示词资产，全部由当前文件加载链消费：46 个整体督导量表，另有
+  8 个生成提示词（`prompts/counselor/`、`prompts/simclient/`、`prompts/memory/`）由
+  `psychsandbox/prompts.py` 的 `load_prompt` 在模块导入时读取，作为咨询师、来访者
+  和 E.7/E.8/E.9 的生成提示词来源。
 
 ## 流派扩展边界
 
