@@ -300,17 +300,18 @@ data\pmt\                 后现代取向原始案例
 assets\profiles\          Psych-new sample/rft 画像副本（当前仅作来源对照）
 assets\skills\sect\       分流派、分阶段技能树
 prompts\eval\             整体督导量表提示词（46 个，由当前代码加载）
-prompts\counselor\        咨询师规划/执行/会后自评生成提示词（由代码加载）
-prompts\simclient\        两阶段模拟来访者（规划、台词）生成提示词（由代码加载）
-prompts\memory\           E.7 提取、E.8 合并、E.9 摘要生成提示词（由代码加载）
+prompts\counselor\        咨询师规划/执行/会后自评生成提示词（Jinja2 模板）
+prompts\simclient\        两阶段模拟来访者（规划、台词）生成提示词（Jinja2 模板）
+prompts\memory\           E.7 提取、E.8 合并、E.9 摘要生成提示词（Jinja2 模板）
 ```
 
 当前运行时注册 BT、CBT、HET、PDT、PMT 五个适配器。`data\integrative` 仍作为资源保留，
 但在具有独立技能树和评估标准之前不会冒充其中任一流派。
 
 提示词目录共有 54 个资产，全部由当前文件加载链消费：46 个 `prompts/eval` 量表，另有
-8 个生成提示词（`prompts/counselor/`、`prompts/simclient/`、`prompts/memory/`）由
-`psychsandbox/prompts.py` 的 `load_prompt` 在模块导入时读取。完整映射见
+8 个生成提示词（`prompts/counselor/`、`prompts/simclient/`、`prompts/memory/`）以 **Jinja2
+模板**存放，由 `psychsandbox/prompts.py::render_prompt` 经「Pydantic 输入校验 → 渲染 →
+结构化输出 → Pydantic 解析」管线在每次调用时渲染。完整映射见
 [prompts/README.md](prompts/README.md)。
 
 ### 6.1 可选：重新下载官方数据

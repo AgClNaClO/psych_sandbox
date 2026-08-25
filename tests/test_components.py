@@ -5,15 +5,13 @@ import asyncio
 import pytest
 
 from psychsandbox.agents import ClientAgent, CounselorAgent
-from psychsandbox.agents.client import (
-    CLIENT_PLANNER_SYSTEM,
-    CLIENT_PROMPT_VERSION,
-    CLIENT_UTTERANCE_SYSTEM,
-)
+from psychsandbox.agents.client import CLIENT_PROMPT_VERSION
 from psychsandbox.client_simulation.prompts import (
-    CLIENT_PLANNER_SYSTEM as CANONICAL_CLIENT_PLANNER_SYSTEM,
-    CLIENT_UTTERANCE_SYSTEM as CANONICAL_CLIENT_UTTERANCE_SYSTEM,
+    CLIENT_PLANNER_TEMPLATE,
+    CLIENT_PROMPT_VERSION as CANONICAL_CLIENT_PROMPT_VERSION,
+    CLIENT_UTTERANCE_TEMPLATE,
 )
+from psychsandbox.prompts import render_prompt
 from psychsandbox.domain import (
     BlockedMemorySignal,
     ClientBehaviorType,
@@ -264,8 +262,9 @@ class CountingDeterministicGateway(DeterministicGateway):
 
 def test_client_prompts_are_versioned_and_reexported():
     assert CLIENT_PROMPT_VERSION == "psycheval_patientact_v4"
-    assert CLIENT_PLANNER_SYSTEM is CANONICAL_CLIENT_PLANNER_SYSTEM
-    assert CLIENT_UTTERANCE_SYSTEM is CANONICAL_CLIENT_UTTERANCE_SYSTEM
+    assert CLIENT_PROMPT_VERSION == CANONICAL_CLIENT_PROMPT_VERSION
+    assert CLIENT_PLANNER_TEMPLATE == "simclient/planner_system.jinja2"
+    assert CLIENT_UTTERANCE_TEMPLATE == "simclient/utterance_system.jinja2"
 
 
 def test_client_planner_prompt_contract():
@@ -283,7 +282,17 @@ def test_client_planner_prompt_contract():
         "不生成来访者台词",
         "ClientTurnSignal",
     )
-    assert all(rule in CLIENT_PLANNER_SYSTEM for rule in required_rules)
+    rendered = render_prompt(
+        CLIENT_PLANNER_TEMPLATE,
+        private_client_profile={},
+        simulation_state={},
+        counselor_message="",
+        recent_messages=[],
+        disclosure_decision={"retrieved": [], "blocked": []},
+        recent_signals=[],
+        turn_index=1,
+    )
+    assert all(rule in rendered for rule in required_rules)
 
 
 def test_client_utterance_prompt_contract():
@@ -310,11 +319,25 @@ def test_client_utterance_prompt_contract():
         "本轮 utterance 实际表达过",
         "ClientUtterance",
     )
-    assert all(field in CLIENT_UTTERANCE_SYSTEM for field in payload_fields)
-    assert all(rule in CLIENT_UTTERANCE_SYSTEM for rule in required_rules)
-    assert "private_client_profile" not in CLIENT_UTTERANCE_SYSTEM
-    assert "session_goals" not in CLIENT_UTTERANCE_SYSTEM
-    assert "suggested_skills" not in CLIENT_UTTERANCE_SYSTEM
+    rendered = render_prompt(
+        CLIENT_UTTERANCE_TEMPLATE,
+        static_profile={},
+        simulation_state={},
+        counselor_message="最近怎么样？",
+        recent_messages=[],
+        available_memories=[],
+        blocked_topics=[],
+        ambiguous_fact_ids=[],
+        turn_signal={},
+        turn_index=1,
+        known_memories=[],
+        repair_instruction="",
+    )
+    assert all(field in rendered for field in payload_fields)
+    assert all(rule in rendered for rule in required_rules)
+    assert "private_client_profile" not in rendered
+    assert "session_goals" not in rendered
+    assert "suggested_skills" not in rendered
 
 
 def test_client_two_stage_calls_and_strict_utterance_payload(sample_case):
@@ -351,8 +374,8 @@ def test_client_two_stage_calls_and_strict_utterance_payload(sample_case):
     )
     dumped = str(payload)
     assert gateway.calls == [ClientTurnSignal, ClientUtterance]
-    assert gateway.requests[0]["system_prompt"] is CLIENT_PLANNER_SYSTEM
-    assert gateway.requests[1]["system_prompt"] is CLIENT_UTTERANCE_SYSTEM
+    assert "ClientTurnSignal" in gateway.requests[0]["system_prompt"]
+    assert "ClientUtterance" in gateway.requests[1]["system_prompt"]
     assert generation.utterance
     assert metadata["retry_count"] == 0
     assert "session_plan" not in payload

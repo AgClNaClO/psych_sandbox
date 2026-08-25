@@ -14,15 +14,15 @@ from ..domain import (
     SessionRecord,
 )
 from ..model_client import ModelGateway
-from ..prompts import load_prompt
+from ..prompts import render_prompt
 from ..runtime.dialogue_guard import DialogueLoopGuard
 from ..skills import SkillCatalog, SkillRegistry
 from ..therapies import get_therapy_profile
 
-# Generation prompts are file-driven assets under ``prompts/counselor/``.
-COUNSELOR_PLANNER_SYSTEM = load_prompt("counselor/planner_system.txt").strip()
-COUNSELOR_ACTOR_SYSTEM = load_prompt("counselor/actor_system.txt").strip()
-COUNSELOR_REVIEW_SYSTEM = load_prompt("counselor/review_system.txt").strip()
+# Generation prompts are Jinja2 templates under ``prompts/counselor/``.
+COUNSELOR_PLANNER_TEMPLATE = "counselor/planner_system.jinja2"
+COUNSELOR_ACTOR_TEMPLATE = "counselor/actor_system.jinja2"
+COUNSELOR_REVIEW_TEMPLATE = "counselor/review_system.jinja2"
 
 
 class CounselorAgent:
@@ -105,15 +105,18 @@ class CounselorAgent:
             counselor_turn_count=counselor_turn_count,
         )
         meta_catalog = self.skill_catalog.available_meta(plan=plan, risk=risk)
+        planning_payload = {
+            **context,
+            "meta_skill_catalog": [
+                item.model_dump(mode="json") for item in meta_catalog
+            ],
+        }
         planning_result = await self.gateway.complete_structured(
             role="counselor",
-            system_prompt=self._system_prompt(plan, COUNSELOR_PLANNER_SYSTEM),
-            input_payload={
-                **context,
-                "meta_skill_catalog": [
-                    item.model_dump(mode="json") for item in meta_catalog
-                ],
-            },
+            system_prompt=self._system_prompt(
+                plan, render_prompt(COUNSELOR_PLANNER_TEMPLATE, **planning_payload)
+            ),
+            input_payload=planning_payload,
             output_schema=CounselorPlanning,
             temperature=self.temperature,
         )
@@ -133,14 +136,17 @@ class CounselorAgent:
             selected_meta_skill_ids=planning.selected_meta_skill_ids,
         )
 
+        actor_payload = {
+            **context,
+            "planning": planning.model_dump(mode="json"),
+            "observation": observation.model_dump(mode="json"),
+        }
         result = await self.gateway.complete_structured(
             role="counselor",
-            system_prompt=self._system_prompt(plan, COUNSELOR_ACTOR_SYSTEM),
-            input_payload={
-                **context,
-                "planning": planning.model_dump(mode="json"),
-                "observation": observation.model_dump(mode="json"),
-            },
+            system_prompt=self._system_prompt(
+                plan, render_prompt(COUNSELOR_ACTOR_TEMPLATE, **actor_payload)
+            ),
+            input_payload=actor_payload,
             output_schema=CounselorTurn,
             temperature=self.temperature,
         )
@@ -173,29 +179,30 @@ class CounselorAgent:
             plan=baseline_next,
             risk=low_risk,
         )
+        review_payload = {
+            "session_plan": session.plan.model_dump(mode="json"),
+            "session_summary": session.summary,
+            "dialogue": [item.model_dump(mode="json") for item in session.messages],
+            "counselor_decisions": [
+                item.model_dump(mode="json") for item in session.decisions
+            ],
+            "allowed_memory": {
+                "summaries": memory.summaries[-3:],
+                "confirmed_goals": memory.confirmed_goals,
+                "unresolved_topics": memory.unresolved_topics,
+            },
+            "baseline_next_plan": baseline_next.model_dump(mode="json"),
+            "next_meta_skill_catalog": [
+                item.model_dump(mode="json") for item in next_meta
+            ],
+        }
         result = await self.gateway.complete_structured(
             role="counselor",
             system_prompt=self._system_prompt(
                 session.plan,
-                COUNSELOR_REVIEW_SYSTEM,
+                render_prompt(COUNSELOR_REVIEW_TEMPLATE, **review_payload),
             ),
-            input_payload={
-                "session_plan": session.plan.model_dump(mode="json"),
-                "session_summary": session.summary,
-                "dialogue": [item.model_dump(mode="json") for item in session.messages],
-                "counselor_decisions": [
-                    item.model_dump(mode="json") for item in session.decisions
-                ],
-                "allowed_memory": {
-                    "summaries": memory.summaries[-3:],
-                    "confirmed_goals": memory.confirmed_goals,
-                    "unresolved_topics": memory.unresolved_topics,
-                },
-                "baseline_next_plan": baseline_next.model_dump(mode="json"),
-                "next_meta_skill_catalog": [
-                    item.model_dump(mode="json") for item in next_meta
-                ],
-            },
+            input_payload=review_payload,
             output_schema=CounselorSessionReview,
             temperature=self.temperature,
         )

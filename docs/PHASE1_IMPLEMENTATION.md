@@ -57,9 +57,9 @@ Counselor-Level/Client-Level 评分；该评分同样不回写计划。
 - `assets/profiles` 是保留的 sample/rft 参考资产，当前病例仓库不递归加载。
 - `data/integrative` 是未注册的保留资源，不出现在可运行 case 列表。
 - `prompts/` 共有 54 个提示词资产，全部由当前文件加载链消费：46 个整体督导量表，另有
-  8 个生成提示词（`prompts/counselor/`、`prompts/simclient/`、`prompts/memory/`）由
-  `psychsandbox/prompts.py` 的 `load_prompt` 在模块导入时读取，作为咨询师、来访者
-  和 E.7/E.8/E.9 的生成提示词来源。
+  8 个生成提示词（`prompts/counselor/`、`prompts/simclient/`、`prompts/memory/`）以 Jinja2
+  模板存放，由 `psychsandbox/prompts.py::render_prompt` 经「Pydantic 输入校验 → 渲染 →
+  结构化输出 → Pydantic 解析」管线渲染，作为咨询师、来访者和 E.7/E.8/E.9 的生成提示词来源。
 
 ## 流派扩展边界
 

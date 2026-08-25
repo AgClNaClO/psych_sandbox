@@ -4,9 +4,9 @@ import re
 from typing import Any
 
 from ..client_simulation.prompts import (
-    CLIENT_PLANNER_SYSTEM,
+    CLIENT_PLANNER_TEMPLATE,
     CLIENT_PROMPT_VERSION,
-    CLIENT_UTTERANCE_SYSTEM,
+    CLIENT_UTTERANCE_TEMPLATE,
 )
 from ..domain import (
     ClientBehaviorType,
@@ -23,6 +23,7 @@ from ..domain import (
     UnlockedFact,
 )
 from ..model_client import ModelGateway
+from ..prompts import render_prompt
 from ..runtime.leakage import PrematureDisclosureGuard, normalize_disclosure_text
 
 
@@ -63,22 +64,23 @@ class ClientAgent:
         recent_signals: list[ClientTurnSignal],
         turn_index: int,
     ) -> ClientTurnSignal:
+        input_payload = {
+            "private_client_profile": profile.model_dump(mode="json"),
+            "simulation_state": state.model_dump(mode="json"),
+            "counselor_message": counselor_message,
+            "recent_messages": [
+                item.model_dump(mode="json") for item in recent_messages[-8:]
+            ],
+            "disclosure_decision": disclosure.model_dump(mode="json"),
+            "recent_signals": [
+                item.model_dump(mode="json") for item in recent_signals[-3:]
+            ],
+            "turn_index": turn_index,
+        }
         result = await self.gateway.complete_structured(
             role="client",
-            system_prompt=CLIENT_PLANNER_SYSTEM,
-            input_payload={
-                "private_client_profile": profile.model_dump(mode="json"),
-                "simulation_state": state.model_dump(mode="json"),
-                "counselor_message": counselor_message,
-                "recent_messages": [
-                    item.model_dump(mode="json") for item in recent_messages[-8:]
-                ],
-                "disclosure_decision": disclosure.model_dump(mode="json"),
-                "recent_signals": [
-                    item.model_dump(mode="json") for item in recent_signals[-3:]
-                ],
-                "turn_index": turn_index,
-            },
+            system_prompt=render_prompt(CLIENT_PLANNER_TEMPLATE, **input_payload),
+            input_payload=input_payload,
             output_schema=ClientTurnSignal,
             temperature=self.planning_temperature,
         )
@@ -140,20 +142,21 @@ class ClientAgent:
         utterance: ClientUtterance | None = None
         repair_instruction = ""
         for attempt in range(self.leak_retry_limit + 1):
+            input_payload = self.build_utterance_payload(
+                profile=profile,
+                state=state,
+                counselor_message=counselor_message,
+                recent_messages=recent_messages,
+                disclosure=disclosure,
+                signal=signal,
+                turn_index=turn_index,
+                repair_instruction=repair_instruction,
+                known_memories=known_memories or [],
+            )
             result = await self.gateway.complete_structured(
                 role="client",
-                system_prompt=CLIENT_UTTERANCE_SYSTEM,
-                input_payload=self.build_utterance_payload(
-                    profile=profile,
-                    state=state,
-                    counselor_message=counselor_message,
-                    recent_messages=recent_messages,
-                    disclosure=disclosure,
-                    signal=signal,
-                    turn_index=turn_index,
-                    repair_instruction=repair_instruction,
-                    known_memories=known_memories or [],
-                ),
+                system_prompt=render_prompt(CLIENT_UTTERANCE_TEMPLATE, **input_payload),
+                input_payload=input_payload,
                 output_schema=ClientUtterance,
                 temperature=self.temperature,
             )

@@ -12,18 +12,16 @@ from ..domain import (
     SessionPlan,
     StaticTraits,
 )
-from ..prompts import load_prompt
+from ..prompts import render_prompt
+
 
 # Prompts mirror the PsychEval E.7/E.8/E.9 designs while staying compatible with
-# the sandbox gateway contract (system prompt + JSON input payload).
+# the sandbox gateway contract (system prompt + JSON input payload).  They are
+# Jinja2 templates under ``prompts/memory/``.
 
-MEMORY_EXTRACTION_SYSTEM = load_prompt("memory/extraction_system.txt")
-
-
-CLIENT_MERGE_SYSTEM = load_prompt("memory/merge_system.txt")
-
-
-DIALOGUE_SUMMARY_SYSTEM = load_prompt("memory/summary_system.txt")
+MEMORY_EXTRACTION_TEMPLATE = "memory/extraction_system.jinja2"
+CLIENT_MERGE_TEMPLATE = "memory/merge_system.jinja2"
+DIALOGUE_SUMMARY_TEMPLATE = "memory/summary_system.jinja2"
 
 
 class _ClientInfoGet(StrictModel):
@@ -48,14 +46,15 @@ class MemoryExtractionAgent:
         theory_select: list[str],
         session_number: int,
     ) -> ExtractedClientInfo:
+        extraction_payload = {
+            "current_session_number": session_number,
+            "current_session_theory": theory_select,
+            "current_session_dialogue": _format_dialogue(dialogue),
+        }
         result = await self.gateway.complete_structured(
             role="summarizer",
-            system_prompt=MEMORY_EXTRACTION_SYSTEM,
-            input_payload={
-                "current_session_number": session_number,
-                "current_session_theory": theory_select,
-                "current_session_dialogue": _format_dialogue(dialogue),
-            },
+            system_prompt=render_prompt(MEMORY_EXTRACTION_TEMPLATE, **extraction_payload),
+            input_payload=extraction_payload,
             output_schema=_ClientInfoGet,
             temperature=0.1,
         )
@@ -80,16 +79,17 @@ class ClientMergeAgent:
             if history
             else _empty_merged(global_profile.client_id, current.source_session)
         )
+        merge_payload = {
+            "history_profile": history_dump,
+            "current_profile": current.model_dump(mode="json"),
+            "global_profile": _profile_for_global(global_profile),
+            "session_number": current.source_session,
+            "theory_select": therapy_select,
+        }
         result = await self.gateway.complete_structured(
             role="summarizer",
-            system_prompt=CLIENT_MERGE_SYSTEM,
-            input_payload={
-                "history_profile": history_dump,
-                "current_profile": current.model_dump(mode="json"),
-                "global_profile": _profile_for_global(global_profile),
-                "session_number": current.source_session,
-                "theory_select": therapy_select,
-            },
+            system_prompt=render_prompt(CLIENT_MERGE_TEMPLATE, **merge_payload),
+            input_payload=merge_payload,
             output_schema=_ClientInfoMerge,
             temperature=0.1,
         )
@@ -107,19 +107,20 @@ class DialogueSummaryAgent:
         plan: SessionPlan,
         theory_select: list[str],
     ) -> ClinicalSummary:
+        summary_payload = {
+            "theory_select": theory_select,
+            "session_index": session_index,
+            "session_focus": {
+                "stage_title": plan.stage.value,
+                "objective": plan.objectives,
+            },
+            "session_dialogue": _format_dialogue(dialogue),
+            "plan": plan.model_dump(mode="json"),
+        }
         result = await self.gateway.complete_structured(
             role="summarizer",
-            system_prompt=DIALOGUE_SUMMARY_SYSTEM,
-            input_payload={
-                "theory_select": theory_select,
-                "session_index": session_index,
-                "session_focus": {
-                    "stage_title": plan.stage.value,
-                    "objective": plan.objectives,
-                },
-                "session_dialogue": _format_dialogue(dialogue),
-                "plan": plan.model_dump(mode="json"),
-            },
+            system_prompt=render_prompt(DIALOGUE_SUMMARY_TEMPLATE, **summary_payload),
+            input_payload=summary_payload,
             output_schema=_SessionSummaryWrapper,
             temperature=0.1,
         )
