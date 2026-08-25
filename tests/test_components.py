@@ -20,6 +20,7 @@ from psychsandbox.domain import (
     ClientTurnSignal,
     ClientUtterance,
     CounselorAction,
+    CounselorActorOutput,
     CounselorDecision,
     CounselorPlanning,
     CounselorTurn,
@@ -227,7 +228,7 @@ def test_counselor_uses_plan_then_react_observation(root, sample_case):
         counselor_turn_count=0,
     ))
     assert result.response
-    assert gateway.calls == [CounselorPlanning, CounselorTurn]
+    assert gateway.calls == [CounselorPlanning, CounselorActorOutput]
     assert result.planning.action is CounselorAction.LOOKUP_SKILLS
     assert result.observation.status == "skills_found"
     assert result.decision.selected_atomic_skill_ids

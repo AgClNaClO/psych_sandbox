@@ -11,10 +11,10 @@ from psychsandbox.domain import (
     ClientTurnSignal,
     ClientUtterance,
     CounselorAction,
+    CounselorActorOutput,
     CounselorDecision,
     CounselorPlanning,
     CounselorSessionReview,
-    CounselorTurn,
     ReactionIntensity,
     ResistancePatternType,
     RiskLevel,
@@ -56,13 +56,13 @@ class DeterministicGateway(ModelGateway):
                 selected_meta_skill_ids=meta_ids,
                 action_input="查看所选元技能下的原子技能。",
             )
-        if output_schema is CounselorTurn:
+        if output_schema is CounselorActorOutput:
             skills = input_payload.get("observation", {}).get("atomic_skills", [])
             selected = skills[:1]
             ids = [item["skill_id"] for item in selected]
             metas = list(dict.fromkeys(item["meta_skill_id"] for item in selected))
             turn = int(input_payload.get("counselor_turn_count", 0))
-            return CounselorTurn(
+            return CounselorActorOutput(
                 decision=CounselorDecision(
                     assessment="来访者正在表达当前困扰，需要确认体验并围绕本次目标探索。",
                     state_observation="当前痛苦较高，但仍愿意参与对话。",

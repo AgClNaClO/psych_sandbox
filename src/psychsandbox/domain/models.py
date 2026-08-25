@@ -481,6 +481,20 @@ class CounselorTurn(StrictModel):
     observation: CounselorObservation | None = None
 
 
+class CounselorActorOutput(StrictModel):
+    """Minimal actor output; planning/observation are supplied out-of-band.
+
+    The actor only needs to produce the auditable decision and the verbatim
+    client-facing response.  ``planning`` and ``observation`` are already known
+    from the planner and the skill-catalog ReAct observation, so asking the
+    model to echo them (including the full atomic-skill payloads) needlessly
+    bloats the JSON and can exceed ``max_tokens`` mid-string.
+    """
+
+    decision: CounselorDecision
+    response: str
+
+
 class CounselorSessionReview(StrictModel):
     """Counselor self-review used to decide whether and how to replan."""
 

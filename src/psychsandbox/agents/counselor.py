@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from ..domain import (
     CounselorAction,
+    CounselorActorOutput,
     CounselorDecision,
     CounselorObservation,
     CounselorPlanning,
@@ -147,12 +148,16 @@ class CounselorAgent:
                 plan, render_prompt(COUNSELOR_ACTOR_TEMPLATE, **actor_payload)
             ),
             input_payload=actor_payload,
-            output_schema=CounselorTurn,
+            output_schema=CounselorActorOutput,
             temperature=self.temperature,
         )
-        turn = CounselorTurn.model_validate(result)
-        turn.planning = planning
-        turn.observation = observation
+        actor_output = CounselorActorOutput.model_validate(result)
+        turn = CounselorTurn(
+            decision=actor_output.decision,
+            response=actor_output.response,
+            planning=planning,
+            observation=observation,
+        )
         self._constrain_selected_skills(turn, observation)
         turn.decision.risk_level = risk.level
         if planning.action is CounselorAction.END_SESSION:
