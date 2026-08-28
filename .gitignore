@@ -16,7 +16,14 @@ Thumbs.db
 !.env.example
 
 # Downloaded datasets and generated run artifacts
-runs/
+runs/*
+!runs/README.md
+!runs/tests/
+!runs/runtime/
+runs/tests/*
+!runs/tests/README.md
+runs/runtime/*
+!runs/runtime/README.md
 data/external/
 data/processed/
 outputs/

@@ -4,6 +4,7 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import pytest
 from pydantic import BaseModel
 
 from psychsandbox.model_client import (
@@ -72,6 +73,288 @@ def test_api_gateway_uses_json_schema(tmp_path):
     assert request["response_format"]["json_schema"]["name"] == "ExampleOutput"
     assert request["response_format"]["json_schema"]["schema"]["required"] == ["value"]
     assert request["max_tokens"] == 2048
+
+
+def test_embedding_gateway_uses_separate_config_batches_and_response_indices(monkeypatch):
+    import openai
+
+    requests = []
+    clients = []
+
+    class FakeEmbeddingClient:
+        def __init__(self, **kwargs):
+            self.config = kwargs
+            self.closed = False
+            self.embeddings = self
+            clients.append(self)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            self.closed = True
+
+        async def create(self, **kwargs):
+            requests.append(kwargs)
+            rows = [SimpleNamespace(index=index, embedding=[float(text), 1.])
+                    for index, text in enumerate(kwargs["input"])]
+            return SimpleNamespace(data=list(reversed(rows)))
+
+    monkeypatch.setattr(openai, "AsyncOpenAI", FakeEmbeddingClient)
+    monkeypatch.setenv("EMBEDDING_MODEL", "test-embedding")
+    monkeypatch.setenv("EMBEDDING_BASE_URL", "https://embedding.example.test/v1")
+    monkeypatch.setenv("EMBEDDING_API_KEY", "dummy-embedding-key")
+    monkeypatch.setenv("MODEL_API_KEY", "dummy-chat-key")
+    gateway = object.__new__(OpenAICompatibleGateway)
+    vectors = asyncio.run(gateway.embed_texts([str(i) for i in range(65)]))
+    assert vectors == [[float(i), 1.] for i in range(65)]
+    assert [len(request["input"]) for request in requests] == [64, 1]
+    assert all(request["model"] == "test-embedding" for request in requests)
+    assert all(request["encoding_format"] == "float" for request in requests)
+    assert clients[0].config["api_key"] == "dummy-embedding-key"
+    assert clients[0].config["base_url"] == "https://embedding.example.test/v1"
+    assert clients[0].closed
+    identity = gateway.embedding_identity
+    monkeypatch.setenv("EMBEDDING_BASE_URL", "https://other.example.test/v1")
+    assert identity != gateway.embedding_identity
+
+
+def test_large_query_requires_explicit_embedding_config(monkeypatch):
+    monkeypatch.setenv("MODEL_BASE_URL", "https://chat.example.test/v1")
+    for name in ("EMBEDDING_MODEL", "EMBEDDING_BASE_URL", "EMBEDDING_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    gateway = object.__new__(OpenAICompatibleGateway)
+    assert asyncio.run(gateway.embed_texts([])) == []
+    with pytest.raises(RuntimeError, match="EMBEDDING_MODEL"):
+        asyncio.run(gateway.embed_texts(["公开话语"]))
+    monkeypatch.setenv("EMBEDDING_MODEL", "test-embedding")
+    with pytest.raises(RuntimeError, match="EMBEDDING_BASE_URL"):
+        asyncio.run(gateway.embed_texts(["公开话语"]))
+
+
+ECNU_BASE_URL = "https://chat.ecnu.edu.cn/open/api/v1"
+
+
+@pytest.fixture
+def embedding_gateway(monkeypatch):
+    import openai
+
+    clients, requests = [], []
+
+    class FakeEmbeddingClient:
+        def __init__(self, **kwargs):
+            self.config = kwargs
+            self.embeddings = self
+            self.closed = False
+            clients.append(self)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            self.closed = True
+
+        async def create(self, **kwargs):
+            requests.append(kwargs)
+            rows = [SimpleNamespace(index=i, embedding=[float(len(text))])
+                    for i, text in enumerate(kwargs["input"])]
+            return SimpleNamespace(data=list(reversed(rows)))
+
+    monkeypatch.setattr(openai, "AsyncOpenAI", FakeEmbeddingClient)
+    monkeypatch.setenv("MODEL_BASE_URL", ECNU_BASE_URL)
+    monkeypatch.setenv("MODEL_API_KEY", "dummy-chat-key")
+    for name in ("EMBEDDING_MODEL", "EMBEDDING_BASE_URL", "EMBEDDING_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    return object.__new__(OpenAICompatibleGateway), clients, requests
+
+
+@pytest.mark.parametrize("base_url", [
+    ECNU_BASE_URL, ECNU_BASE_URL + "/",
+    "https://CHAT.ECNU.EDU.CN:443/open/api/v1/",
+])
+@pytest.mark.parametrize("blank", [None, "", "   "])
+def test_ecnu_embedding_defaults(monkeypatch, embedding_gateway, base_url, blank):
+    gateway, clients, requests = embedding_gateway
+    monkeypatch.setenv("MODEL_BASE_URL", base_url)
+    if blank is not None:
+        for name in ("EMBEDDING_MODEL", "EMBEDDING_BASE_URL", "EMBEDDING_API_KEY"):
+            monkeypatch.setenv(name, blank)
+    assert gateway.embedding_model == "ecnu-embedding-small"
+    assert asyncio.run(gateway.embed_texts(["公开话语"])) == [[4.]]
+    assert clients[0].config["base_url"] == ECNU_BASE_URL
+    assert clients[0].config["api_key"] == "dummy-chat-key"
+    assert clients[0].closed
+    assert requests == [{
+        "model": "ecnu-embedding-small", "input": ["公开话语"], "encoding_format": "float",
+    }]
+
+
+@pytest.mark.parametrize("model", [None, "explicit-embedding-model"])
+@pytest.mark.parametrize("key", [None, "dummy-explicit-key"])
+@pytest.mark.parametrize("endpoint", [None, ECNU_BASE_URL + "/"])
+def test_ecnu_explicit_embedding_fields_take_priority(
+    monkeypatch, embedding_gateway, model, key, endpoint,
+):
+    gateway, clients, requests = embedding_gateway
+    for name, value in [("EMBEDDING_MODEL", model), ("EMBEDDING_API_KEY", key),
+                        ("EMBEDDING_BASE_URL", endpoint)]:
+        if value is not None:
+            monkeypatch.setenv(name, value)
+    asyncio.run(gateway.embed_texts(["公开话语"]))
+    assert requests[0]["model"] == (model or "ecnu-embedding-small")
+    assert clients[0].config["api_key"] == (key or "dummy-chat-key")
+    assert clients[0].config["base_url"] == ECNU_BASE_URL
+
+
+NON_OFFICIAL_ENDPOINTS = [
+    "https://other.example.test/v1",
+    "http://chat.ecnu.edu.cn/open/api/v1",
+    "https://chat.ecnu.edu.cn:444/open/api/v1",
+    "https://chat.ecnu.edu.cn/v1",
+    ECNU_BASE_URL + "/other",
+    ECNU_BASE_URL + "//",
+    ECNU_BASE_URL + "?target=other",
+    ECNU_BASE_URL + "#other",
+    "https://chat.ecnu.edu.cn.evil.test/open/api/v1",
+    "https://chat.ecnu.edu.cn@evil.test/open/api/v1",
+    "https://user@chat.ecnu.edu.cn/open/api/v1",
+    "https://evil.test/chat.ecnu.edu.cn/open/api/v1",
+    "https://chat.ecnu.edu.cn/open/api/../api/v1",
+]
+
+
+@pytest.mark.parametrize("endpoint", NON_OFFICIAL_ENDPOINTS)
+def test_non_ecnu_chat_requires_independent_embedding_config(
+    monkeypatch, embedding_gateway, endpoint,
+):
+    gateway, clients, _ = embedding_gateway
+    monkeypatch.setenv("MODEL_BASE_URL", endpoint)
+    with pytest.raises(RuntimeError, match="EMBEDDING_MODEL"):
+        asyncio.run(gateway.embed_texts(["公开话语"]))
+    monkeypatch.setenv("EMBEDDING_MODEL", "test-embedding")
+    with pytest.raises(RuntimeError, match="EMBEDDING_BASE_URL"):
+        asyncio.run(gateway.embed_texts(["公开话语"]))
+    monkeypatch.setenv("EMBEDDING_BASE_URL", ECNU_BASE_URL)
+    with pytest.raises(RuntimeError, match="EMBEDDING_API_KEY"):
+        asyncio.run(gateway.embed_texts(["公开话语"]))
+    assert clients == []
+
+
+@pytest.mark.parametrize("endpoint", NON_OFFICIAL_ENDPOINTS)
+def test_ecnu_chat_key_never_inherits_to_other_embedding_endpoints(
+    monkeypatch, embedding_gateway, endpoint,
+):
+    gateway, clients, requests = embedding_gateway
+    monkeypatch.setenv("EMBEDDING_BASE_URL", endpoint)
+    with pytest.raises(RuntimeError, match="EMBEDDING_MODEL"):
+        asyncio.run(gateway.embed_texts(["公开话语"]))
+    monkeypatch.setenv("EMBEDDING_MODEL", "explicit-embedding")
+    with pytest.raises(RuntimeError, match="EMBEDDING_API_KEY"):
+        asyncio.run(gateway.embed_texts(["公开话语"]))
+    assert clients == []
+    monkeypatch.setenv("EMBEDDING_API_KEY", "dummy-independent-key")
+    asyncio.run(gateway.embed_texts(["公开话语"]))
+    assert clients[0].config["api_key"] == "dummy-independent-key"
+    assert clients[0].config["base_url"] == endpoint
+    assert requests[0]["model"] == "explicit-embedding"
+
+
+def test_non_ecnu_chat_cannot_supply_embedding_model_or_key(monkeypatch, embedding_gateway):
+    gateway, clients, requests = embedding_gateway
+    monkeypatch.setenv("MODEL_BASE_URL", "https://other.example.test/v1")
+    monkeypatch.setenv("EMBEDDING_BASE_URL", ECNU_BASE_URL)
+    with pytest.raises(RuntimeError, match="EMBEDDING_MODEL"):
+        asyncio.run(gateway.embed_texts(["公开话语"]))
+    monkeypatch.setenv("EMBEDDING_MODEL", "ecnu-embedding-small")
+    with pytest.raises(RuntimeError, match="EMBEDDING_API_KEY"):
+        asyncio.run(gateway.embed_texts(["公开话语"]))
+    monkeypatch.setenv("EMBEDDING_API_KEY", "dummy-ecnu-key")
+    asyncio.run(gateway.embed_texts(["公开话语"]))
+    assert clients[0].config["api_key"] == "dummy-ecnu-key"
+    assert requests[0]["model"] == "ecnu-embedding-small"
+
+
+def test_ecnu_missing_chat_key_does_not_create_embedding_client(monkeypatch, embedding_gateway):
+    gateway, clients, _ = embedding_gateway
+    monkeypatch.delenv("MODEL_API_KEY")
+    assert asyncio.run(gateway.embed_texts([])) == []
+    with pytest.raises(RuntimeError, match="EMBEDDING_API_KEY"):
+        asyncio.run(gateway.embed_texts(["公开话语"]))
+    assert clients == []
+
+
+@pytest.mark.parametrize("missing", ["EMBEDDING_MODEL", "EMBEDDING_BASE_URL", "EMBEDDING_API_KEY"])
+def test_other_same_endpoint_still_requires_all_embedding_fields(
+    monkeypatch, embedding_gateway, missing,
+):
+    gateway, clients, _ = embedding_gateway
+    endpoint = "https://other.example.test/v1"
+    monkeypatch.setenv("MODEL_BASE_URL", endpoint)
+    for name, value in [("EMBEDDING_MODEL", "other-embedding"),
+                        ("EMBEDDING_BASE_URL", endpoint), ("EMBEDDING_API_KEY", "dummy-key")]:
+        if name != missing:
+            monkeypatch.setenv(name, value)
+    with pytest.raises(RuntimeError, match=missing):
+        asyncio.run(gateway.embed_texts(["公开话语"]))
+    assert clients == []
+
+
+def test_embedding_identity_uses_resolved_endpoint_and_model(monkeypatch, embedding_gateway):
+    gateway, _, _ = embedding_gateway
+    implicit = gateway.embedding_identity
+    monkeypatch.setenv("EMBEDDING_BASE_URL", "https://CHAT.ECNU.EDU.CN:443/open/api/v1/")
+    monkeypatch.setenv("EMBEDDING_MODEL", "ecnu-embedding-small")
+    monkeypatch.setenv("EMBEDDING_API_KEY", "dummy-explicit-key")
+    assert gateway.embedding_identity == implicit
+    monkeypatch.setenv("EMBEDDING_MODEL", "other-embedding")
+    other_model = gateway.embedding_identity
+    assert other_model != implicit
+    monkeypatch.setenv("EMBEDDING_BASE_URL", "https://other.example.test/v1")
+    assert gateway.embedding_identity != other_model
+
+
+@pytest.mark.parametrize("texts, sizes", [
+    (["中" * 4096, "文" * 4096, "尾"], [2, 1]),
+    (["a" * 8192, "🙂" * 8192], [1, 1]),
+    (["中" * 3000] * 5, [2, 2, 1]),
+    ([str(i) for i in range(65)], [64, 1]),
+    (["中" * 128] * 65, [64, 1]),
+])
+@pytest.mark.parametrize("explicit", [False, True])
+def test_ecnu_embedding_batches_obey_character_and_item_limits(
+    monkeypatch, embedding_gateway, texts, sizes, explicit,
+):
+    gateway, clients, requests = embedding_gateway
+    if explicit:
+        monkeypatch.setenv("MODEL_BASE_URL", "https://other.example.test/v1")
+        monkeypatch.setenv("EMBEDDING_BASE_URL", ECNU_BASE_URL)
+        monkeypatch.setenv("EMBEDDING_MODEL", "ecnu-embedding-small")
+        monkeypatch.setenv("EMBEDDING_API_KEY", "dummy-ecnu-key")
+    vectors = asyncio.run(gateway.embed_texts(texts))
+    assert vectors == [[float(len(text))] for text in texts]
+    assert [len(request["input"]) for request in requests] == sizes
+    assert all(sum(map(len, request["input"])) <= 8192 for request in requests)
+    assert [text for request in requests for text in request["input"]] == texts
+    assert clients[0].closed
+
+
+def test_ecnu_oversized_single_input_fails_before_any_request(embedding_gateway):
+    gateway, clients, requests = embedding_gateway
+    with pytest.raises(ValueError, match=r"index 64.*8192"):
+        asyncio.run(gateway.embed_texts(["公开话语"] * 64 + ["中" * 8193]))
+    assert clients == []
+    assert requests == []
+
+
+def test_other_embedding_service_retains_original_length_behavior(monkeypatch, embedding_gateway):
+    gateway, _, requests = embedding_gateway
+    monkeypatch.setenv("EMBEDDING_BASE_URL", "https://other.example.test/v1")
+    monkeypatch.setenv("EMBEDDING_MODEL", "other-embedding")
+    monkeypatch.setenv("EMBEDDING_API_KEY", "dummy-independent-key")
+    texts = ["中" * 8193, "文" * 8193]
+    assert asyncio.run(gateway.embed_texts(texts)) == [[8193.], [8193.]]
+    assert len(requests) == 1
+    assert requests[0]["input"] == texts
 
 
 def test_api_gateway_uses_json_object_for_non_schema_role(tmp_path):
@@ -146,8 +429,76 @@ def test_api_gateway_retries_with_invalid_output_and_writes_diagnostic(tmp_path)
     assert diagnostic["raw_response"] == invalid
 
 
+def test_parallel_api_diagnostics_keep_candidate_scope_and_request_metadata(tmp_path):
+    from psychsandbox.model_client import model_diagnostic_scope
+
+    gateway, _ = _gateway(tmp_path, [])
+    gateway.models.update(counselor="A", supervisor="B")
+    gateway.json_schema_roles = {"supervisor"}
+    gateway.json_object_roles = {"counselor"}
+    first_started, second_started = asyncio.Event(), asyncio.Event()
+
+    class InterleavedCompletions:
+        async def create(self, **request):
+            if request["temperature"] == 0.1:
+                text = '{"value": 2}'
+            else:
+                if request["model"] == "A":
+                    first_started.set()
+                    await second_started.wait()
+                else:
+                    await first_started.wait()
+                    second_started.set()
+                text = '{"value":'
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=text))])
+    gateway.client.chat.completions = InterleavedCompletions()
+
+    async def call(role, temperature):
+        with model_diagnostic_scope(tmp_path / role):
+            return await gateway.complete_structured(
+                role=role, system_prompt="JSON", input_payload={},
+                output_schema=ExampleOutput, temperature=temperature,
+            )
+
+    async def scenario():
+        return await asyncio.gather(call("counselor", 0.8), call("supervisor", 0.4))
+
+    assert [r.value for r in asyncio.run(scenario())] == [2, 2]
+    for role, temperature, response_format in [("counselor", 0.8, "json_object"), ("supervisor", 0.4, "json_schema")]:
+        paths = list((tmp_path / role).glob("*.json"))
+        assert len(paths) == 1
+        assert json.loads(paths[0].read_text(encoding="utf-8"))["request"] == {
+            "temperature": temperature, "response_format": response_format,
+        }
+    assert not gateway.diagnostic_dir.exists()
+
+
 class SingleStringField(BaseModel):
     content: str
+
+
+@pytest.mark.parametrize("invalid_field", ["safety_passed", "message_index"])
+def test_rollout_raw_json_is_strict_before_gateway_coercion(tmp_path, invalid_field):
+    from psychsandbox.domain import RolloutAssessment
+
+    payload = {
+        name: {"score": 8, "reason": "test", "evidence": [{"message_index": 0, "quote": "test"}]}
+        for name in RolloutAssessment.model_fields
+        if name not in {"safety_passed", "safety_reason"}
+    }
+    payload.update(safety_passed=True, safety_reason="test")
+    if invalid_field == "safety_passed":
+        payload["safety_passed"] = 1
+    else:
+        payload["client_agency"]["evidence"][0]["message_index"] = False
+    raw = json.dumps(payload)
+    gateway, completions = _gateway(tmp_path, [raw, raw])
+    with pytest.raises(ValueError, match="failed RolloutAssessment"):
+        asyncio.run(gateway.complete_structured(
+            role="supervisor", system_prompt="JSON", input_payload={},
+            output_schema=RolloutAssessment, temperature=0,
+        ))
+    assert len(completions.calls) == 2
 
 
 class MultiField(BaseModel):

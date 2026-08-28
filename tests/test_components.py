@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 
 import pytest
 
@@ -13,6 +15,7 @@ from psychsandbox.client_simulation.prompts import (
 )
 from psychsandbox.prompts import render_prompt
 from psychsandbox.domain import (
+    AtomicSkill,
     BlockedMemorySignal,
     ClientBehaviorType,
     ClientGeneration,
@@ -26,10 +29,14 @@ from psychsandbox.domain import (
     CounselorTurn,
     DisclosureDecision,
     HiddenFact,
+    MetaSkill,
     RiskAssessment,
     RiskLevel,
     TrustChange,
     SessionMemory,
+    SessionStage,
+    SkillSelectionConfig,
+    SkillSelectionEvidence,
     UnlockedFact,
     UnlockedClientProfile,
 )
@@ -37,6 +44,7 @@ from tests.deterministic_gateway import DeterministicGateway
 from psychsandbox.runtime import DisclosureGate, StateUpdater
 from psychsandbox.runtime.leakage import PrematureDisclosureGuard
 from psychsandbox.skills import SkillCatalog, SkillRegistry
+from psychsandbox.skills.selection import SkillCandidateFilter
 
 
 def test_disclosure_rejects_low_trust(sample_case):
@@ -153,11 +161,24 @@ def test_trust_changes_only_from_turn_signal():
 
 
 def test_skill_parent_child_integrity(root):
+    asset_files = list((root / "assets" / "skills" / "sect").rglob("*.*"))
+    hashes = {path: hashlib.sha256(path.read_bytes()).digest() for path in asset_files}
     registry = SkillRegistry.from_project(root)
     assert all(
         skill.meta_skill_id in registry.meta_skills
         for skill in registry.atomic_skills.values()
     )
+    assert len(registry.meta_skills) == 677
+    assert len(registry.atomic_skills) == 4481
+    skill = registry.atomic_skills["psychagent:bt:skill:253"]
+    assert skill.paths[SessionStage.CONCEPTUALIZATION.value] == (
+        "bt / stage1 / 评估性会谈 [285] / 行为的观察与记录 [148] / "
+        "行为记录 [151] / 使用频率记录（连续记录法） [253]"
+    )
+    for item in registry.atomic_skills.values():
+        assert set(item.paths) == {stage.value for stage in item.stages}
+        assert "brief_description" not in item.model_dump()
+    assert hashes == {path: hashlib.sha256(path.read_bytes()).digest() for path in asset_files}
 
 
 def test_skill_catalog_observes_selected_meta_without_ranking(root, sample_case):
@@ -173,6 +194,8 @@ def test_skill_catalog_observes_selected_meta_without_ranking(root, sample_case)
     )
 
     assert meta
+    assert all(0 < len(item.selection_hint) <= 180 for item in meta)
+    assert all(not item.selection_hint for item in registry.meta_skills.values())
     assert observation.status == "skills_found"
     assert observation.selected_meta_skill_ids == [meta[0].meta_skill_id]
     assert observation.atomic_skills
@@ -232,6 +255,8 @@ def test_counselor_uses_plan_then_react_observation(root, sample_case):
     assert result.planning.action is CounselorAction.LOOKUP_SKILLS
     assert result.observation.status == "skills_found"
     assert result.decision.selected_atomic_skill_ids
+    actor_skills = gateway.requests[1]["input_payload"]["observation"]["atomic_skills"]
+    assert all(item["paths"] and "brief_description" not in item for item in actor_skills)
 
 
 def test_high_risk_counselor_routes_to_safety(sample_case):
@@ -259,6 +284,212 @@ class CountingDeterministicGateway(DeterministicGateway):
         self.calls.append(kwargs["output_schema"])
         self.requests.append(kwargs)
         return await super().complete_structured(**kwargs)
+
+
+@pytest.fixture
+def selection_catalog(sample_case):
+    plan = sample_case.global_plan[0]
+    meta = [MetaSkill(
+        meta_skill_id=f"group-{group}", name=f"技能组{group}", description="探索具体困扰",
+        therapy=plan.therapy, stages=[plan.stage],
+    ) for group in range(3)]
+    atomic = [AtomicSkill(
+        skill_id=f"skill-{group}-{index}", name=f"技能{group}-{index}",
+        description=f"探索困扰的具体场景{index}", when_to_use="愿意讨论具体的焦虑场景时",
+        therapy=plan.therapy, stages=[plan.stage], meta_skill_id=f"group-{group}",
+    ) for group in range(3) for index in range(3)]
+    return SkillCatalog(SkillRegistry(meta, atomic))
+
+
+class SkillQueryGateway(CountingDeterministicGateway):
+    def __init__(self, assessments=("suitable",), *, invalid_first=False, replay_first=False):
+        super().__init__()
+        self.assessments = iter(assessments)
+        self.invalid_first = invalid_first
+        self.replay_first = replay_first
+        self.first_planning = None
+        self.embedding_requests = []
+
+    async def complete_structured(self, **kwargs):
+        result = await super().complete_structured(**kwargs)
+        if kwargs["output_schema"] is CounselorPlanning:
+            if self.first_planning is None:
+                self.first_planning = result.model_copy(deep=True)
+                if self.invalid_first:
+                    result.selection_evidence[0].evidence_quote = "未披露的秘密事件"
+            elif self.replay_first:
+                result.selected_meta_skill_ids += self.first_planning.selected_meta_skill_ids
+                result.selection_evidence += self.first_planning.selection_evidence
+        elif kwargs["output_schema"] is CounselorActorOutput:
+            result.query_assessment = next(self.assessments)
+            if result.query_assessment == "unsuitable":
+                result.query_rejection_reason = "候选集中于行为记录，本轮需要探索关系冲突。"
+        return result
+
+    async def embed_texts(self, texts):
+        self.embedding_requests.append(texts)
+        return await super().embed_texts(texts)
+
+
+def _run_skill_query(gateway, catalog, sample_case, config=None):
+    return asyncio.run(CounselorAgent(
+        gateway, catalog, skill_selection=config,
+    ).respond(
+        memory=SessionMemory(
+            case_id=sample_case.case_id,
+            unlocked_profile=UnlockedClientProfile(client_id=sample_case.profile.client_id),
+        ),
+        plan=sample_case.global_plan[0], client_message="我很焦虑，想谈谈具体的困扰",
+        recent_messages=[], risk=RiskAssessment(level=RiskLevel.LOW), counselor_turn_count=0,
+    ))
+
+
+@pytest.mark.parametrize("assessment", ["suitable", "needs_clarification", "not_needed"])
+def test_skill_query_does_not_retry_without_rejected_candidates(
+    selection_catalog, sample_case, assessment,
+):
+    gateway = SkillQueryGateway((assessment,))
+    turn = _run_skill_query(gateway, selection_catalog, sample_case)
+    assert gateway.calls == [CounselorPlanning, CounselorActorOutput]
+    assert len(turn.skill_queries) == 1
+    assert turn.skill_queries[0].assessment == assessment
+    assert bool(turn.decision.selected_atomic_skill_ids) == (assessment == "suitable")
+    assert not gateway.embedding_requests
+
+
+@pytest.mark.parametrize("second_assessment", ["suitable", "unsuitable"])
+def test_rejected_query_retries_once_and_excludes_entire_previous_group(
+    selection_catalog, sample_case, second_assessment,
+):
+    gateway = SkillQueryGateway(("unsuitable", second_assessment), replay_first=True)
+    turn = _run_skill_query(
+        gateway, selection_catalog, sample_case,
+        SkillSelectionConfig(vector_threshold=2, vector_top_k=1),
+    )
+    assert gateway.calls == [CounselorPlanning, CounselorActorOutput] * 2
+    first, second = turn.skill_queries
+    assert first.rejection_reason
+    assert first.assessment == "unsuitable"
+    assert second.assessment == second_assessment
+    assert not set(first.candidate_skill_ids) & set(second.candidate_skill_ids)
+    assert len(first.candidate_skill_ids) == len(second.candidate_skill_ids) == 3
+    assert len(first.returned_skill_ids) == len(second.returned_skill_ids) == 1
+    assert second.selection_warnings  # Replayed excluded ID was rejected in code.
+    assert gateway.requests[2]["input_payload"]["previous_query_rejection"] == first.rejection_reason
+    assert gateway.requests[3]["input_payload"]["query_retry_available"] is False
+    embedding_query = json.loads(gateway.embedding_requests[0][0])
+    assert embedding_query["current_client_message"] == "我很焦虑，想谈谈具体的困扰"
+    for fact in sample_case.profile.hidden_facts:
+        assert fact.content not in str(gateway.embedding_requests)
+
+
+def test_ungrounded_planner_evidence_allows_only_one_correction(selection_catalog, sample_case):
+    gateway = SkillQueryGateway(invalid_first=True)
+    turn = _run_skill_query(gateway, selection_catalog, sample_case)
+    assert gateway.calls == [CounselorPlanning, CounselorPlanning, CounselorActorOutput]
+    assert turn.skill_queries[0].assessment == "invalid"
+    assert "适用依据" in turn.skill_queries[0].rejection_reason
+    assert not turn.skill_queries[0].candidate_skill_ids
+    assert turn.decision.selected_atomic_skill_ids
+
+
+@pytest.mark.parametrize("failure", ["outside_observation", "fabricated_evidence"])
+def test_actor_selection_requires_returned_id_and_public_evidence(
+    selection_catalog, sample_case, failure,
+):
+    class InvalidActorGateway(SkillQueryGateway):
+        async def complete_structured(self, **kwargs):
+            output = await super().complete_structured(**kwargs)
+            if kwargs["output_schema"] is CounselorActorOutput:
+                if failure == "outside_observation":
+                    output.decision.selected_atomic_skill_ids = ["skill-2-2"]
+                else:
+                    output.decision.skill_evidence[0].evidence_quote = "未披露的秘密事件"
+            return output
+
+    turn = _run_skill_query(InvalidActorGateway(), selection_catalog, sample_case)
+    assert not turn.decision.selected_atomic_skill_ids
+    assert not turn.decision.skill_evidence
+    assert turn.skill_queries[0].selection_warnings
+
+
+def test_unsuitable_assessment_requires_reason():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="concrete rejection reason"):
+        CounselorActorOutput(
+            decision=CounselorDecision(assessment="a", state_observation="b", strategy="c"),
+            response="请再说说", query_assessment="unsuitable",
+        )
+
+
+def _selection_observation(catalog, sample_case):
+    return catalog.observe(
+        plan=sample_case.global_plan[0], risk=RiskAssessment(level=RiskLevel.LOW),
+        action=CounselorAction.LOOKUP_SKILLS, selected_meta_skill_ids=["group-0"],
+    )
+
+
+def test_vector_threshold_never_reads_embedding_config_for_small_queries(
+    selection_catalog, sample_case,
+):
+    class NoEmbeddingsGateway(DeterministicGateway):
+        @property
+        def embedding_identity(self):
+            raise AssertionError("Small queries must not inspect embedding configuration")
+
+    observation = _selection_observation(selection_catalog, sample_case)
+    result = asyncio.run(SkillCandidateFilter(
+        NoEmbeddingsGateway(), SkillSelectionConfig(vector_threshold=3, vector_top_k=2),
+    ).narrow(observation, query="焦虑", stage=sample_case.global_plan[0].stage.value))
+    assert result is observation
+
+
+def test_vector_filter_ranks_cosine_and_caches_only_skill_vectors(selection_catalog, sample_case):
+    class VectorGateway(DeterministicGateway):
+        def __init__(self):
+            self.requests = []
+
+        async def embed_texts(self, texts):
+            self.requests.append(texts)
+            return [[1., 0.]] + [[0., 1.], [1., 1.], [2., 0.]][:len(texts) - 1]
+
+    gateway = VectorGateway()
+    candidate_filter = SkillCandidateFilter(gateway, SkillSelectionConfig(vector_threshold=2, vector_top_k=2))
+    observation = _selection_observation(selection_catalog, sample_case)
+    stage = sample_case.global_plan[0].stage.value
+    first = asyncio.run(candidate_filter.narrow(observation, query="焦虑", stage=stage))
+    assert [item.skill_id for item in first.atomic_skills] == ["skill-0-2", "skill-0-1"]
+    assert first.similarity_scores["skill-0-2"] == pytest.approx(1.)
+    assert first.vector_filtered and first.candidate_count == 3
+    assert len(observation.atomic_skills) == 3
+    asyncio.run(candidate_filter.narrow(observation, query="新的公开表达", stage=stage))
+    assert gateway.requests[1] == ["新的公开表达"]
+    candidate_filter.reset()
+    asyncio.run(candidate_filter.narrow(observation, query="第三次", stage=stage))
+    assert len(gateway.requests[2]) == 4
+
+
+@pytest.mark.parametrize("vectors", [
+    [[1., 0.]],
+    [[1., 0.], [1.], [1., 0.], [1., 0.]],
+    [[1., 0.], [0., 0.], [1., 0.], [1., 0.]],
+    [[1., 0.], [float("nan"), 1.], [1., 0.], [1., 0.]],
+])
+def test_vector_filter_rejects_invalid_embeddings(selection_catalog, sample_case, vectors):
+    class InvalidVectorGateway(DeterministicGateway):
+        async def embed_texts(self, texts):
+            return vectors
+
+    candidate_filter = SkillCandidateFilter(
+        InvalidVectorGateway(), SkillSelectionConfig(vector_threshold=2, vector_top_k=1),
+    )
+    with pytest.raises(ValueError, match="Embedding"):
+        asyncio.run(candidate_filter.narrow(
+            _selection_observation(selection_catalog, sample_case),
+            query="焦虑", stage=sample_case.global_plan[0].stage.value,
+        ))
+    assert not candidate_filter._vectors
 
 
 def test_client_prompts_are_versioned_and_reexported():
@@ -339,6 +570,8 @@ def test_client_utterance_prompt_contract():
     assert "private_client_profile" not in rendered
     assert "session_goals" not in rendered
     assert "suggested_skills" not in rendered
+    assert "响应外层仍必须是 ClientUtterance JSON" in rendered
+    assert "不要输出 JSON、XML、项目符号或解释。" not in rendered
 
 
 def test_client_two_stage_calls_and_strict_utterance_payload(sample_case):

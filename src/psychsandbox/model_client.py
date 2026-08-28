@@ -1,19 +1,37 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import uuid
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 
 ECNU_JSON_SCHEMA_MODELS = {"ecnu-plus", "ecnu-turbo"}
+ECNU_BASE_URL = "https://chat.ecnu.edu.cn/open/api/v1"
+ECNU_EMBEDDING_MAX_CHARS = 8192
+_diagnostic_scope: ContextVar[Path | None] = ContextVar("model_diagnostic_scope", default=None)
+_request_meta: ContextVar[dict | None] = ContextVar("model_request_meta", default=None)
+
+
+@contextmanager
+def model_diagnostic_scope(directory: Path):
+    """Attribute API diagnostics to the current async candidate, not its peers."""
+    token = _diagnostic_scope.set(directory)
+    try:
+        yield
+    finally:
+        _diagnostic_scope.reset(token)
 
 
 class ModelGateway(ABC):
@@ -30,6 +48,17 @@ class ModelGateway(ABC):
         temperature: float,
     ) -> BaseModel:
         raise NotImplementedError
+
+    @property
+    def embedding_model(self) -> str:
+        raise RuntimeError("This gateway does not configure an embedding model")
+
+    @property
+    def embedding_identity(self) -> str:
+        return self.embedding_model
+
+    async def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        raise RuntimeError("This gateway does not support embeddings")
 
 
 class OpenAICompatibleGateway(ModelGateway):
@@ -76,6 +105,77 @@ class OpenAICompatibleGateway(ModelGateway):
         self.max_tokens = int(os.getenv("MODEL_MAX_TOKENS", "4096"))
         self.diagnostic_dir = Path(diagnostic_dir) if diagnostic_dir else None
 
+    def _embedding_config(self) -> tuple[str, str, str]:
+        chat_base_url = os.getenv("MODEL_BASE_URL", "").strip()
+        base_url = os.getenv("EMBEDDING_BASE_URL", "").strip()
+        model = os.getenv("EMBEDDING_MODEL", "").strip()
+        api_key = os.getenv("EMBEDDING_API_KEY", "").strip()
+        if _is_ecnu_endpoint(chat_base_url):
+            base_url = base_url or chat_base_url
+            if _is_ecnu_endpoint(base_url):
+                model = model or "ecnu-embedding-small"
+                api_key = api_key or os.getenv("MODEL_API_KEY", "").strip()
+        if _is_ecnu_endpoint(base_url):
+            base_url = ECNU_BASE_URL
+        missing = [name for name, value in (
+            ("EMBEDDING_MODEL", model), ("EMBEDDING_BASE_URL", base_url),
+            ("EMBEDDING_API_KEY", api_key),
+        ) if not value]
+        if missing:
+            raise RuntimeError("Large skill queries require " + ", ".join(missing))
+        return base_url, model, api_key
+
+    @property
+    def embedding_model(self) -> str:
+        return self._embedding_config()[1]
+
+    @property
+    def embedding_identity(self) -> str:
+        base_url, model, _ = self._embedding_config()
+        identity = [base_url.rstrip("/"), model]
+        return hashlib.sha256(json.dumps(identity).encode("utf-8")).hexdigest()
+
+    async def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        from openai import AsyncOpenAI
+
+        base_url, model, api_key = self._embedding_config()
+        ecnu = _is_ecnu_endpoint(base_url)
+        batches: list[list[str]] = []
+        batch: list[str] = []
+        batch_chars = 0
+        for index, text in enumerate(texts):
+            if ecnu and len(text) > ECNU_EMBEDDING_MAX_CHARS:
+                raise ValueError(
+                    f"Embedding input at index {index} exceeds the ChatECNU "
+                    f"limit of {ECNU_EMBEDDING_MAX_CHARS} characters"
+                )
+            if batch and (len(batch) == 64 or (
+                ecnu and batch_chars + len(text) > ECNU_EMBEDDING_MAX_CHARS
+            )):
+                batches.append(batch)
+                batch, batch_chars = [], 0
+            batch.append(text)
+            batch_chars += len(text)
+        if batch:
+            batches.append(batch)
+        vectors = []
+        async with AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=float(os.getenv("EMBEDDING_TIMEOUT_SECONDS", "60")),
+        ) as client:
+            for batch in batches:
+                result = await client.embeddings.create(
+                    model=model, input=batch, encoding_format="float",
+                )
+                rows = sorted(result.data, key=lambda row: row.index)
+                if [row.index for row in rows] != list(range(len(batch))):
+                    raise ValueError("Embedding API returned missing or duplicate indices")
+                vectors.extend(row.embedding for row in rows)
+        return vectors
+
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8), reraise=True)
     async def _complete_text(
         self,
@@ -109,12 +209,12 @@ class OpenAICompatibleGateway(ModelGateway):
                     }
                 }
             )
-            self._last_request_meta = {"response_format": "json_schema", "temperature": temperature}
+            _request_meta.set({"response_format": "json_schema", "temperature": temperature})
         elif role in getattr(self, "json_object_roles", set()):
             request.update({"response_format": {"type": "json_object"}})
-            self._last_request_meta = {"response_format": "json_object", "temperature": temperature}
+            _request_meta.set({"response_format": "json_object", "temperature": temperature})
         else:
-            self._last_request_meta = {"response_format": "none", "temperature": temperature}
+            _request_meta.set({"response_format": "none", "temperature": temperature})
         result = await self.client.chat.completions.create(**request)
         return result.choices[0].message.content or ""
 
@@ -181,18 +281,17 @@ class OpenAICompatibleGateway(ModelGateway):
         error: str,
         text: str,
     ) -> None:
-        if self.diagnostic_dir is None:
+        diagnostic_dir = _diagnostic_scope.get() or self.diagnostic_dir
+        if diagnostic_dir is None:
             return
-        self.diagnostic_dir.mkdir(parents=True, exist_ok=True)
+        diagnostic_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
-        path = self.diagnostic_dir / (
-            f"{timestamp}-{role}-{output_schema.__name__}-"
-            f"attempt-{attempt}-{uuid.uuid4().hex[:8]}.json"
-        )
-        meta = getattr(self, "_last_request_meta", {})
+        path = diagnostic_dir / f"{uuid.uuid4().hex[:12]}.json"
+        meta = _request_meta.get() or {}
         path.write_text(
             json.dumps(
                 {
+                    "timestamp": timestamp,
                     "role": role,
                     "output_schema": output_schema.__name__,
                     "attempt": attempt,
@@ -209,6 +308,23 @@ class OpenAICompatibleGateway(ModelGateway):
 
 def create_gateway(*, diagnostic_dir: Path | None = None) -> ModelGateway:
     return OpenAICompatibleGateway(diagnostic_dir=diagnostic_dir)
+
+
+def _is_ecnu_endpoint(base_url: str) -> bool:
+    """Match the official HTTPS API endpoint without widening the key boundary."""
+    if any(char.isspace() for char in base_url):
+        return False
+    try:
+        url = urlsplit(base_url)
+    except ValueError:
+        return False
+    return (
+        url.scheme == "https"
+        and url.netloc.lower() in {"chat.ecnu.edu.cn", "chat.ecnu.edu.cn:443"}
+        and url.path in {"/open/api/v1", "/open/api/v1/"}
+        and not url.query
+        and not url.fragment
+    )
 
 
 def _structured_output_roles(

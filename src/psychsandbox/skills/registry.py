@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from ..artifacts import latest_data_dir
 from ..domain import AtomicSkill, MetaSkill, SessionStage, SkillStatus
 
 
@@ -14,6 +15,14 @@ class SkillRegistry:
     ) -> None:
         self.meta_skills = {item.meta_skill_id: item for item in meta_skills or []}
         self.atomic_skills = {item.skill_id: item for item in atomic_skills or []}
+        for skill in self.atomic_skills.values():
+            if not skill.paths:
+                parent = self.meta_skills.get(skill.meta_skill_id)
+                for stage in skill.stages:
+                    skill.paths[stage.value] = " / ".join(
+                        [skill.therapy, stage.value,
+                         parent.name if parent else skill.meta_skill_id, skill.name]
+                    )
 
     @classmethod
     def from_json(cls, path: Path) -> "SkillRegistry":
@@ -33,7 +42,7 @@ class SkillRegistry:
         if assets_dir.is_dir():
             return cls.from_psychagent_assets(assets_dir)
 
-        primary = project_root / "data" / "processed" / "psycheval" / "skills.json"
+        primary = latest_data_dir(project_root, "processed") / "skills.json"
         if not primary.exists():
             primary = project_root / "data" / "skills" / "cbt.json"
         registry = cls.from_json(primary)
@@ -95,9 +104,18 @@ class SkillRegistry:
 
                 for raw_id, item in raw_micro.items():
                     stable_id = f"psychagent:{asset_therapy}:skill:{raw_id}"
+                    path_parts = [asset_therapy, stage_name]
+                    for path_id in item.get("parent_ids", []):
+                        path_id = str(path_id)
+                        if path_id in raw_meta:
+                            node = raw_meta[path_id]
+                            path_parts.append(f"{node['skill_name']} [{path_id}]")
+                    path_parts.append(f"{item.get('skill_name', '')} [{raw_id}]")
+                    skill_path = " / ".join(path_parts)
                     if stable_id in atomic:
                         if stage not in atomic[stable_id].stages:
                             atomic[stable_id].stages.append(stage)
+                        atomic[stable_id].paths[stage.value] = skill_path
                         continue
                     parent_ids = [str(value) for value in item.get("parent_ids", [])]
                     parent_id = next(
@@ -138,6 +156,7 @@ class SkillRegistry:
                         therapy=therapy,
                         stages=[stage],
                         meta_skill_id=meta_id,
+                        paths={stage.value: skill_path},
                         when_to_use=str(item.get("when_to_use", "")),
                         triggers=triggers,
                         source="PsychAgent assets",

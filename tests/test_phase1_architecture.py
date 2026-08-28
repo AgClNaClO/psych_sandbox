@@ -189,7 +189,75 @@ def test_visual_report_contains_process_results_and_turns(root, tmp_path):
     assert "咨询师会后自评" in html
     assert "对话记录" in html
     assert "逐轮技术细节" in html
+    assert "技能查询记录（1 次）" in html
+    assert "元技能依据" in html
+    assert "原子技能依据" in html
+    record = result.sessions[0].turn_records[0]
+    assert record["planning"]["current_goal"] in html
+    assert record["client_turn_signal"]["rationale"] in html
+    assert "来访者模拟决策摘要" in html
     assert result.run_id in html
+
+
+def test_decision_summary_renders_only_explicit_fields_and_escapes_text():
+    from types import SimpleNamespace
+    from psychsandbox.visualization.report import _session_thinking_summary
+
+    record = {
+        "planning": {"reasoning_summary": "简短决策依据", "current_goal": "确认具体场景"},
+        "client_turn_signal": {"rationale": "<script>unsafe()</script>", "reaction": "neutral"},
+        "reasoning_content": "provider-internal-field-must-not-render",
+    }
+    html = _session_thinking_summary(SimpleNamespace(turn_records=[record]))
+    assert "简短决策依据" in html
+    assert "&lt;script&gt;unsafe()&lt;/script&gt;" in html
+    assert "<script>unsafe()" not in html
+    assert "provider-internal-field-must-not-render" not in html
+    assert _session_thinking_summary(SimpleNamespace(turn_records=[{}]))
+
+
+def test_decision_summary_shows_rejected_and_accepted_query_plans():
+    from types import SimpleNamespace
+    from psychsandbox.visualization.report import _session_thinking_summary
+
+    record = {
+        "skill_queries": [
+            {
+                "attempt": 1,
+                "planning": {
+                    "reasoning_summary": "首次依据：来访者提到回避",
+                    "current_goal": "了解回避场景",
+                    "plan_steps": ["确认情境", "核对前提"],
+                    "action": "query_skills",
+                    "action_input": "<script>query()</script>",
+                    "reasoning_content": "hidden-provider-field",
+                },
+                "assessment": "unsuitable",
+                "rejection_reason": "缺少练习意愿",
+                "candidate_skill_ids": ["skill-a"],
+                "returned_skill_ids": ["skill-a"],
+            },
+            {
+                "attempt": 2,
+                "planning": {
+                    "reasoning_summary": "调整依据：先建立共同目标",
+                    "current_goal": "澄清求助期待",
+                },
+                "assessment": "suitable",
+                "returned_skill_ids": ["skill-b"],
+            },
+        ]
+    }
+    html = _session_thinking_summary(SimpleNamespace(turn_records=[record]))
+    assert "技能查询记录（2 次）" in html
+    assert html.index("首次依据：来访者提到回避") < html.index("调整依据：先建立共同目标")
+    assert "了解回避场景" in html and "澄清求助期待" in html
+    assert "确认情境 → 核对前提" in html
+    assert "query_skills" in html
+    assert "缺少练习意愿" in html
+    assert "&lt;script&gt;query()&lt;/script&gt;" in html
+    assert "<script>query()" not in html
+    assert "hidden-provider-field" not in html
 
 
 def test_resume_rejects_different_case(root, tmp_path):

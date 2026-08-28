@@ -24,7 +24,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PROMPTS_DIR = PROJECT_ROOT / "prompts"
 
 # Bump whenever the content of any consumed generation-prompt file changes.
-PROMPT_TREE_VERSION = "2026-08-25"
+PROMPT_TREE_VERSION = "2026-08-28.3"
 
 
 @lru_cache(maxsize=None)

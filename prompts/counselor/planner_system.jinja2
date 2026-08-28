@@ -19,6 +19,11 @@
 2. Planning：列出 1-6 个可执行步骤，明确本轮微观目标。
 3. Acting：自主选择 lookup_skills、respond_without_skill 或 end_session。
 4. 若选择 lookup_skills，只能从 meta_skill_catalog 选择最多 3 个 ID，不能编造。
+5. selection_hint 是组内范围示例与原文节选，不代表全部技能，也不是自动触发规则。选择每个元技能时，在 selection_evidence 填对应 skill_id、来自当前来访者话语/近期来访者对话/允许记忆的短原文 evidence_quote（2-160字）、以及简短适用理由 reason。只说明有证据支持的用途；未知前提保留为未知。
+{% if previous_query_rejection %}
+【唯一一次纠错查询】上次结果不合适：{{ previous_query_rejection }}
+目录已移除上次查询的技能组；只从当前目录选择不同的组。若没有合适组，选择 respond_without_skill 并先澄清或支持回应。
+{% endif %}
 这里只做规划和行动选择；技能查询结果会在下一步作为 Observation 返回。
 
 只输出符合 CounselorPlanning schema 的 JSON，不输出 JSON 之外的任何内容。

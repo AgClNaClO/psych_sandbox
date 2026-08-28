@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from ..domain import (
     CounselorAction,
     CounselorActorOutput,
@@ -13,11 +15,15 @@ from ..domain import (
     SessionMemory,
     SessionPlan,
     SessionRecord,
+    SkillQueryAttempt,
+    SkillSelectionConfig,
+    SkillSelectionEvidence,
 )
 from ..model_client import ModelGateway
 from ..prompts import render_prompt
 from ..runtime.dialogue_guard import DialogueLoopGuard
 from ..skills import SkillCatalog, SkillRegistry
+from ..skills.selection import SkillCandidateFilter
 from ..therapies import get_therapy_profile
 
 # Generation prompts are Jinja2 templates under ``prompts/counselor/``.
@@ -35,11 +41,18 @@ class CounselorAgent:
         skill_catalog: SkillCatalog | None = None,
         temperature: float = 0.4,
         dialogue_guard: DialogueLoopGuard | None = None,
+        skill_selection: SkillSelectionConfig | None = None,
     ) -> None:
         self.gateway = gateway
         self.skill_catalog = skill_catalog or SkillCatalog(SkillRegistry())
         self.temperature = temperature
         self.dialogue_guard = dialogue_guard or DialogueLoopGuard()
+        self.candidate_filter = SkillCandidateFilter(
+            gateway, skill_selection or SkillSelectionConfig()
+        )
+
+    def reset_run_state(self) -> None:
+        self.candidate_filter.reset()
 
     def build_context_payload(
         self,
@@ -105,60 +118,71 @@ class CounselorAgent:
             risk=risk,
             counselor_turn_count=counselor_turn_count,
         )
-        meta_catalog = self.skill_catalog.available_meta(plan=plan, risk=risk)
-        planning_payload = {
-            **context,
-            "meta_skill_catalog": [
-                item.model_dump(mode="json") for item in meta_catalog
-            ],
-        }
-        planning_result = await self.gateway.complete_structured(
-            role="counselor",
-            system_prompt=self._system_prompt(
-                plan, render_prompt(COUNSELOR_PLANNER_TEMPLATE, **planning_payload)
-            ),
-            input_payload=planning_payload,
-            output_schema=CounselorPlanning,
-            temperature=self.temperature,
+        planning, observation, candidates, warnings = await self._query_skills(
+            context=context, plan=plan, risk=risk, excluded_meta_ids=set()
         )
-        planning = CounselorPlanning.model_validate(planning_result)
-        allowed_meta_ids = {item.meta_skill_id for item in meta_catalog}
-        planning.selected_meta_skill_ids = list(
-            dict.fromkeys(
-                item
-                for item in planning.selected_meta_skill_ids
-                if item in allowed_meta_ids
+        attempts = []
+        if observation.status == "invalid_selection" and planning.action is CounselorAction.LOOKUP_SKILLS:
+            attempts.append(self._query_attempt(
+                1, planning, candidates, observation, "invalid", observation.note, warnings
+            ))
+            planning, observation, candidates, warnings = await self._query_skills(
+                context=context,
+                plan=plan,
+                risk=risk,
+                excluded_meta_ids=set(planning.selected_meta_skill_ids),
+                previous_rejection=attempts[0].rejection_reason,
             )
-        )
-        observation = self.skill_catalog.observe(
-            plan=plan,
-            risk=risk,
-            action=planning.action,
-            selected_meta_skill_ids=planning.selected_meta_skill_ids,
-        )
 
-        actor_payload = {
-            **context,
-            "planning": planning.model_dump(mode="json"),
-            "observation": observation.model_dump(mode="json"),
-        }
-        result = await self.gateway.complete_structured(
-            role="counselor",
-            system_prompt=self._system_prompt(
-                plan, render_prompt(COUNSELOR_ACTOR_TEMPLATE, **actor_payload)
-            ),
-            input_payload=actor_payload,
-            output_schema=CounselorActorOutput,
-            temperature=self.temperature,
+        actor_output, actor_warnings = await self._act(
+            context=context, plan=plan, planning=planning, observation=observation,
+            retry_available=not attempts,
         )
-        actor_output = CounselorActorOutput.model_validate(result)
+        warnings.extend(actor_warnings)
+        if (
+            actor_output.query_assessment == "unsuitable"
+            and planning.action is CounselorAction.LOOKUP_SKILLS
+            and observation.status == "skills_found"
+            and not attempts
+        ):
+            attempts.append(self._query_attempt(
+                1, planning, candidates, observation, "unsuitable",
+                actor_output.query_rejection_reason, warnings,
+            ))
+            planning, observation, candidates, warnings = await self._query_skills(
+                context=context,
+                plan=plan,
+                risk=risk,
+                excluded_meta_ids=set(planning.selected_meta_skill_ids),
+                previous_rejection=actor_output.query_rejection_reason,
+            )
+            actor_output, actor_warnings = await self._act(
+                context=context, plan=plan, planning=planning,
+                observation=observation, retry_available=False,
+            )
+            warnings.extend(actor_warnings)
+
+        assessment = (
+            actor_output.query_assessment
+            if planning.action is CounselorAction.LOOKUP_SKILLS
+            else "not_needed"
+        )
+        rejection_reason = actor_output.query_rejection_reason
+        if observation.status == "invalid_selection":
+            assessment = "invalid"
+            rejection_reason = observation.note
+        attempts.append(self._query_attempt(
+            len(attempts) + 1, planning, candidates, observation,
+            assessment, rejection_reason, warnings,
+            selected_atomic_ids=actor_output.decision.selected_atomic_skill_ids,
+        ))
         turn = CounselorTurn(
             decision=actor_output.decision,
             response=actor_output.response,
             planning=planning,
             observation=observation,
+            skill_queries=attempts,
         )
-        self._constrain_selected_skills(turn, observation)
         turn.decision.risk_level = risk.level
         if planning.action is CounselorAction.END_SESSION:
             turn.decision.end_session = True
@@ -171,6 +195,187 @@ class CounselorAgent:
             )
             turn.response = self.dialogue_guard.repetition_repair_response()
         return turn
+
+    async def _query_skills(
+        self,
+        *,
+        context: dict,
+        plan: SessionPlan,
+        risk: RiskAssessment,
+        excluded_meta_ids: set[str],
+        previous_rejection: str = "",
+    ) -> tuple[CounselorPlanning, CounselorObservation, list[str], list[str]]:
+        meta_catalog = [
+            item for item in self.skill_catalog.available_meta(plan=plan, risk=risk)
+            if item.meta_skill_id not in excluded_meta_ids
+        ]
+        planning_payload = {
+            **context,
+            "meta_skill_catalog": [
+                item.model_dump(mode="json") for item in meta_catalog
+            ],
+            "previous_query_rejection": previous_rejection,
+        }
+        planning_result = await self.gateway.complete_structured(
+            role="counselor",
+            system_prompt=self._system_prompt(
+                plan, render_prompt(COUNSELOR_PLANNER_TEMPLATE, **planning_payload)
+            ),
+            input_payload=planning_payload,
+            output_schema=CounselorPlanning,
+            temperature=self.temperature,
+        )
+        planning = CounselorPlanning.model_validate(planning_result)
+        allowed_meta_ids = {item.meta_skill_id for item in meta_catalog}
+        requested = list(dict.fromkeys(planning.selected_meta_skill_ids))
+        selected = list(
+            dict.fromkeys(
+                item
+                for item in planning.selected_meta_skill_ids
+                if item in allowed_meta_ids
+            )
+        )
+        selected, planning.selection_evidence, warnings = self._grounded_selection(
+            selected, planning.selection_evidence, context
+        )
+        planning.selected_meta_skill_ids = selected
+        if planning.action is not CounselorAction.LOOKUP_SKILLS:
+            planning.selected_meta_skill_ids = []
+            planning.selection_evidence = []
+        observation = self.skill_catalog.observe(
+            plan=plan,
+            risk=risk,
+            action=planning.action,
+            selected_meta_skill_ids=planning.selected_meta_skill_ids,
+        )
+        if warnings and observation.status == "invalid_selection":
+            observation.note = "；".join(warnings)
+        candidate_ids = [item.skill_id for item in observation.atomic_skills]
+        observation = await self.candidate_filter.narrow(
+            observation,
+            query=self._vector_query(context, planning),
+            stage=plan.stage.value,
+        )
+        invalid_ids = [item for item in requested if item not in allowed_meta_ids]
+        warnings.extend(f"元技能ID不在当前可用目录：{item}" for item in invalid_ids)
+        return planning, observation, candidate_ids, warnings
+
+    async def _act(
+        self, *, context: dict, plan: SessionPlan, planning: CounselorPlanning,
+        observation: CounselorObservation, retry_available: bool,
+    ) -> tuple[CounselorActorOutput, list[str]]:
+        actor_payload = {
+            **context,
+            "planning": planning.model_dump(mode="json"),
+            "observation": observation.model_dump(mode="json"),
+            "query_retry_available": retry_available,
+        }
+        result = await self.gateway.complete_structured(
+            role="counselor",
+            system_prompt=self._system_prompt(
+                plan, render_prompt(COUNSELOR_ACTOR_TEMPLATE, **actor_payload)
+            ),
+            input_payload=actor_payload,
+            output_schema=CounselorActorOutput,
+            temperature=self.temperature,
+        )
+        actor_output = CounselorActorOutput.model_validate(result)
+        if actor_output.query_assessment != "suitable":
+            actor_output.decision.selected_atomic_skill_ids = []
+            actor_output.decision.selected_meta_skill_ids = []
+            actor_output.decision.skill_evidence = []
+        warnings = self._constrain_selected_skills(
+            actor_output.decision, observation, context
+        )
+        return actor_output, warnings
+
+    @classmethod
+    def _grounded_selection(
+        cls, selected: list[str], evidence: list[SkillSelectionEvidence], context: dict,
+    ) -> tuple[list[str], list[SkillSelectionEvidence], list[str]]:
+        sources = cls._evidence_sources(context)
+        by_id = {item.skill_id: item for item in evidence}
+        grounded = []
+        warnings = []
+        for skill_id in selected:
+            item = by_id.get(skill_id)
+            if item and cls._quote_is_grounded(item.evidence_quote, sources):
+                grounded.append(skill_id)
+            else:
+                warnings.append(f"元技能{skill_id}缺少来自公开上下文的适用依据")
+        return grounded, [by_id[item] for item in grounded], warnings
+
+    @classmethod
+    def _evidence_sources(cls, context: dict) -> list[str]:
+        values = [context.get("client_message", "")]
+        values.extend(
+            message.get("content", "") for message in context.get("recent_messages", [])
+            if message.get("role") == "client"
+        )
+        profile = context.get("unlocked_profile", {})
+        for key in ("public_background", "confirmed_goals", "expressed_problems", "theory"):
+            values.extend(cls._strings(profile.get(key, {})))
+        values.extend(fact.get("content", "") for fact in profile.get("facts", []))
+        memory = context.get("session_memory", {})
+        for key in ("summaries", "confirmed_goals", "unresolved_topics", "supervisor_feedback"):
+            values.extend(cls._strings(memory.get(key, [])))
+        return [cls._normalize_text(item) for item in values if str(item).strip()]
+
+    @classmethod
+    def _strings(cls, value) -> list[str]:
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, dict):
+            return [item for child in value.values() for item in cls._strings(child)]
+        if isinstance(value, list):
+            return [item for child in value for item in cls._strings(child)]
+        return []
+
+    @staticmethod
+    def _normalize_text(value: str) -> str:
+        return " ".join(str(value).split()).casefold()
+
+    @classmethod
+    def _quote_is_grounded(cls, quote: str, sources: list[str]) -> bool:
+        normalized = cls._normalize_text(quote)
+        return bool(normalized and any(normalized in source for source in sources))
+
+    @staticmethod
+    def _vector_query(context: dict, planning: CounselorPlanning) -> str:
+        memory = context.get("session_memory", {})
+        payload = {
+            "current_client_message": str(context.get("client_message", ""))[:2000],
+            "current_goal": planning.current_goal[:300],
+            "selection_evidence": [item.evidence_quote for item in planning.selection_evidence],
+            "session_objectives": [str(item)[:160] for item in context.get("objectives", [])[:4]],
+            "recent_client_messages": [
+                str(item.get("content", ""))[:500]
+                for item in context.get("recent_messages", [])[-6:]
+                if item.get("role") == "client"
+            ],
+            "recent_summary": [str(item)[:500] for item in memory.get("summaries", [])[-1:]],
+        }
+        return json.dumps(payload, ensure_ascii=False)
+
+    @staticmethod
+    def _query_attempt(
+        attempt: int, planning: CounselorPlanning, candidates: list[str],
+        observation: CounselorObservation, assessment: str, rejection_reason: str,
+        warnings: list[str], selected_atomic_ids: list[str] | None = None,
+    ) -> SkillQueryAttempt:
+        return SkillQueryAttempt(
+            attempt=attempt,
+            planning=planning,
+            candidate_skill_ids=candidates,
+            returned_skill_ids=[item.skill_id for item in observation.atomic_skills],
+            selected_atomic_skill_ids=selected_atomic_ids or [],
+            assessment=assessment,
+            rejection_reason=rejection_reason,
+            selection_warnings=list(dict.fromkeys(warnings)),
+            vector_filtered=observation.vector_filtered,
+            embedding_model=observation.embedding_model,
+            similarity_scores=observation.similarity_scores,
+        )
 
     async def review_session(
         self,
@@ -230,19 +435,28 @@ class CounselorAgent:
 
     @staticmethod
     def _constrain_selected_skills(
-        turn: CounselorTurn,
+        decision: CounselorDecision,
         observation: CounselorObservation,
-    ) -> None:
+        context: dict,
+    ) -> list[str]:
         allowed_atomic = {item.skill_id for item in observation.atomic_skills}
-        allowed_meta = set(observation.selected_meta_skill_ids)
-        turn.decision.selected_atomic_skill_ids = [
-            item
-            for item in turn.decision.selected_atomic_skill_ids
-            if item in allowed_atomic
-        ]
-        turn.decision.selected_meta_skill_ids = [
-            item for item in turn.decision.selected_meta_skill_ids if item in allowed_meta
-        ]
+        parents = {item.skill_id: item.meta_skill_id for item in observation.atomic_skills}
+        sources = CounselorAgent._evidence_sources(context)
+        by_id = {item.skill_id: item for item in decision.skill_evidence}
+        warnings = []
+        selected_atomic = []
+        for skill_id in dict.fromkeys(decision.selected_atomic_skill_ids):
+            evidence = by_id.get(skill_id)
+            if skill_id not in allowed_atomic:
+                warnings.append(f"原子技能ID不在Observation：{skill_id}")
+            elif not evidence or not CounselorAgent._quote_is_grounded(evidence.evidence_quote, sources):
+                warnings.append(f"原子技能{skill_id}缺少来自公开上下文的适用依据")
+            else:
+                selected_atomic.append(skill_id)
+        decision.selected_atomic_skill_ids = selected_atomic
+        decision.skill_evidence = [by_id[item] for item in selected_atomic]
+        decision.selected_meta_skill_ids = list(dict.fromkeys(parents[item] for item in selected_atomic))
+        return warnings
 
     @staticmethod
     def _system_prompt(plan: SessionPlan, task_prompt: str) -> str:

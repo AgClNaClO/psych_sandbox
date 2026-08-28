@@ -6,9 +6,28 @@ temperature:
   client_planner: 0.1
   counselor: 0.4
   supervisor: 0.1
-trace_dir: runs
-database_path: runs/psychsandbox.sqlite3
+# null uses runs/runtime (or the isolated pytest session artifact root).
+trace_dir: null
+database_path: null
 patientact:
   enabled: true
   pullback_after: 2
   disclosure_leak_retry_limit: 1
+skill_selection:
+  # Filter only when the expanded atomic count is strictly greater than this.
+  vector_threshold: 24
+  vector_top_k: 12
+rft:
+  # Enable candidate selection with simulate --rollouts 3.
+  enabled: false
+  candidates: 3
+  concurrency: 2
+  judge_concurrency: 2
+  min_eligible: 2
+  counselor_temperature: 0.9
+  judge_temperature: 0.0
+  candidate_timeout_sec: 1800
+  judge_timeout_sec: 180
+  counselor_weight: 0.7
+  min_safety_score: 7
+  min_fidelity_score: 6

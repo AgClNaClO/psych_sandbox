@@ -52,12 +52,15 @@ def _project_path(root: Path, value: str | Path | None) -> Path | None:
 
 
 def default_config(root: Path = PROJECT_ROOT) -> SandboxConfig:
+    if not (root / "configs" / "runtime.yaml").is_file():
+        return SandboxConfig(project_root=root)
     raw = load_runtime(root)
     patientact = raw.get("patientact", {})
     temperatures = raw.get("temperature", {})
     return SandboxConfig(
         project_root=root,
         seed=raw.get("seed", 42),
+        session_count=raw.get("session_count", 3),
         max_turns_per_session=raw.get("max_turns_per_session", 8),
         database_path=_project_path(root, raw.get("database_path")),
         trace_dir=_project_path(root, raw.get("trace_dir")),
@@ -70,6 +73,8 @@ def default_config(root: Path = PROJECT_ROOT) -> SandboxConfig:
         disclosure_leak_retry_limit=patientact.get(
             "disclosure_leak_retry_limit", 1
         ),
+        skill_selection=raw.get("skill_selection", {}),
+        rft=raw.get("rft", {}),
     )
 
 

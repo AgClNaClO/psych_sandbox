@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 
 import json
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -44,6 +46,18 @@ def test_each_turn_has_safety_and_decision(sandbox):
     assert session.turn_records[0]["planning"]["action"] == "lookup_skills"
     assert session.turn_records[0]["observation"]["status"] == "skills_found"
     assert session.turn_records[0]["state_update"]["rule_delta"]
+    queries = session.turn_records[0]["skill_queries"]
+    assert len(queries) == 1
+    assert queries[0]["assessment"] == "suitable"
+    assert queries[0]["planning"]["selection_evidence"]
+    stored = sandbox.store.load_run(result.run_id)
+    assert stored.sessions[0].turn_records[0]["skill_queries"] == queries
+    record = session.turn_records[0]
+    stored_record = stored.sessions[0].turn_records[0]
+    assert stored_record["planning"]["reasoning_summary"] == record["planning"]["reasoning_summary"]
+    assert stored_record["client_turn_signal"]["rationale"] == record["client_turn_signal"]["rationale"]
+    rows = (sandbox.run_dir / "trajectory.jsonl").read_text(encoding="utf-8").splitlines()
+    assert json.loads(rows[0])["session"]["turn_records"][0]["skill_queries"] == queries
 
 
 def test_counselor_reviews_progress_and_replans_unmet_goals(sandbox):
@@ -73,16 +87,19 @@ def test_state_continues_across_sessions(sandbox):
 
 def test_sqlite_resume_boundary(sandbox):
     first = asyncio.run(sandbox.run_case("psycheval-cbt-004", session_count=1))
+    first_dir = sandbox.run_dir
     resumed = asyncio.run(sandbox.run_case(
         "psycheval-cbt-004", session_count=3, resume_run_id=first.run_id
     ))
     assert len(resumed.sessions) == 3
     assert resumed.run_id == first.run_id
+    assert sandbox.run_dir == first_dir
+    assert len((first_dir / "trajectory.jsonl").read_text(encoding="utf-8").splitlines()) == 3
 
 
 def test_jsonl_trajectory_written(sandbox):
     result = asyncio.run(sandbox.run_case("psycheval-cbt-005", session_count=1))
-    path = sandbox.config.trace_dir / f"{result.run_id}.jsonl"
+    path = sandbox.run_dir / "trajectory.jsonl"
     rows = path.read_text(encoding="utf-8").splitlines()
     assert len(rows) == 1
     assert json.loads(rows[0])["case_id"] == result.case_id
@@ -178,6 +195,8 @@ def test_failed_run_is_persisted(root, tmp_path):
     assert row["status"] == "failed"
     assert row["completed_at"]
     assert any("状态已记录为 failed" in message for message in messages)
+    assert json.loads((sandbox.run_dir / "run.json").read_text(encoding="utf-8"))["status"] == "failed"
+    assert "synthetic model failure" in (sandbox.run_dir / "logs" / "errors.log").read_text(encoding="utf-8")
 
 
 def test_store_unknown_run(tmp_path):
@@ -200,6 +219,72 @@ def test_expert_review_requires_note():
     )
     with pytest.raises(ValueError):
         SkillEvolutionManager().transition(version, SkillStatus.EXPERT_REVIEWED)
+
+
+def test_repeated_runs_keep_separate_results_and_resume_in_new_instance(sandbox):
+    first = asyncio.run(sandbox.run_case("psycheval-cbt-001", session_count=1))
+    first_dir = sandbox.run_dir
+    original = (first_dir / "result.json").read_bytes()
+    second = asyncio.run(sandbox.run_case("psycheval-cbt-001", session_count=1))
+    assert first.run_id != second.run_id
+    assert sandbox.run_dir != first_dir
+    assert (first_dir / "result.json").read_bytes() == original
+    other = CounselingSandbox(sandbox.config, gateway=DeterministicGateway())
+    try:
+        resumed = asyncio.run(other.run_case(
+            first.case_id, session_count=2, resume_run_id=first.run_id
+        ))
+        assert other.run_dir == first_dir
+        assert len(resumed.sessions) == 2
+        assert json.loads((first_dir / "result.json").read_text(encoding="utf-8"))["run_id"] == first.run_id
+    finally:
+        other.store.close()
+
+
+def test_runtime_diagnostics_and_temporary_files_stay_with_run(sandbox):
+    class RecordingGateway(DeterministicGateway):
+        diagnostic_dir = None
+
+        async def complete_structured(self, **kwargs):
+            (self.diagnostic_dir / "probe.txt").write_text("diagnostic", encoding="utf-8")
+            with tempfile.NamedTemporaryFile(delete=False) as handle:
+                self.temporary_path = Path(handle.name)
+            return await super().complete_structured(**kwargs)
+
+    gateway = RecordingGateway()
+    instance = CounselingSandbox(sandbox.config, gateway=gateway)
+    previous_tempdir = tempfile.gettempdir()
+    try:
+        asyncio.run(instance.run_case("psycheval-cbt-001", session_count=1))
+        assert gateway.temporary_path.is_relative_to(instance.run_dir / "tmp")
+        assert (instance.run_dir / "diagnostics" / "probe.txt").exists()
+        assert tempfile.gettempdir() == previous_tempdir
+    finally:
+        instance.store.close()
+
+
+def test_cli_simulate_report_and_visualize_share_artifacts(root, tmp_path, monkeypatch, capsys):
+    from psychsandbox import cli
+    from psychsandbox.artifacts import find_run_dir
+    from psychsandbox.runtime import orchestrator
+
+    monkeypatch.setenv("PSYCHSANDBOX_RUNTIME_DIR", str(tmp_path / "artifacts"))
+    monkeypatch.setattr(orchestrator, "create_gateway", lambda: DeterministicGateway())
+    args = cli.build_parser().parse_args([
+        "--root", str(root), "simulate", "--case", "psycheval-cbt-001",
+        "--sessions", "1", "--max-turns", "1", "--json",
+    ])
+    assert asyncio.run(cli._simulate(args)) == 0
+    result = json.loads(capsys.readouterr().out)
+    run_dir = find_run_dir(tmp_path / "artifacts", result["run_id"])
+    assert (run_dir / "report.html").exists()
+    assert cli._evaluate(root, result["run_id"], full=True) == 0
+    capsys.readouterr()
+    assert cli._visualize(root, result["run_id"], Path("alternate.html")) == 0
+    assert (run_dir / "alternate.html").exists()
+    with pytest.raises(ValueError, match="inside"):
+        cli._visualize(root, result["run_id"], tmp_path / "outside.html")
+    assert not (tmp_path / "outside.html").exists()
 
 
 def test_valid_skill_transition():

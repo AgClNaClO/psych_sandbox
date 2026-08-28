@@ -11,9 +11,10 @@
 | `datasets/` | 五流派原始案例转换和索引 | 技能选择 |
 | `therapies/` | 流派、阶段目标、概念化焦点和量表映射 | 对话生成 |
 | `agents/` | 来访者两阶段生成、咨询师 ReAct 与会后自评 | 持久化 |
-| `skills/` | 技能注册、流派/阶段硬过滤和按 ID 查询 | 语义排序或自动晋升 |
-| `runtime/` | 会谈编排、披露、安全、状态、记忆、计划和 SQLite | 训练基础模型 |
-| `evaluation/` | 规则、真实性、纵向和整体 PsychEval 评测 | 临床诊断或疗效判断 |
+| `skills/` | 技能注册、硬过滤、按 ID 展开和超量候选的向量筛选 | 最终适用判断或自动晋升 |
+| `runtime/` | 会谈编排、候选隔离与选优、披露、安全、状态、记忆、计划和 SQLite | 训练基础模型 |
+| `runtime/run_management.py` | 只读预览、按编号同步删除、失败日志与重试 | 自动监视目录或删除共享案例/技能 |
+| `evaluation/` | 规则、真实性、纵向、独立候选 RFT 评分和整体 PsychEval 评测 | 临床诊断或疗效判断 |
 | `visualization/` | 从已保存结果渲染离线 HTML/SVG | 修改运行状态 |
 
 ## 单轮流程
@@ -22,8 +23,9 @@
 允许记忆 + 当前计划 + 来访者话语
   → 输入风险和话题边界检查
   → 咨询师 API：Reasoning 摘要 + 分步 Planning + Action
-  → Observation：按模型选择的元技能 ID 返回原子技能（无 BM25/向量/相关性排序）
-  → 咨询师 API：选择策略、技能并生成结构化回复
+  → 按有公开依据的元技能 ID 精确展开原子技能；超阈值才按向量筛选
+  → 咨询师 API：核对适用依据、选择策略和技能、生成结构化回复
+  → 仅无效查询/候选不适合时，排除旧组后允许一次纠错；详见 SKILL_SELECTION.md
   → 输出安全检查
   → 披露候选与歧义门控
   → 来访者私有状态规划（反应、行为、阻抗、信任）
@@ -36,19 +38,24 @@
 ## Session 边界流程
 
 ```text
-完整会谈记录
-  → 咨询师 API 自评目标与对话证据
-  → 未达目标：改进项、修订策略、下次目标和元技能方向
-  → E.7 信息提取 → E.8 ground-truth 门控档案合并 → E.9 临床摘要
-  → 规则会谈评测 + 来访者真实性评测
-  → 状态差值、相邻 session 趋势与阶段动作
+会前计划、记忆、初始状态
+  → 普通模式：生成一个完整会谈
+    或 RFT：隔离并发生成完整候选 → 规则门槛/去重 → 独立评分/资格门槛 → 选优
+  → 正式会谈（RFT 仅胜出者）完成规则和来访者真实性评测
+  → 状态差值、相邻 session 趋势与阶段动作 → 暂定下一计划
+  → 咨询师 API 自评目标与证据；未达目标时提出策略和目标修订
   → PlanBuilder 合并咨询师再规划和纵向阶段动作
-  → SQLite + JSONL + HTML
+  → E.7 信息提取 → E.8 ground-truth 门控档案合并 → E.9 临床摘要 → 记忆整理
+  → SQLite 正式提交 + JSONL 同步；CLI 完成后生成 HTML
 ```
 
 规则评测用于审计与安全证据，不直接驱动下一计划。一个 case 的全部 session 完成后，
 `PsychEvalSupervisor` 才使用 `prompts/eval` 中代码映射到的 46 个量表文件做一次整体
 Counselor-Level/Client-Level 评分；该评分同样不回写计划。
+
+RFT 默认关闭，启用后默认 3 条候选；候选以整场会谈为单位，不是单轮回复候选。候选失败、重复或落选时只留在独立
+审计存储；少于两个不同且合格候选则失败，任何候选出现即时风险则整批暂停。选优后仍须完成
+会后处理与正式提交，才能成为下一场基线。评分公式、并发和恢复见 [会谈 RFT](SESSION_RFT.md)。
 
 ## 资源边界
 
@@ -56,10 +63,14 @@ Counselor-Level/Client-Level 评分；该评分同样不回写计划。
 - 技能树：`assets/skills/sect/`，677 个元技能、4481 个原子技能。
 - `assets/profiles` 是保留的 sample/rft 参考资产，当前病例仓库不递归加载。
 - `data/integrative` 是未注册的保留资源，不出现在可运行 case 列表。
-- `prompts/` 共有 54 个提示词资产，全部由当前文件加载链消费：46 个整体督导量表，另有
-  8 个生成提示词（`prompts/counselor/`、`prompts/simclient/`、`prompts/memory/`）以 Jinja2
-  模板存放，由 `psychsandbox/prompts.py::render_prompt` 经「Pydantic 输入校验 → 渲染 →
-  结构化输出 → Pydantic 解析」管线渲染，作为咨询师、来访者和 E.7/E.8/E.9 的生成提示词来源。
+- `prompts/` 共有 56 个提示词资产，其中 55 个有调用点：46 个整体督导量表、8 个普通生成模板，
+  加上仅开启 RFT 时使用的 `rft/session_judge.jinja2`。生成/评分提示词以 Jinja2
+  模板存放，由具体 agent 构造输入字典并调用 `psychsandbox/prompts.py::render_prompt`，
+  结构化输出按 Pydantic schema 解析。额外的 `client/dialogue.jinja2` 是参考资产，没有生产调用点。
+
+CLI 经 `default_config(root)` 加载 `configs/runtime.yaml` 后应用显式命令行参数。
+本机路径已迁至 `D:\0test\psych_sandbox`；测试/运行仍按次写入 `runs/tests` 与 `runs/runtime`，
+虚拟环境的可编辑安装需要在新位置重新安装，见 [README](../README.md)。
 
 ## 流派扩展边界
 

@@ -1,3 +1,6 @@
+{# Reference-only profile dialogue template; not a production entry point.
+   Production uses simclient/utterance_system.jinja2 and ClientUtterance JSON.
+   See prompts/README.md before adapting this template or its input fields. #}
 {% set info = intake_profile.static_traits or {} %}
 {% set history = session_recaps or [] %}
 {% set homework = last_homework or [] %}

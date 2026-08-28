@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 from pydantic import BaseModel
@@ -20,6 +21,7 @@ from psychsandbox.domain import (
     RiskLevel,
     ScaleItem,
     ScaleItems,
+    SkillSelectionEvidence,
     StaticTraits,
     TrustChange,
 )
@@ -30,6 +32,15 @@ class DeterministicGateway(ModelGateway):
     """Offline test double for component tests; never selectable at runtime."""
 
     provider_name = "deterministic_test"
+
+    @property
+    def embedding_model(self) -> str:
+        return "deterministic-test-embedding-v1"
+
+    async def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        # Stable transport double, not a semantic model or runtime fallback.
+        return [[float(byte + 1) for byte in hashlib.sha256(text.encode()).digest()]
+                for text in texts]
 
     async def complete_structured(
         self,
@@ -54,6 +65,11 @@ class DeterministicGateway(ModelGateway):
                     else CounselorAction.RESPOND_WITHOUT_SKILL
                 ),
                 selected_meta_skill_ids=meta_ids,
+                selection_evidence=[SkillSelectionEvidence(
+                    skill_id=skill_id,
+                    evidence_quote=input_payload["client_message"][:160],
+                    reason="离线测试：围绕来访者当前表达选择技能组。",
+                ) for skill_id in meta_ids],
                 action_input="查看所选元技能下的原子技能。",
             )
         if output_schema is CounselorActorOutput:
@@ -68,6 +84,11 @@ class DeterministicGateway(ModelGateway):
                     state_observation="当前痛苦较高，但仍愿意参与对话。",
                     selected_meta_skill_ids=metas,
                     selected_atomic_skill_ids=ids,
+                    skill_evidence=[SkillSelectionEvidence(
+                        skill_id=skill_id,
+                        evidence_quote=input_payload["client_message"][:160],
+                        reason="离线测试：将当前表达与候选技能核对。",
+                    ) for skill_id in ids],
                     strategy="先共情和澄清，再用一个开放问题推进。",
                     goal_progress=min(0.9, 0.15 + turn * 0.12),
                     risk_level=RiskLevel(input_payload.get("risk_level", "low")),
@@ -77,6 +98,7 @@ class DeterministicGateway(ModelGateway):
                     input_payload.get("session_stage", ""),
                     turn,
                 ),
+                query_assessment="suitable" if selected else "not_needed",
             )
         if output_schema is CounselorSessionReview:
             decisions = input_payload.get("counselor_decisions", [])

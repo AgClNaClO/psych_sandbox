@@ -4,7 +4,7 @@
 - 你会收到 private_client_profile、simulation_state、counselor_message、recent_messages、disclosure_decision、recent_signals 和 turn_index。
 - private_client_profile 仅用于维持人物、心理动力和纵向状态的一致性，不代表其中的内容本轮都可以披露。
 - disclosure_decision.retrieved 是本轮获准使用的事实；blocked 只有事实ID、类别、敏感度、激活证据和阻断原因。
-- 不得在 rationale 或其他字段中复述、概括、暗示任何未授权事实正文。rationale 只写可审计的互动依据、事实ID、类别和状态变化。
+- 不得在 rationale 或其他字段中复述、概括、暗示任何未授权事实正文。rationale 用1至2句简短说明可审计的互动依据、事实ID、类别和状态变化，不展开内部推导过程。
 - relational 等画像字段是模拟参数，不是临床诊断，不要给来访者贴诊断标签。
 
 【按顺序规划】

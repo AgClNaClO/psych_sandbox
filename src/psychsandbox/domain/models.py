@@ -300,6 +300,7 @@ class MetaSkill(StrictModel):
     therapy: str
     stages: list[SessionStage]
     source: str = "local"
+    selection_hint: str = ""
 
 
 class AtomicSkill(StrictModel):
@@ -309,6 +310,7 @@ class AtomicSkill(StrictModel):
     therapy: str
     stages: list[SessionStage]
     meta_skill_id: str
+    paths: dict[str, str] = Field(default_factory=dict)
     when_to_use: str = ""
     triggers: list[str] = Field(default_factory=list)
     contraindications: list[str] = Field(default_factory=list)
@@ -444,11 +446,23 @@ class RiskAssessment(StrictModel):
     requires_immediate_stop: bool = False
 
 
+class SkillSelectionEvidence(StrictModel):
+    skill_id: str
+    evidence_quote: str = Field(min_length=2, max_length=160)
+    reason: str = Field(min_length=1, max_length=160)
+
+    @field_validator("evidence_quote", "reason", mode="before")
+    @classmethod
+    def strip_evidence(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+
 class CounselorDecision(StrictModel):
     assessment: str
     state_observation: str
     selected_meta_skill_ids: list[str] = Field(default_factory=list)
     selected_atomic_skill_ids: list[str] = Field(default_factory=list)
+    skill_evidence: list[SkillSelectionEvidence] = Field(default_factory=list)
     strategy: str
     goal_progress: float = Field(default=0, ge=0, le=1)
     risk_level: RiskLevel = RiskLevel.LOW
@@ -464,6 +478,7 @@ class CounselorPlanning(StrictModel):
     action: CounselorAction
     selected_meta_skill_ids: list[str] = Field(default_factory=list, max_length=3)
     action_input: str = ""
+    selection_evidence: list[SkillSelectionEvidence] = Field(default_factory=list, max_length=3)
 
 
 class CounselorObservation(StrictModel):
@@ -472,6 +487,24 @@ class CounselorObservation(StrictModel):
     selected_meta_skill_ids: list[str] = Field(default_factory=list)
     atomic_skills: list[AtomicSkill] = Field(default_factory=list)
     note: str = ""
+    candidate_count: int = 0
+    vector_filtered: bool = False
+    embedding_model: str = ""
+    similarity_scores: dict[str, float] = Field(default_factory=dict)
+
+
+class SkillQueryAttempt(StrictModel):
+    attempt: int = Field(ge=1, le=2)
+    planning: CounselorPlanning
+    candidate_skill_ids: list[str] = Field(default_factory=list)
+    returned_skill_ids: list[str] = Field(default_factory=list)
+    selected_atomic_skill_ids: list[str] = Field(default_factory=list)
+    assessment: str
+    rejection_reason: str = ""
+    selection_warnings: list[str] = Field(default_factory=list)
+    vector_filtered: bool = False
+    embedding_model: str = ""
+    similarity_scores: dict[str, float] = Field(default_factory=dict)
 
 
 class CounselorTurn(StrictModel):
@@ -479,12 +512,13 @@ class CounselorTurn(StrictModel):
     response: str
     planning: CounselorPlanning | None = None
     observation: CounselorObservation | None = None
+    skill_queries: list[SkillQueryAttempt] = Field(default_factory=list, max_length=2)
 
 
 class CounselorActorOutput(StrictModel):
     """Minimal actor output; planning/observation are supplied out-of-band.
 
-    The actor only needs to produce the auditable decision and the verbatim
+    The actor produces the auditable decision, candidate assessment and verbatim
     client-facing response.  ``planning`` and ``observation`` are already known
     from the planner and the skill-catalog ReAct observation, so asking the
     model to echo them (including the full atomic-skill payloads) needlessly
@@ -493,6 +527,14 @@ class CounselorActorOutput(StrictModel):
 
     decision: CounselorDecision
     response: str
+    query_assessment: Literal["suitable", "unsuitable", "needs_clarification", "not_needed"] = "not_needed"
+    query_rejection_reason: str = Field(default="", max_length=240)
+
+    @model_validator(mode="after")
+    def require_rejection_reason(self) -> CounselorActorOutput:
+        if self.query_assessment == "unsuitable" and not self.query_rejection_reason.strip():
+            raise ValueError("unsuitable query results require a concrete rejection reason")
+        return self
 
 
 class CounselorSessionReview(StrictModel):
@@ -612,6 +654,91 @@ class HolisticEvaluationReport(StrictModel):
     created_at: str = Field(default_factory=utc_now)
 
 
+class RFTConfig(StrictModel):
+    enabled: bool = False
+    candidates: int = Field(default=3, ge=2, le=32)
+    concurrency: int = Field(default=2, ge=1, le=32)
+    judge_concurrency: int = Field(default=2, ge=1, le=16)
+    candidate_timeout_sec: float = Field(default=1800, gt=0, allow_inf_nan=False)
+    judge_timeout_sec: float = Field(default=180, gt=0, allow_inf_nan=False)
+    min_eligible: int = Field(default=2, ge=2, le=32)
+    counselor_temperature: float = Field(default=0.9, ge=0, le=2)
+    judge_temperature: float = Field(default=0.0, ge=0, le=2)
+    counselor_weight: float = Field(default=0.7, gt=0, lt=1)
+    min_safety_score: float = Field(default=7, ge=7, le=10)
+    min_fidelity_score: float = Field(default=6, ge=0, le=10)
+
+    @model_validator(mode="after")
+    def check_candidate_budget(self) -> RFTConfig:
+        if self.min_eligible > self.candidates:
+            raise ValueError("min_eligible must not exceed candidates")
+        return self
+
+
+class RolloutEvidence(StrictModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    message_index: int = Field(ge=0)
+    quote: str = Field(min_length=1, max_length=240)
+
+
+class RolloutDimension(StrictModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    score: float = Field(ge=0, le=10, allow_inf_nan=False)
+    evidence: list[RolloutEvidence] = Field(min_length=1, max_length=3)
+    reason: str = Field(min_length=1, max_length=240)
+
+
+class RolloutAssessment(StrictModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    counselor_alliance: RolloutDimension
+    counselor_strategy: RolloutDimension
+    counselor_goal_alignment: RolloutDimension
+    counselor_safety: RolloutDimension
+    client_engagement: RolloutDimension
+    client_understanding: RolloutDimension
+    client_agency: RolloutDimension
+    simulation_fidelity: RolloutDimension
+    safety_passed: bool
+    safety_reason: str = Field(min_length=1, max_length=300)
+
+
+class RolloutReward(StrictModel):
+    total: float = Field(ge=0, le=10, allow_inf_nan=False)
+    counselor_score: float = Field(ge=0, le=10)
+    client_snapshot: dict[str, float]
+    client_delta: float | None = None
+    client_gain_score: float | None = None
+    baseline_session_index: int | None = None
+    formula_version: str = "session-rft-v1"
+
+
+class RolloutCandidateSummary(StrictModel):
+    index: int = Field(ge=1)
+    status: Literal[
+        "pending", "generating", "generated", "duplicate", "generation_failed",
+        "scoring_failed", "rejected", "eligible", "selected", "cancelled", "safety_hold",
+    ] = "pending"
+    reason: str = ""
+    dialogue_hash: str = ""
+    duplicate_of: int | None = None
+    assessment: RolloutAssessment | None = None
+    reward: RolloutReward | None = None
+    artifact_path: str
+    turns: int = 0
+
+
+class RolloutSelection(StrictModel):
+    batch_id: str
+    session_index: int = Field(ge=1)
+    status: Literal["running", "selected", "failed", "safety_hold", "cancelled"] = "running"
+    config: RFTConfig
+    baseline_client_snapshot: dict[str, float] | None = None
+    baseline_session_index: int | None = None
+    candidates: list[RolloutCandidateSummary] = Field(default_factory=list)
+    winner_index: int | None = None
+    reason: str = ""
+
+
 class SessionRecord(StrictModel):
     session_id: str
     session_index: int
@@ -633,6 +760,7 @@ class SessionRecord(StrictModel):
     client_simulation_report: ClientSimulationReport | None = None
     longitudinal_report: LongitudinalReport | None = None
     evaluation_errors: list[str] = Field(default_factory=list)
+    rollout_selection: RolloutSelection | None = None
     end_reason: str
 
 
@@ -677,9 +805,21 @@ class MemoryRecord(StrictModel):
     memory: SessionMemory
 
 
+class SkillSelectionConfig(StrictModel):
+    vector_threshold: int = Field(default=24, ge=1, le=2000)
+    vector_top_k: int = Field(default=12, ge=1, le=2000)
+
+    @model_validator(mode="after")
+    def check_vector_budget(self) -> SkillSelectionConfig:
+        if self.vector_top_k > self.vector_threshold:
+            raise ValueError("vector_top_k must not exceed vector_threshold")
+        return self
+
+
 class SandboxConfig(StrictModel):
     project_root: Path
     seed: int = 42
+    session_count: int = Field(default=3, ge=1, le=100)
     max_turns_per_session: int = Field(default=8, ge=1, le=50)
     database_path: Path | None = None
     trace_dir: Path | None = None
@@ -691,11 +831,15 @@ class SandboxConfig(StrictModel):
     patientact_enabled: bool = True
     client_pullback_after: int = Field(default=2, ge=1, le=10)
     disclosure_leak_retry_limit: int = Field(default=1, ge=0, le=3)
+    skill_selection: SkillSelectionConfig = Field(default_factory=SkillSelectionConfig)
+    rft: RFTConfig = Field(default_factory=RFTConfig)
 
     def model_post_init(self, __context: Any) -> None:
+        from ..artifacts import latest_data_dir, runtime_root
+
         if self.database_path is None:
-            self.database_path = self.project_root / "runs" / "psychsandbox.sqlite3"
+            self.database_path = runtime_root(self.project_root) / "psychsandbox.sqlite3"
         if self.trace_dir is None:
-            self.trace_dir = self.project_root / "runs"
+            self.trace_dir = runtime_root(self.project_root)
         if self.processed_dataset_dir is None:
-            self.processed_dataset_dir = self.project_root / "data" / "processed" / "psycheval"
+            self.processed_dataset_dir = latest_data_dir(self.project_root, "processed")

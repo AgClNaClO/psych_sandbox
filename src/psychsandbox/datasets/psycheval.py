@@ -970,9 +970,9 @@ class CaseRepository:
     @classmethod
     def from_project(cls, project_root: Path) -> "CaseRepository":
         """Create a repository using the checkout's canonical resource layout."""
-
+        from ..artifacts import latest_data_dir
         return cls(
-            project_root / "data" / "processed" / "psycheval",
+            latest_data_dir(project_root, "processed"),
             project_root / "assets" / "profiles",
             project_root / "data",
         )

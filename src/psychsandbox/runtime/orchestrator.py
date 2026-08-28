@@ -3,11 +3,17 @@ from __future__ import annotations
 import json
 import random
 import uuid
+import traceback
+from contextlib import ExitStack
 from collections.abc import Callable
 from pathlib import Path
 
 from ..agents.client import ClientAgent
 from ..agents.counselor import CounselorAgent
+from ..artifacts import (
+    create_artifact_dir, find_run_dir, local_temp_dir,
+    single_simulation, write_json,
+)
 from ..datasets import CaseRepository
 from ..evaluation import (
     ClientSimulationEvaluator,
@@ -16,12 +22,14 @@ from ..evaluation import (
     SupervisorAgent,
 )
 from ..client_simulation import ClientSimulator, ClientTurnInput
+from ..evaluation.rollout import SessionRolloutEvaluator
 from ..client_simulation.prompts import CLIENT_PROMPT_VERSION
 from ..domain import (
     CounselingCase,
     ClientTurnSignal,
     Message,
     RunResult,
+    RFTConfig,
     SandboxConfig,
     SessionMemory,
     SessionPlan,
@@ -33,6 +41,7 @@ from ..model_client import ModelGateway, create_gateway
 from ..skills import SkillCatalog, SkillRegistry
 from ..therapies import normalize_therapy_id
 from .disclosure import DisclosureGate
+from .run_management import available_run_dir
 from .memory import MemoryConsolidator
 from .memory_pipeline import (
     ClientMergeAgent,
@@ -43,6 +52,7 @@ from .planning import PlanBuilder
 from .safety import SafetyStateMachine
 from .state import StateUpdater
 from .storage import SQLiteStore
+from .rollout import RolloutSelectionError, SessionRolloutRunner, has_saved_rollout_risk, selected_reward
 
 
 def _therapy_codes(therapy: str) -> list[str]:
@@ -66,9 +76,8 @@ class CounselingSandbox:
         store: SQLiteStore | None = None,
     ):
         self.config = config
-        self.gateway = gateway or create_gateway(
-            diagnostic_dir=config.trace_dir / "diagnostics",
-        )
+        self.gateway = gateway or create_gateway()
+        self.run_dir: Path | None = None
         self.repository = repository or CaseRepository.from_project(
             config.project_root
         )
@@ -85,6 +94,7 @@ class CounselingSandbox:
             self.gateway,
             self.skill_catalog,
             config.temperature_counselor,
+            skill_selection=config.skill_selection,
         )
         self.supervisor = SupervisorAgent()
         self.client_evaluator = ClientSimulationEvaluator()
@@ -111,12 +121,25 @@ class CounselingSandbox:
         self,
         case_id: str,
         therapy: str | None = None,
-        session_count: int = 3,
-        seed: int = 42,
+        session_count: int | None = None,
+        seed: int | None = None,
         resume_run_id: str | None = None,
         progress_callback: Callable[[str], None] | None = None,
     ) -> RunResult:
-        random.seed(seed)
+        with single_simulation(), ExitStack() as resources:
+            if resume_run_id:
+                resources.enter_context(available_run_dir(self.config.trace_dir, resume_run_id))
+            return await self._run_case(
+                case_id, therapy, session_count, seed, resume_run_id, progress_callback, resources,
+            )
+
+    async def _run_case(
+        self, case_id, therapy, session_count, seed, resume_run_id, progress_callback,
+        resources: ExitStack,
+    ) -> RunResult:
+        session_count = session_count if session_count is not None else self.config.session_count
+        if not 1 <= session_count <= 100:
+            raise ValueError("session_count must be between 1 and 100")
         case = self.repository.get(case_id)
         selected_therapy = normalize_therapy_id(therapy) if therapy else case.therapy
         if selected_therapy != case.therapy:
@@ -124,156 +147,247 @@ class CounselingSandbox:
                 f"Case {case_id} supports {case.therapy}, not {selected_therapy}"
             )
         if resume_run_id:
-            existing = self.store.load_run(resume_run_id)
-            if existing.case_id != case_id or existing.therapy != selected_therapy:
+            existing = self.store.load_run_metadata(resume_run_id)
+            if existing["status"] == "deleting":
+                raise ValueError("Run deletion has started; resume is blocked")
+            if existing["case_id"] != case_id or existing["therapy"] != selected_therapy:
                 raise ValueError(
                     "Resume run must use the original case and therapy: "
-                    f"{existing.case_id}/{existing.therapy}"
+                    f"{existing['case_id']}/{existing['therapy']}"
                 )
+            if existing["status"] == "safety_hold":
+                raise ValueError("A safety_hold run cannot be resumed as ordinary counseling")
+            saved_dir = find_run_dir(self.config.trace_dir, resume_run_id)
+            if has_saved_rollout_risk(self.store, saved_dir, resume_run_id):
+                self.store.finish_run(resume_run_id, status="safety_hold")
+                saved_metadata = json.loads((saved_dir / "run.json").read_text(encoding="utf-8"))
+                saved_metadata["status"] = "safety_hold"
+                write_json(saved_dir / "run.json", saved_metadata)
+                raise ValueError("Saved candidate risk requires safety_hold; ordinary resume is blocked")
+            previous_rft = RFTConfig.model_validate(existing["config"].get("rft", {}))
+            if (previous_rft.enabled or self.config.rft.enabled) and previous_rft != self.config.rft:
+                raise ValueError("Resume must preserve the original RFT configuration; start a new run for comparisons")
+            if seed is not None and seed != existing["seed"]:
+                raise ValueError("Resume must preserve the original seed")
+            seed = existing["seed"]
+        seed = seed if seed is not None else self.config.seed
+        random.seed(seed)
         previous_sessions = self.store.load_sessions(resume_run_id) if resume_run_id else []
         memory = self.store.load_memory(resume_run_id) if resume_run_id else None
+        if previous_sessions and memory is None:
+            raise ValueError("Saved session is missing its committed memory")
+        if previous_sessions and previous_sessions[-1].longitudinal_report and previous_sessions[-1].longitudinal_report.stage_action == "close":
+            raise ValueError("The saved course is already closed")
         run_id = resume_run_id or f"run-{uuid.uuid4().hex[:12]}"
+        self.run_dir = (
+            find_run_dir(self.config.trace_dir, run_id)
+            if resume_run_id
+            else create_artifact_dir(self.config.trace_dir, case_id, run_id)
+        )
+        if not resume_run_id:
+            resources.enter_context(available_run_dir(self.config.trace_dir, run_id))
+        for directory in ("logs", "diagnostics", "tmp"):
+            (self.run_dir / directory).mkdir(exist_ok=True)
+        if resume_run_id:
+            self._sync_jsonl(run_id)
+        if hasattr(self.gateway, "diagnostic_dir"):
+            self.gateway.diagnostic_dir = self.run_dir / "diagnostics"
+        self.counselor.reset_run_state()
+        metadata_path = self.run_dir / "run.json"
+        metadata = (
+            json.loads(metadata_path.read_text(encoding="utf-8"))
+            if metadata_path.exists() else {}
+        )
+        metadata.update(
+            run_id=run_id, case_id=case_id, therapy=selected_therapy,
+            seed=seed, requested_sessions=session_count, status="running",
+            database=str(self.store.path.resolve()),
+            rft=self.config.rft.model_dump(mode="json"),
+            models=getattr(self.gateway, "models", {}),
+        )
+        write_json(metadata_path, metadata)
         if memory is None:
             memory = self._initial_memory(case)
+        if not resume_run_id:
             self.store.start_run(
                 run_id, case_id, selected_therapy, self.gateway.provider_name, seed,
                 self.config.model_dump(mode="json"),
             )
             self.store.save_case(case)
-        notify = progress_callback or (lambda _message: None)
+        else:
+            self.store.mark_run_running(run_id)
+        def notify(message: str) -> None:
+            with (self.run_dir / "logs" / "progress.log").open("a", encoding="utf-8") as handle:
+                handle.write(message + "\n")
+            if progress_callback:
+                progress_callback(message)
+
         notify(
             f"运行 {run_id} 已开始；案例={case_id}；"
             f"待执行 sessions={max(0, session_count - len(previous_sessions))}"
         )
+        notify(f"产物目录：{self.run_dir}")
         sessions = list(previous_sessions)
         start = len(sessions) + 1
-        try:
-            for session_index in range(start, session_count + 1):
-                notify(f"Session {session_index}/{session_count} 开始")
-                plan = self._plan_for(case, session_index, sessions)
-                memory_before = memory.model_copy(deep=True)
-                initial_state = (
-                    self.client_simulator.prepare_session_state(
-                        sessions[-1].final_state
+        with local_temp_dir(self.run_dir / "tmp"):
+            try:
+                for session_index in range(start, session_count + 1):
+                    notify(f"Session {session_index}/{session_count} 开始")
+                    plan = self._plan_for(case, session_index, sessions)
+                    memory_before = memory.model_copy(deep=True)
+                    initial_state = (
+                        self.client_simulator.prepare_session_state(
+                            sessions[-1].final_state
+                        )
+                        if sessions else case.profile.initial_state.model_copy(deep=True)
                     )
-                    if sessions else case.profile.initial_state.model_copy(deep=True)
+                    if self.config.rft.enabled:
+                        session, memory = await self._select_session(
+                            run_id, case, plan, memory, initial_state,
+                            sessions[-1] if sessions else None, notify,
+                        )
+                    else:
+                        session = await self._run_session(case, plan, memory, initial_state)
+                    report = session.supervisor_report or await self.supervisor.evaluate(
+                        session, case=case, memory_before=memory_before
+                    )
+                    session.supervisor_report = report
+                    session.client_simulation_report = await self.client_evaluator.evaluate(
+                        session
+                    )
+                    session.longitudinal_report = self.longitudinal.evaluate(
+                        session, sessions
+                    )
+                    baseline_next = self._baseline_next_plan(
+                        case, session, session_index + 1
+                    )
+                    provisional_next = self.plan_builder.build(
+                        session.plan,
+                        baseline_next,
+                        session.longitudinal_report,
+                    )
+                    session.counselor_review = await self.counselor.review_session(
+                        session=session,
+                        memory=memory,
+                        baseline_next=provisional_next,
+                    )
+                    session.next_session_plan = self.plan_builder.build(
+                        session.plan,
+                        baseline_next,
+                        session.longitudinal_report,
+                        session.counselor_review,
+                    )
+                    await self._consolidate_memory_pipeline(
+                        case, session, plan, memory
+                    )
+                    memory = self.consolidator.consolidate(
+                        memory, session, next_index=session_index + 1
+                    )
+                    trajectory = Trajectory(
+                        trajectory_id=f"traj-{uuid.uuid4().hex[:12]}",
+                        run_id=run_id,
+                        case_id=case_id,
+                        session_index=session_index,
+                        model_config_snapshot={
+                            "provider": self.gateway.provider_name,
+                            "seed": seed,
+                            "temperature_client": self.config.temperature_client,
+                            "temperature_client_planner": self.config.temperature_client_planner,
+                            "temperature_counselor": self.config.temperature_counselor,
+                            "counselor_pipeline": "evidence_vector_retry_v2",
+                            "skill_selection": self.config.skill_selection.model_dump(),
+                            "rft": self.config.rft.model_dump(),
+                            "generation_temperature_counselor": (
+                                self.config.rft.counselor_temperature if self.config.rft.enabled
+                                else self.config.temperature_counselor
+                            ),
+                            "models": getattr(self.gateway, "models", {}),
+                            "client_pipeline": (
+                                CLIENT_PROMPT_VERSION
+                                if self.config.patientact_enabled
+                                else "direct_generation_v1"
+                            ),
+                            "trace_schema_version": 4,
+                        },
+                        memory_before=memory_before,
+                        plan=plan,
+                        session=session,
+                        reward=selected_reward(session).total if selected_reward(session) else report.overall_score,
+                        safety_passed=all(
+                            metric.score >= 7
+                            for metric in report.metrics
+                            if metric.name
+                            in {"ethics_and_safety", "hidden_information_leakage"}
+                        ),
+                    )
+                    self.store.save_session(run_id, session, memory, trajectory)
+                    self._sync_jsonl(run_id)
+                    sessions.append(session)
+                    notify(
+                        f"Session {session_index}/{session_count} 完成；"
+                        f"turns={len(session.turn_records)}；督导={report.overall_score}"
+                    )
+                    if (
+                        session.end_reason == "imminent_risk"
+                        or session.longitudinal_report.stage_action == "close"
+                    ):
+                        break
+                status = (
+                    "safety_hold"
+                    if sessions and sessions[-1].end_reason == "imminent_risk"
+                    else "completed"
                 )
-                session = await self._run_session(case, plan, memory, initial_state)
-                report = await self.supervisor.evaluate(
-                    session, case=case, memory_before=memory_before
-                )
-                session.supervisor_report = report
-                session.client_simulation_report = await self.client_evaluator.evaluate(
-                    session
-                )
-                session.longitudinal_report = self.longitudinal.evaluate(
-                    session, sessions
-                )
-                baseline_next = self._baseline_next_plan(
-                    case, session, session_index + 1
-                )
-                provisional_next = self.plan_builder.build(
-                    session.plan,
-                    baseline_next,
-                    session.longitudinal_report,
-                )
-                session.counselor_review = await self.counselor.review_session(
-                    session=session,
-                    memory=memory,
-                    baseline_next=provisional_next,
-                )
-                session.next_session_plan = self.plan_builder.build(
-                    session.plan,
-                    baseline_next,
-                    session.longitudinal_report,
-                    session.counselor_review,
-                )
-                await self._consolidate_memory_pipeline(
-                    case, session, plan, memory
-                )
-                memory = self.consolidator.consolidate(
-                    memory, session, next_index=session_index + 1
-                )
-                trajectory = Trajectory(
-                    trajectory_id=f"traj-{uuid.uuid4().hex[:12]}",
+                result = RunResult(
                     run_id=run_id,
                     case_id=case_id,
-                    session_index=session_index,
-                    model_config_snapshot={
-                        "provider": self.gateway.provider_name,
-                        "seed": seed,
-                        "temperature_client": self.config.temperature_client,
-                        "temperature_client_planner": self.config.temperature_client_planner,
-                        "temperature_counselor": self.config.temperature_counselor,
-                        "counselor_pipeline": "plan_react_review_v1",
-                        "client_pipeline": (
-                            CLIENT_PROMPT_VERSION
-                            if self.config.patientact_enabled
-                            else "direct_generation_v1"
-                        ),
-                        "trace_schema_version": 3,
-                    },
-                    memory_before=memory_before,
-                    plan=plan,
-                    session=session,
-                    reward=report.overall_score,
-                    safety_passed=all(
-                        metric.score >= 7
-                        for metric in report.metrics
-                        if metric.name
-                        in {"ethics_and_safety", "hidden_information_leakage"}
-                    ),
+                    therapy=selected_therapy,
+                    seed=seed,
+                    sessions=sessions,
+                    final_memory=memory,
                 )
-                self.store.save_session(run_id, session, memory, trajectory)
-                self._append_jsonl(trajectory)
-                sessions.append(session)
-                notify(
-                    f"Session {session_index}/{session_count} 完成；"
-                    f"turns={len(session.turn_records)}；督导={report.overall_score}"
+                holistic_report = None
+                try:
+                    holistic_report = await self.holistic_supervisor.evaluate(result, case)
+                    self.store.save_holistic_report(run_id, holistic_report)
+                except Exception as exc:
+                    notify(f"整体督导评估失败：{type(exc).__name__}:{exc}")
+                result.holistic_report = holistic_report
+                self.store.finish_run(run_id, status=status)
+                (self.run_dir / "result.json").write_text(
+                    result.model_dump_json(indent=2), encoding="utf-8"
                 )
-                if (
-                    session.end_reason == "imminent_risk"
-                    or session.longitudinal_report.stage_action == "close"
-                ):
-                    break
-            status = (
-                "safety_hold"
-                if sessions and sessions[-1].end_reason == "imminent_risk"
-                else "completed"
-            )
-            result = RunResult(
-                run_id=run_id,
-                case_id=case_id,
-                therapy=selected_therapy,
-                seed=seed,
-                sessions=sessions,
-                final_memory=memory,
-            )
-            holistic_report = None
-            try:
-                holistic_report = await self.holistic_supervisor.evaluate(result, case)
-                self.store.save_holistic_report(run_id, holistic_report)
-            except Exception as exc:
-                notify(f"整体督导评估失败：{type(exc).__name__}:{exc}")
-            result.holistic_report = holistic_report
-            self.store.finish_run(run_id, status=status)
-            notify(f"运行 {run_id} 已结束；状态={status}")
-            return result
-        except BaseException:
-            self.store.finish_run(run_id, status="failed")
-            notify(f"运行 {run_id} 失败；状态已记录为 failed")
-            raise
+                metadata.update(status=status, completed_sessions=len(sessions))
+                write_json(metadata_path, metadata)
+                notify(f"运行 {run_id} 已结束；状态={status}")
+                return result
+            except BaseException as exc:
+                failed_status = (
+                    "safety_hold" if isinstance(exc, RolloutSelectionError)
+                    and exc.selection.status == "safety_hold" else "failed"
+                )
+                self.store.finish_run(run_id, status=failed_status)
+                with (self.run_dir / "logs" / "errors.log").open("a", encoding="utf-8") as handle:
+                    handle.write(traceback.format_exc() + "\n")
+                metadata.update(status=failed_status, completed_sessions=len(sessions))
+                write_json(metadata_path, metadata)
+                notify(f"运行 {run_id} 失败；状态已记录为 {failed_status}")
+                raise
 
     async def _run_session(
-        self, case: CounselingCase, plan: SessionPlan, memory: SessionMemory, state
+        self, case: CounselingCase, plan: SessionPlan, memory: SessionMemory, state,
+        *, counselor: CounselorAgent | None = None,
+        client_simulator: ClientSimulator | None = None,
+        checkpoint: Callable[[dict], None] | None = None,
     ) -> SessionRecord:
+        counselor = counselor or self.counselor
+        client_simulator = client_simulator or self.client_simulator
         initial = state.model_copy(deep=True)
         messages = [
             Message(
                 session_index=plan.session_index,
                 turn_index=0,
                 role="client",
-                content=self.client_simulator.start_session(
+                content=client_simulator.start_session(
                     case.profile, memory, plan.session_index
                 ),
             )
@@ -281,12 +395,23 @@ class CounselingSandbox:
         decisions, risks, interventions, new_fact_ids, turn_records = [], [], [], [], []
         recent_signals: list[ClientTurnSignal] = []
         end_reason = "max_turns"
+
+        def save_progress() -> None:
+            if checkpoint:
+                checkpoint({
+                    "messages": [m.model_dump(mode="json") for m in messages],
+                    "decisions": [d.model_dump(mode="json") for d in decisions],
+                    "turn_records": list(turn_records),
+                    "state": state.model_dump(mode="json"),
+                })
+
+        save_progress()
         for turn_index in range(1, self.config.max_turns_per_session + 1):
             client_text = messages[-1].content
             risk = self.safety.assess_input(client_text)
             risks.append(risk)
             state_before = state.model_dump(mode="json")
-            counselor_turn = await self.counselor.respond(
+            counselor_turn = await counselor.respond(
                 memory=memory,
                 plan=plan,
                 client_message=client_text,
@@ -306,6 +431,7 @@ class CounselingSandbox:
                 role="counselor",
                 content=counselor_turn.response,
             ))
+            save_progress()
             if risk.requires_immediate_stop or output_risk.requires_immediate_stop:
                 turn_records.append({
                     "turn_index": turn_index,
@@ -313,6 +439,7 @@ class CounselingSandbox:
                     "planning": counselor_turn.planning.model_dump(mode="json"),
                     "observation": counselor_turn.observation.model_dump(mode="json"),
                     "decision": counselor_turn.decision.model_dump(mode="json"),
+                    "skill_queries": [item.model_dump(mode="json") for item in counselor_turn.skill_queries],
                     "input_safety": risk.model_dump(mode="json"),
                     "output_safety": output_risk.model_dump(mode="json"),
                     "state_before": state_before,
@@ -320,8 +447,9 @@ class CounselingSandbox:
                     "state_update": {"rule_delta": {}, "model_signal_delta": {}},
                 })
                 end_reason = "imminent_risk" if risk.requires_immediate_stop else "safety_output_block"
+                save_progress()
                 break
-            client_turn = await self.client_simulator.respond(
+            client_turn = await client_simulator.respond(
                 ClientTurnInput(
                     profile=case.profile,
                     state=state,
@@ -338,7 +466,7 @@ class CounselingSandbox:
             signal = client_turn.signal
             client_generation = client_turn.generation
             leakage = client_turn.leakage
-            memory.unlocked_profile.facts = self.client_simulator.merge_unlocked(
+            memory.unlocked_profile.facts = client_simulator.merge_unlocked(
                 memory.unlocked_profile.facts, client_turn.newly_unlocked
             )
             new_fact_ids.extend(
@@ -359,6 +487,7 @@ class CounselingSandbox:
                 "planning": counselor_turn.planning.model_dump(mode="json"),
                 "observation": counselor_turn.observation.model_dump(mode="json"),
                 "decision": counselor_turn.decision.model_dump(mode="json"),
+                "skill_queries": [item.model_dump(mode="json") for item in counselor_turn.skill_queries],
                 "disclosure_decision": disclosure.model_dump(mode="json"),
                 "client_turn_signal": signal.model_dump(mode="json"),
                 "client_generation": client_generation.model_dump(mode="json"),
@@ -372,6 +501,7 @@ class CounselingSandbox:
                 "state_after": state.model_dump(mode="json"),
                 "state_update": state_delta,
             })
+            save_progress()
             if counselor_turn.decision.end_session:
                 end_reason = "counselor_goal_complete"
                 break
@@ -390,6 +520,39 @@ class CounselingSandbox:
             interventions_used=list(dict.fromkeys(interventions)),
             risk_events=risks,
             end_reason=end_reason,
+        )
+
+    async def _select_session(self, run_id, case, plan, memory, initial_state, previous, notify):
+        async def generate(index, branch_memory, branch_state, checkpoint):
+            # Workers do not construct Sandboxes or write formal sessions.
+            counselor = CounselorAgent(
+                self.gateway, self.skill_catalog, self.config.rft.counselor_temperature,
+                skill_selection=self.config.skill_selection,
+            )
+            client = ClientAgent(
+                self.gateway, self.config.temperature_client,
+                planning_temperature=self.config.temperature_client_planner,
+                pullback_after=self.config.client_pullback_after,
+                leak_retry_limit=self.config.disclosure_leak_retry_limit,
+            )
+            simulator = ClientSimulator(client, DisclosureGate(), StateUpdater())
+            branch_case = case.model_copy(deep=True)
+            session = await self._run_session(
+                branch_case, plan.model_copy(deep=True), branch_memory, branch_state,
+                counselor=counselor, client_simulator=simulator, checkpoint=checkpoint,
+            )
+            session.supervisor_report = await self.supervisor.evaluate(
+                session, case=branch_case, memory_before=memory,
+            )
+            return session
+
+        runner = SessionRolloutRunner(
+            self.config.rft, SessionRolloutEvaluator(self.gateway, self.config.rft),
+            self.store, self.run_dir,
+        )
+        return await runner.run(
+            run_id=run_id, plan=plan, memory=memory, state=initial_state,
+            previous=previous, generate=generate, notify=notify,
         )
 
     @staticmethod
@@ -478,8 +641,11 @@ class CounselingSandbox:
             therapy_codes,
         )
 
-    def _append_jsonl(self, trajectory: Trajectory) -> None:
-        path = Path(self.config.trace_dir) / f"{trajectory.run_id}.jsonl"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(trajectory.model_dump_json() + "\n")
+    def _sync_jsonl(self, run_id: str) -> None:
+        """SQLite is authoritative if interruption happened between commit and export."""
+        path = self.run_dir / "trajectory.jsonl"
+        temporary = self.run_dir / "tmp" / f"t-{uuid.uuid4().hex[:12]}.jsonl"
+        with temporary.open("w", encoding="utf-8") as handle:
+            for row in self.store.trajectory_rows(run_id):
+                handle.write(row + "\n")
+        temporary.replace(path)

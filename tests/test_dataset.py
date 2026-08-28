@@ -13,6 +13,34 @@ def test_official_case_count(repository):
     assert len(repository.list("cbt")) == 148
 
 
+def test_cli_conversion_retains_each_invocation_and_latest_success(root, tmp_path, monkeypatch):
+    import json
+    from psychsandbox import cli
+    from psychsandbox.artifacts import latest_data_dir
+
+    base = tmp_path / "artifacts"
+    monkeypatch.setenv("PSYCHSANDBOX_RUNTIME_DIR", str(base))
+    args = cli.build_parser().parse_args(["data", "convert", "--therapy", "bt"])
+    cli._data(args, root)
+    first = latest_data_dir(root, "processed")
+    first_manifest = (first / "manifest.json").read_bytes()
+    cli._data(args, root)
+    second = latest_data_dir(root, "processed")
+    assert second != first
+    assert (first / "manifest.json").read_bytes() == first_manifest
+    assert (second / "all.jsonl").exists()
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("conversion failed")
+
+    monkeypatch.setattr(cli, "convert_psycheval", fail)
+    with pytest.raises(RuntimeError, match="conversion failed"):
+        cli._data(args, root)
+    assert latest_data_dir(root, "processed") == second
+    statuses = [json.loads(path.read_text(encoding="utf-8"))["status"] for path in base.glob("*/run.json")]
+    assert sorted(statuses) == ["completed", "completed", "failed"]
+
+
 @pytest.mark.parametrize(
     ("therapy_code", "expected_count"),
     [("bt", 43), ("cbt", 148), ("het", 50), ("pdt", 50), ("pmt", 50)],

@@ -7,6 +7,7 @@ from pathlib import Path
 from ..domain import (
     HolisticEvaluationReport,
     RunResult,
+    RolloutSelection,
     SessionMemory,
     SessionRecord,
     Trajectory,
@@ -58,6 +59,14 @@ CREATE TABLE IF NOT EXISTS holistic_evaluations (
 CREATE TABLE IF NOT EXISTS skills (
   skill_id TEXT PRIMARY KEY, skill_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS rollout_batches (
+  batch_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, session_index INTEGER NOT NULL,
+  selection_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS rollout_candidates (
+  batch_id TEXT NOT NULL, candidate_index INTEGER NOT NULL, candidate_json TEXT NOT NULL,
+  PRIMARY KEY(batch_id, candidate_index)
+);
 CREATE TABLE IF NOT EXISTS skill_versions (
   skill_id TEXT NOT NULL, version TEXT NOT NULL, version_json TEXT NOT NULL,
   PRIMARY KEY(skill_id, version)
@@ -95,12 +104,46 @@ class SQLiteStore:
         )
         self.connection.commit()
 
+    def save_rollout_batch(self, run_id: str, selection: RolloutSelection) -> None:
+        with self.connection:
+            self.connection.execute(
+                "INSERT OR REPLACE INTO rollout_batches VALUES (?,?,?,?)",
+                (selection.batch_id, run_id, selection.session_index, selection.model_dump_json()),
+            )
+
+    def save_rollout_candidate(self, batch_id: str, index: int, payload: dict) -> None:
+        with self.connection:
+            self.connection.execute(
+                "INSERT OR REPLACE INTO rollout_candidates VALUES (?,?,?)",
+                (batch_id, index, _json(payload)),
+            )
+
+    def load_rollout_batches(self, run_id: str) -> list[RolloutSelection]:
+        rows = self.connection.execute(
+            "SELECT selection_json FROM rollout_batches WHERE run_id=? ORDER BY session_index,rowid",
+            (run_id,),
+        ).fetchall()
+        return [RolloutSelection.model_validate_json(row[0]) for row in rows]
+
+    def load_rollout_candidates(self, batch_id: str) -> list[dict]:
+        rows = self.connection.execute(
+            "SELECT candidate_json FROM rollout_candidates WHERE batch_id=? ORDER BY candidate_index",
+            (batch_id,),
+        ).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
     def save_session(
         self, run_id: str, session: SessionRecord, memory: SessionMemory, trajectory: Trajectory
     ) -> None:
         with self.connection:
+            # Candidates never use this table; a committed boundary cannot be replaced.
+            last_index = self.connection.execute(
+                "SELECT COALESCE(MAX(session_index),0) FROM sessions WHERE run_id=?", (run_id,),
+            ).fetchone()[0]
+            if session.session_index != last_index + 1:
+                raise ValueError("Session commit must advance exactly one boundary; resume from the latest saved session")
             self.connection.execute(
-                "INSERT OR REPLACE INTO sessions VALUES (?,?,?,?)",
+                "INSERT INTO sessions VALUES (?,?,?,?)",
                 (session.session_id, run_id, session.session_index, session.model_dump_json()),
             )
             for message in session.messages:
@@ -145,6 +188,8 @@ class SQLiteStore:
                     trajectory.model_dump_json(),
                 ),
             )
+            # A report for the old course must not survive a newly committed session.
+            self.connection.execute("DELETE FROM holistic_evaluations WHERE run_id=?", (run_id,))
 
     def finish_run(self, run_id: str, *, status: str = "completed") -> None:
         self.connection.execute(
@@ -152,6 +197,28 @@ class SQLiteStore:
             (status, utc_now(), run_id),
         )
         self.connection.commit()
+
+    def mark_run_running(self, run_id: str) -> None:
+        with self.connection:
+            self.connection.execute(
+                "UPDATE experiment_runs SET status='running', completed_at=NULL WHERE run_id=?", (run_id,),
+            )
+
+    def load_run_metadata(self, run_id: str) -> dict:
+        row = self.connection.execute(
+            "SELECT * FROM experiment_runs WHERE run_id=?", (run_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(run_id)
+        metadata = dict(row)
+        metadata["config"] = json.loads(metadata.pop("config_json"))
+        return metadata
+
+    def trajectory_rows(self, run_id: str) -> list[str]:
+        return [row[0] for row in self.connection.execute(
+            "SELECT trajectory_json FROM trajectories WHERE run_id=? ORDER BY session_index",
+            (run_id,),
+        ).fetchall()]
 
     def save_holistic_report(
         self, run_id: str, report: HolisticEvaluationReport
