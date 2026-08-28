@@ -1,7 +1,6 @@
 # Phase 1 代码结构与数据流
 
-本文描述当前最小可运行沙盒。BT、CBT、HET、PDT、PMT 五流派共用运行时，但保留各自病例、
-技能树、概念化焦点和专属评测。参数训练、技能自动进化和临床验证尚未完成。
+本文描述当前最小可运行沙盒。BT、CBT、HET、PDT、PMT 五流派共用运行时，但保留各自病例、技能树、概念化焦点和专属评测。参数训练、技能自动进化和临床验证尚未完成。
 
 ## 模块边界
 
@@ -49,13 +48,9 @@
   → SQLite 正式提交 + JSONL 同步；CLI 完成后生成 HTML
 ```
 
-规则评测用于审计与安全证据，不直接驱动下一计划。一个 case 的全部 session 完成后，
-`PsychEvalSupervisor` 才使用 `prompts/eval` 中代码映射到的 46 个量表文件做一次整体
-Counselor-Level/Client-Level 评分；该评分同样不回写计划。
+规则评测用于审计与安全证据，不直接驱动下一计划。一个 case 的全部 session 完成后， `PsychEvalSupervisor` 才使用 `prompts/eval` 中代码映射到的 46 个量表文件做一次整体 Counselor-Level/Client-Level 评分；该评分同样不回写计划。
 
-RFT 默认关闭，启用后默认 3 条候选；候选以整场会谈为单位，不是单轮回复候选。候选失败、重复或落选时只留在独立
-审计存储；少于两个不同且合格候选则失败，任何候选出现即时风险则整批暂停。选优后仍须完成
-会后处理与正式提交，才能成为下一场基线。评分公式、并发和恢复见 [会谈 RFT](SESSION_RFT.md)。
+RFT 默认关闭，启用后默认 3 条候选；候选以整场会谈为单位，不是单轮回复候选。候选失败、重复或落选时只留在独立审计存储；少于两个不同且合格候选则失败，任何候选出现即时风险则整批暂停。选优后仍须完成会后处理与正式提交，才能成为下一场基线。评分公式、并发和恢复见 [会谈 RFT](SESSION_RFT.md)。
 
 ## 资源边界
 
@@ -63,16 +58,10 @@ RFT 默认关闭，启用后默认 3 条候选；候选以整场会谈为单位�
 - 技能树：`assets/skills/sect/`，677 个元技能、4481 个原子技能。
 - `assets/profiles` 是保留的 sample/rft 参考资产，当前病例仓库不递归加载。
 - `data/integrative` 是未注册的保留资源，不出现在可运行 case 列表。
-- `prompts/` 共有 56 个提示词资产，其中 55 个有调用点：46 个整体督导量表、8 个普通生成模板，
-  加上仅开启 RFT 时使用的 `rft/session_judge.jinja2`。生成/评分提示词以 Jinja2
-  模板存放，由具体 agent 构造输入字典并调用 `psychsandbox/prompts.py::render_prompt`，
-  结构化输出按 Pydantic schema 解析。额外的 `client/dialogue.jinja2` 是参考资产，没有生产调用点。
+- `prompts/` 共有 56 个提示词资产，其中 55 个有调用点：46 个整体督导量表、8 个普通生成模板，加上仅开启 RFT 时使用的 `rft/session_judge.jinja2`。生成/评分提示词以 Jinja2 模板存放，由具体 agent 构造输入字典并调用 `psychsandbox/prompts.py::render_prompt`，结构化输出按 Pydantic schema 解析。额外的 `client/dialogue.jinja2` 是参考资产，没有生产调用点。
 
-CLI 经 `default_config(root)` 加载 `configs/runtime.yaml` 后应用显式命令行参数。
-本机路径已迁至 `D:\0test\psych_sandbox`；测试/运行仍按次写入 `runs/tests` 与 `runs/runtime`，
-虚拟环境的可编辑安装需要在新位置重新安装，见 [README](../README.md)。
+CLI 经 `default_config(root)` 加载 `configs/runtime.yaml` 后应用显式命令行参数。本机路径已迁至 `D:\0test\psych_sandbox`；测试/运行仍按次写入 `runs/tests` 与 `runs/runtime`，虚拟环境的可编辑安装需要在新位置重新安装，见 [README](../README.md)。
 
 ## 流派扩展边界
 
-EFT 或 integrative 必须同时具备独立病例、三阶段技能树、`TherapyProfile`、流派专属量表和
-心理学背景复核后才能注册；不能通过重命名 HET、BT 或 PMT 代替。
+EFT 或 integrative 必须同时具备独立病例、三阶段技能树、`TherapyProfile`、流派专属量表和心理学背景复核后才能注册；不能通过重命名 HET、BT 或 PMT 代替。

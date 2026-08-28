@@ -190,13 +190,66 @@ def test_failed_or_rejected_candidate_never_wins(setup, failure):
             session.turn_records[0]["client_leakage"] = {"exposed_to_counselor": True}
         return session
 
-    session, _ = asyncio.run(run(runner_for(setup, judge, candidate_timeout_sec=0.05), setup, generate))
+    session, _ = asyncio.run(run(runner_for(setup, judge, candidate_timeout_sec=0.05, resample_limit=0), setup, generate))
     assert session.rollout_selection.winner_index == 2
     failed = session.rollout_selection.candidates[-1]
     assert failed.reward is None
     assert failed.status in {"rejected", "generation_failed", "scoring_failed"}
     records = setup[-2].load_rollout_candidates(session.rollout_selection.batch_id)
     assert records[-1]["partial"] == {"prefix": "already saved"}
+
+
+def test_generation_failure_is_resampled_and_replacement_can_win(setup):
+    _, _, plan, _, _, _ = setup
+    judge = Judge()
+
+    async def generate(index, memory, state, checkpoint):
+        if index == 3:
+            raise RuntimeError("Connection error.")
+        return session_for(index, plan, state)
+
+    session, _ = asyncio.run(run(runner_for(setup, judge, resample_limit=2), setup, generate))
+    selection = session.rollout_selection
+    assert selection.candidates[2].status == "generation_failed"
+    assert selection.winner_index == 4
+    assert selection.candidates[3].status == "selected"
+
+
+def test_resample_is_bounded_by_limit(setup):
+    _, _, plan, _, _, _ = setup
+    judge = Judge()
+    attempts = []
+
+    async def generate(index, memory, state, checkpoint):
+        attempts.append(index)
+        raise RuntimeError("always fails")
+
+    with pytest.raises(RolloutSelectionError) as error:
+        asyncio.run(run(runner_for(setup, judge, resample_limit=2), setup, generate))
+    assert sorted(attempts) == [1, 2, 3, 4, 5]
+    assert len(error.value.selection.candidates) == 5
+    assert all(c.status == "generation_failed" for c in error.value.selection.candidates)
+
+
+def test_judge_validation_failure_is_retried(setup):
+    _, _, plan, _, _, _ = setup
+    judge = Judge()
+    attempts = {}
+
+    async def evaluate(session, memory):
+        index = int(session.session_id.split("-")[-1])
+        attempts[index] = attempts.get(index, 0) + 1
+        if index == 3 and attempts[index] == 1:
+            raise ValueError("quote is not an exact source substring")
+        return assessment_for(session, 5 + index)
+    judge.evaluate = evaluate
+
+    async def generate(index, memory, state, checkpoint):
+        return session_for(index, plan, state)
+
+    session, _ = asyncio.run(run(runner_for(setup, judge, judge_retries=1), setup, generate))
+    assert session.rollout_selection.winner_index == 3
+    assert attempts[3] == 2
 
 
 def test_any_immediate_risk_holds_entire_batch_including_final_client_message(setup):

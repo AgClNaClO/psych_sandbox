@@ -38,6 +38,7 @@ class _Candidate:
     state: ClientState
     session: SessionRecord | None = None
     partial: dict[str, Any] = field(default_factory=dict)
+    replaced: bool = False
 
 
 def _has_immediate_risk(messages: list[dict]) -> bool:
@@ -106,13 +107,6 @@ class SessionRolloutRunner:
             baseline_session_index=previous.session_index if baseline else None,
         )
         candidates = []
-        for index in range(1, self.config.candidates + 1):
-            path = directory / f"candidate-{index:03d}.json"
-            summary = RolloutCandidateSummary(
-                index=index, artifact_path=path.relative_to(self.run_dir).as_posix(),
-            )
-            selection.candidates.append(summary)
-            candidates.append(_Candidate(summary, memory.model_copy(deep=True), state.model_copy(deep=True)))
 
         def save_batch() -> None:
             write_json(directory / "selection.json", selection.model_dump(mode="json"))
@@ -129,12 +123,26 @@ class SessionRolloutRunner:
             write_json(self.run_dir / candidate.summary.artifact_path, payload)
             self.store.save_rollout_candidate(batch_id, candidate.summary.index, payload)
 
+        def make_candidate(index: int) -> _Candidate:
+            path = directory / f"candidate-{index:03d}.json"
+            summary = RolloutCandidateSummary(
+                index=index, artifact_path=path.relative_to(self.run_dir).as_posix(),
+            )
+            candidate = _Candidate(
+                summary, memory.model_copy(deep=True), state.model_copy(deep=True),
+            )
+            candidates.append(candidate)
+            selection.candidates.append(summary)
+            return candidate
+
         write_json(directory / "input.json", {
             "plan": plan.model_dump(mode="json"), "memory_before": memory.model_dump(mode="json"),
             "initial_state": state.model_dump(mode="json"), "config": self.config.model_dump(mode="json"),
             "baseline_reward": baseline.model_dump(mode="json") if baseline else None,
             "sampling": "same initial context; independent API draws; no per-branch remote seed guarantee",
         })
+        for index in range(1, self.config.candidates + 1):
+            make_candidate(index)
         save_batch()
         for candidate in candidates:
             save_candidate(candidate)
@@ -191,9 +199,21 @@ class SessionRolloutRunner:
                 async with judge_limit:
                     notify(f"Session {plan.session_index} 候选 {candidate.summary.index}: 开始评分")
                     diagnostics = directory / f"d{candidate.summary.index:03d}"
-                    with model_diagnostic_scope(diagnostics):
-                        async with asyncio.timeout(self.config.judge_timeout_sec):
-                            assessment = await self.evaluator.evaluate(candidate.session, memory)
+                    attempt = 0
+                    while True:
+                        try:
+                            with model_diagnostic_scope(diagnostics):
+                                async with asyncio.timeout(self.config.judge_timeout_sec):
+                                    assessment = await self.evaluator.evaluate(candidate.session, memory)
+                            break
+                        except ValueError:
+                            if attempt >= self.config.judge_retries:
+                                raise
+                            attempt += 1
+                            notify(
+                                f"Session {plan.session_index} 候选 {candidate.summary.index}: "
+                                f"评分校验失败，第 {attempt}/{self.config.judge_retries} 次重试"
+                            )
                     candidate.summary.assessment = assessment
                     if not assessment.safety_passed or assessment.counselor_safety.score < self.config.min_safety_score:
                         candidate.summary.status = "rejected"
@@ -220,8 +240,7 @@ class SessionRolloutRunner:
 
                 notify(f"Session {plan.session_index} 候选 {candidate.summary.index}: {candidate.summary.status}")
 
-        try:
-            await _gather_and_drain([sample(candidate) for candidate in candidates])
+        def hold_if_crisis() -> None:
             # An immediate risk anywhere cannot be sampled away by choosing a calmer branch.
             crisis = []
             for candidate in candidates:
@@ -239,6 +258,27 @@ class SessionRolloutRunner:
                 selection.status = "safety_hold"
                 selection.reason = "候选中出现即时风险，全部留档并暂停，不推进记忆"
                 raise RolloutSelectionError(selection)
+
+        try:
+            await _gather_and_drain([sample(candidate) for candidate in candidates])
+            hold_if_crisis()
+
+            # Resample candidates whose generation failed (e.g. transient API errors)
+            # so a single network blip does not sink the whole batch.
+            resampled = 0
+            while resampled < self.config.resample_limit:
+                failed = [c for c in candidates if c.summary.status == "generation_failed" and not c.replaced]
+                if not failed:
+                    break
+                failed[0].replaced = True
+                replacement = make_candidate(len(candidates) + 1)
+                save_candidate(replacement)
+                save_batch()
+                notify(f"Session {plan.session_index} 补采候选 {replacement.summary.index}（替换候选 {failed[0].summary.index}）")
+                await _gather_and_drain([sample(replacement)])
+                resampled += 1
+            if resampled:
+                hold_if_crisis()
 
             seen: dict[str, int] = {}
             for candidate in candidates:

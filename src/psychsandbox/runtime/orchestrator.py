@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import random
+import time
 import uuid
 import traceback
 from contextlib import ExitStack
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from ..agents.client import ClientAgent
@@ -64,6 +66,47 @@ def _therapy_codes(therapy: str) -> list[str]:
         "psychodynamic": "pdt",
         "postmodern": "pmt",
     }[normalize_therapy_id(therapy)]]
+
+
+def _format_duration(seconds: float) -> str:
+    """Format an elapsed duration as a short, human-readable Chinese label."""
+    seconds = max(0.0, seconds)
+    if seconds < 60:
+        return f"{seconds:.1f}秒"
+    minutes, sec = divmod(int(round(seconds)), 60)
+    if minutes < 60:
+        return f"{minutes}分{sec:02d}秒"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}时{minutes:02d}分"
+
+
+@dataclass(frozen=True)
+class TurnProgress:
+    """One in-session progress tick for a live progress bar."""
+
+    session_index: int
+    turn_index: int
+    total_turns: int
+    elapsed: float
+    eta: float
+    label: str = ""
+
+    def render(self) -> str:
+        total = max(1, self.total_turns)
+        ratio = min(1.0, max(0.0, self.turn_index / total))
+        filled = int(round(ratio * 20))
+        bar = "█" * filled + "░" * (20 - filled)
+        percent = int(round(ratio * 100))
+        eta = "—" if self.turn_index <= 0 else _format_duration(self.eta)
+        if self.turn_index >= self.total_turns:
+            eta = "无"
+        prefix = f"Session {self.session_index}"
+        if self.label:
+            prefix += f" 候选 {self.label}"
+        return (
+            f"{prefix} [{bar}] {percent:3d}%  "
+            f"已用 {_format_duration(self.elapsed)}  预计剩余 {eta}"
+        )
 
 
 class CounselingSandbox:
@@ -125,17 +168,18 @@ class CounselingSandbox:
         seed: int | None = None,
         resume_run_id: str | None = None,
         progress_callback: Callable[[str], None] | None = None,
+        turn_progress: Callable[[TurnProgress | None], None] | None = None,
     ) -> RunResult:
         with single_simulation(), ExitStack() as resources:
             if resume_run_id:
                 resources.enter_context(available_run_dir(self.config.trace_dir, resume_run_id))
             return await self._run_case(
-                case_id, therapy, session_count, seed, resume_run_id, progress_callback, resources,
+                case_id, therapy, session_count, seed, resume_run_id, progress_callback, turn_progress, resources,
             )
 
     async def _run_case(
         self, case_id, therapy, session_count, seed, resume_run_id, progress_callback,
-        resources: ExitStack,
+        turn_progress, resources: ExitStack,
     ) -> RunResult:
         session_count = session_count if session_count is not None else self.config.session_count
         if not 1 <= session_count <= 100:
@@ -229,6 +273,7 @@ class CounselingSandbox:
         notify(f"产物目录：{self.run_dir}")
         sessions = list(previous_sessions)
         start = len(sessions) + 1
+        run_started_at = time.monotonic()
         with local_temp_dir(self.run_dir / "tmp"):
             try:
                 for session_index in range(start, session_count + 1):
@@ -244,10 +289,14 @@ class CounselingSandbox:
                     if self.config.rft.enabled:
                         session, memory = await self._select_session(
                             run_id, case, plan, memory, initial_state,
-                            sessions[-1] if sessions else None, notify,
+                            sessions[-1] if sessions else None, notify, turn_progress,
                         )
+                        if turn_progress:
+                            turn_progress(None)
                     else:
-                        session = await self._run_session(case, plan, memory, initial_state)
+                        session = await self._run_session(
+                            case, plan, memory, initial_state, turn_progress=turn_progress
+                        )
                     report = session.supervisor_report or await self.supervisor.evaluate(
                         session, case=case, memory_before=memory_before
                     )
@@ -323,9 +372,15 @@ class CounselingSandbox:
                     self.store.save_session(run_id, session, memory, trajectory)
                     self._sync_jsonl(run_id)
                     sessions.append(session)
+                    elapsed = time.monotonic() - run_started_at
+                    completed = session_index - start + 1
+                    remaining = session_count - session_index
+                    eta = (elapsed / completed) * remaining if remaining > 0 else 0.0
                     notify(
                         f"Session {session_index}/{session_count} 完成；"
-                        f"turns={len(session.turn_records)}；督导={report.overall_score}"
+                        f"turns={len(session.turn_records)}；督导={report.overall_score}；"
+                        f"已用时间={_format_duration(elapsed)}；"
+                        f"预计剩余={_format_duration(eta) if remaining > 0 else '无'}"
                     )
                     if (
                         session.end_reason == "imminent_risk"
@@ -378,10 +433,13 @@ class CounselingSandbox:
         *, counselor: CounselorAgent | None = None,
         client_simulator: ClientSimulator | None = None,
         checkpoint: Callable[[dict], None] | None = None,
+        turn_progress: Callable[[TurnProgress | None], None] | None = None,
+        progress_label: str = "",
     ) -> SessionRecord:
         counselor = counselor or self.counselor
         client_simulator = client_simulator or self.client_simulator
         initial = state.model_copy(deep=True)
+        session_started_at = time.monotonic()
         messages = [
             Message(
                 session_index=plan.session_index,
@@ -406,6 +464,15 @@ class CounselingSandbox:
                 })
 
         save_progress()
+        if turn_progress:
+            turn_progress(TurnProgress(
+                session_index=plan.session_index,
+                turn_index=0,
+                total_turns=self.config.max_turns_per_session,
+                elapsed=0.0,
+                eta=0.0,
+                label=progress_label,
+            ))
         for turn_index in range(1, self.config.max_turns_per_session + 1):
             client_text = messages[-1].content
             risk = self.safety.assess_input(client_text)
@@ -502,10 +569,24 @@ class CounselingSandbox:
                 "state_update": state_delta,
             })
             save_progress()
+            if turn_progress:
+                elapsed = time.monotonic() - session_started_at
+                remaining = self.config.max_turns_per_session - turn_index
+                eta = (elapsed / turn_index) * remaining if remaining > 0 else 0.0
+                turn_progress(TurnProgress(
+                    session_index=plan.session_index,
+                    turn_index=turn_index,
+                    total_turns=self.config.max_turns_per_session,
+                    elapsed=elapsed,
+                    eta=eta,
+                    label=progress_label,
+                ))
             if counselor_turn.decision.end_session:
                 end_reason = "counselor_goal_complete"
                 break
         summary = self._summary(plan, messages, interventions)
+        if turn_progress:
+            turn_progress(None)
         return SessionRecord(
             session_id=f"session-{uuid.uuid4().hex[:12]}",
             session_index=plan.session_index,
@@ -522,8 +603,14 @@ class CounselingSandbox:
             end_reason=end_reason,
         )
 
-    async def _select_session(self, run_id, case, plan, memory, initial_state, previous, notify):
+    async def _select_session(self, run_id, case, plan, memory, initial_state, previous, notify, turn_progress):
         async def generate(index, branch_memory, branch_state, checkpoint):
+            # Forward per-candidate ticks, but swallow the session-end None so a
+            # finishing candidate does not detach other candidates' live bars.
+            def candidate_progress(progress):
+                if progress is not None and turn_progress:
+                    turn_progress(progress)
+
             # Workers do not construct Sandboxes or write formal sessions.
             counselor = CounselorAgent(
                 self.gateway, self.skill_catalog, self.config.rft.counselor_temperature,
@@ -540,6 +627,8 @@ class CounselingSandbox:
             session = await self._run_session(
                 branch_case, plan.model_copy(deep=True), branch_memory, branch_state,
                 counselor=counselor, client_simulator=simulator, checkpoint=checkpoint,
+                turn_progress=candidate_progress if turn_progress else None,
+                progress_label=str(index),
             )
             session.supervisor_report = await self.supervisor.evaluate(
                 session, case=branch_case, memory_before=memory,

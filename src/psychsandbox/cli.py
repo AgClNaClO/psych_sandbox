@@ -109,9 +109,63 @@ def _config(args: argparse.Namespace) -> SandboxConfig:
     return SandboxConfig.model_validate(values)
 
 
+class _ProgressRenderer:
+    """Print line messages and draw live progress bars without interleaving.
+
+    Progress bars form a block of lines anchored at the bottom of the terminal;
+    regular line messages are inserted above that block. Uses ANSI cursor
+    control, and degrades to plain printing when stdout is not a terminal.
+    """
+
+    def __init__(self) -> None:
+        self._entries: dict[str, str] = {}
+        self._order: list[str] = []
+        self._tty = bool(getattr(sys.stdout, "isatty", lambda: False)())
+
+    def line(self, message: str) -> None:
+        if not self._tty:
+            print(message, flush=True)
+            return
+        n = len(self._order)
+        if n:
+            sys.stdout.write(f"\x1b[{n}A\r")
+        sys.stdout.write(message + "\x1b[K\n")
+        for key in self._order:
+            sys.stdout.write("\r" + self._entries[key] + "\x1b[K\n")
+        sys.stdout.flush()
+
+    def progress(self, progress) -> None:
+        if progress is None:
+            self._entries.clear()
+            self._order.clear()
+            return
+        if not self._tty:
+            return
+        key = progress.label
+        text = progress.render()
+        if key not in self._entries:
+            self._order.append(key)
+            self._entries[key] = text
+            sys.stdout.write("\r" + text + "\x1b[K\n")
+            sys.stdout.flush()
+            return
+        self._entries[key] = text
+        self._redraw()
+
+    def _redraw(self) -> None:
+        n = len(self._order)
+        if n == 0:
+            return
+        sys.stdout.write(f"\x1b[{n}A\r")
+        for key in self._order:
+            sys.stdout.write("\r" + self._entries[key] + "\x1b[K\n")
+        sys.stdout.flush()
+
+
 async def _simulate(args: argparse.Namespace) -> int:
     config = _config(args)
     sandbox = CounselingSandbox(config)
+    renderer = _ProgressRenderer()
     try:
         result = await sandbox.run_case(
             args.case,
@@ -119,11 +173,8 @@ async def _simulate(args: argparse.Namespace) -> int:
             session_count=config.session_count,
             seed=None if args.resume_run and args.seed is None else config.seed,
             resume_run_id=args.resume_run,
-            progress_callback=(
-                None
-                if args.json
-                else lambda message: print(message, flush=True)
-            ),
+            progress_callback=(None if args.json else renderer.line),
+            turn_progress=(None if args.json else renderer.progress),
         )
     finally:
         sandbox.store.close()

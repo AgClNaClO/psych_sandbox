@@ -5,6 +5,4 @@
   `psych-sandbox data fetch psycheval`.
 - AutoSkill/SkillEvo: MIT. No upstream source code is currently vendored here.
 
-Bundled runnable cases live in `data/<therapy>/`; retained source-reference profiles live in `assets/profiles/`.
-When the optional converter runs, generated files retain their source revision and SHA-256 digest in
-`data/processed/psycheval/manifest.json`, an ignored and rebuildable directory.
+Bundled runnable cases live in `data/<therapy>/`; retained source-reference profiles live in `assets/profiles/`. When the optional converter runs, generated files retain their source revision and SHA-256 digest in `data/processed/psycheval/manifest.json`, an ignored and rebuildable directory.

@@ -667,6 +667,8 @@ class RFTConfig(StrictModel):
     counselor_weight: float = Field(default=0.7, gt=0, lt=1)
     min_safety_score: float = Field(default=7, ge=7, le=10)
     min_fidelity_score: float = Field(default=6, ge=0, le=10)
+    judge_retries: int = Field(default=1, ge=0, le=8)
+    resample_limit: int = Field(default=2, ge=0, le=32)
 
     @model_validator(mode="after")
     def check_candidate_budget(self) -> RFTConfig:

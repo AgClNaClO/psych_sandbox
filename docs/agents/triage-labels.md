@@ -1,8 +1,6 @@
 # Triage label compatibility
 
-GitHub currently exposes the standard labels `bug`, `documentation`, `duplicate`, `enhancement`,
-`good first issue`, `help wanted`, `invalid`, `question` and `wontfix`. Dedicated Matt Pocock workflow-state
-labels are not configured, so agent workflows use this compatibility mapping:
+GitHub currently exposes the standard labels `bug`, `documentation`, `duplicate`, `enhancement`, `good first issue`, `help wanted`, `invalid`, `question` and `wontfix`. Dedicated Matt Pocock workflow-state labels are not configured, so agent workflows use this compatibility mapping:
 
 | Workflow role | Repository label | Use |
 |---|---|---|
@@ -12,5 +10,4 @@ labels are not configured, so agent workflows use this compatibility mapping:
 | `ready-for-human` | `enhancement` | Valid request needing maintainer or domain-expert judgment |
 | `wontfix` | `wontfix` | Repository will not action the request |
 
-Because two workflow roles share `question`, the latest issue comment is the source of truth for the precise
-state. If dedicated state labels are added remotely, update this mapping before using them in agent workflows.
+Because two workflow roles share `question`, the latest issue comment is the source of truth for the precise state. If dedicated state labels are added remotely, update this mapping before using them in agent workflows.

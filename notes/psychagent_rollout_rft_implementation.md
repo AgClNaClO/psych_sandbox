@@ -1,7 +1,6 @@
 # PsychAgent 官方 rollout / RFT 实现核查
 
-> 后续实现更新：沙盒已新增可选整场会谈 RFT 采样/评分/选优，并修复 CLI 的 YAML 加载。
-> 本文的“当前项目”对比描述的是实现前状态；现行行为以 [会谈 RFT](../docs/SESSION_RFT.md) 为准。
+> 后续实现更新：沙盒已新增可选整场会谈 RFT 采样/评分/选优，并修复 CLI 的 YAML 加载。本文的“当前项目”对比描述的是实现前状态；现行行为以 [会谈 RFT](../docs/SESSION_RFT.md) 为准。
 
 ## 0. 版本、范围与证据
 
@@ -241,20 +240,11 @@ compute_rollout_reward 的计算为：
 
 ### 训练粒度
 
-论文区分多任务 SFT（记忆提取、规划、回复，以及技能提取/管理）与会谈级 RFT。
-RFT 每个候选是一整个 session，评分、拒绝和选优同样以 session 为单位，只有胜出会谈推进历史。
-参数目标是胜出会谈在已选历史条件下的最大似然；低分候选被排除，不等于显式 DPO 偏好损失。
-公开说明给出上下文 32768、每设备 batch 1、history masking，但不足以确认训练数据如何切片、
-哪些角色/字段计算 token loss，不能声称一条训练样本就是整段多会谈疗程。
-依据：[论文方法][paper-rft]、[实现说明][paper-impl]。
+论文区分多任务 SFT（记忆提取、规划、回复，以及技能提取/管理）与会谈级 RFT。 RFT 每个候选是一整个 session，评分、拒绝和选优同样以 session 为单位，只有胜出会谈推进历史。参数目标是胜出会谈在已选历史条件下的最大似然；低分候选被排除，不等于显式 DPO 偏好损失。公开说明给出上下文 32768、每设备 batch 1、history masking，但不足以确认训练数据如何切片、哪些角色/字段计算 token loss，不能声称一条训练样本就是整段多会谈疗程。依据：[论文方法][paper-rft]、[实现说明][paper-impl]。
 
-公开仓库的 `src/rft` 主要实现采样、评分、选优、存档；并未公开 optimizer、collator、loss mask
-或权重更新训练器。[发布范围][release-scope]
+公开仓库的 `src/rft` 主要实现采样、评分、选优、存档；并未公开 optimizer、collator、loss mask 或权重更新训练器。[发布范围][release-scope]
 
-当前沙盒 `src/psychsandbox/training/export.py` 中，`export_sft` 每行只包含咨询师回复和紧邻的前一条
-消息；没有完整历史、规划、技能输入。`export_dpo_pairs` 要求调用者提供轨迹对，用轨迹级 reward
-比较后只导出两条末次咨询师回复，也未包含 prompt。两者是导出辅助函数，不是会谈级 RFT 训练闭环。
-依据：[当前导出代码](../src/psychsandbox/training/export.py)。
+当前沙盒 `src/psychsandbox/training/export.py` 中，`export_sft` 每行只包含咨询师回复和紧邻的前一条消息；没有完整历史、规划、技能输入。`export_dpo_pairs` 要求调用者提供轨迹对，用轨迹级 reward 比较后只导出两条末次咨询师回复，也未包含 prompt。两者是导出辅助函数，不是会谈级 RFT 训练闭环。依据：[当前导出代码](../src/psychsandbox/training/export.py)。
 
 ### 配置声明不等于有效控制
 
@@ -269,19 +259,11 @@ RFT 每个候选是一整个 session，评分、拒绝和选优同样以 session
 | `max_retries: 16` | 后端 RetryPolicy 解释为额外 16 次，即至多 17 次尝试；SDK 自带重试关闭。runner 另有 `psychagent_max_retries`，层次不同 | Tenacity 至多 3 次尝试；本地 OpenAI SDK 默认另有 2 次额外重试；JSON 修复最多两次生成，选技纠错最多额外一次，预算互不等价 |
 | `retry_sleep_sec: 1.0` | 后端指数退避基数 1 秒，上限 2 秒，再加 0..0.2 秒抖动；不代表每次固定 1 秒 | Tenacity 指数退避 min=1/max=8，未开放同名配置 |
 
-官方依据：[baseline 配置][cfg-baseline]、[对话循环][dialogue]、[公共记忆构造][public-memory]、
-[后端 API][sample-api]、[重试实现][retry-policy]、[配置覆盖][baseline-overrides]。
-`memory_mode` 结论来自固定提交 `src/` 全文引用检查，不能推断其他历史版本也无实现。
+官方依据：[baseline 配置][cfg-baseline]、[对话循环][dialogue]、[公共记忆构造][public-memory]、 [后端 API][sample-api]、[重试实现][retry-policy]、[配置覆盖][baseline-overrides]。 `memory_mode` 结论来自固定提交 `src/` 全文引用检查，不能推断其他历史版本也无实现。
 
-当前依据：[SandboxConfig](../src/psychsandbox/domain/models.py)、[CLI](../src/psychsandbox/cli.py)、
-[配置加载](../src/psychsandbox/config.py)、[API gateway](../src/psychsandbox/model_client.py)、
-[咨询师上下文](../src/psychsandbox/agents/counselor.py)、[编排器](../src/psychsandbox/runtime/orchestrator.py)。
-超时环境文件只读取了数字型 `MODEL_TIMEOUT_SECONDS`，没有导出任何凭据；环境变量仍可覆盖 `.env`。
+当前依据：[SandboxConfig](../src/psychsandbox/domain/models.py)、[CLI](../src/psychsandbox/cli.py)、 [配置加载](../src/psychsandbox/config.py)、[API gateway](../src/psychsandbox/model_client.py)、 [咨询师上下文](../src/psychsandbox/agents/counselor.py)、[编排器](../src/psychsandbox/runtime/orchestrator.py)。超时环境文件只读取了数字型 `MODEL_TIMEOUT_SECONDS`，没有导出任何凭据；环境变量仍可覆盖 `.env`。
 
-**当前 CLI 加载缺口：** `cli._config` 没有调用 `default_config`，只从命令行设置 root、seed、max-turns。
-`default_config` 才会读取 `configs/runtime.yaml`；它本身也不读取 `session_count`。
-因此 YAML 中温度/向量阈值的值虽然与当前类默认值恰好一致，直接改 YAML 不会影响 CLI；
-会谈数必须通过 `--sessions` 或 Python 参数设置。本次仅记录此差异，未修改配置加载或训练流程。
+**当前 CLI 加载缺口：** `cli._config` 没有调用 `default_config`，只从命令行设置 root、seed、max-turns。 `default_config` 才会读取 `configs/runtime.yaml`；它本身也不读取 `session_count`。因此 YAML 中温度/向量阈值的值虽然与当前类默认值恰好一致，直接改 YAML 不会影响 CLI；会谈数必须通过 `--sessions` 或 Python 参数设置。本次仅记录此差异，未修改配置加载或训练流程。
 
 ## 固定来源索引
 
