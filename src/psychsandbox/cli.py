@@ -109,48 +109,87 @@ def _config(args: argparse.Namespace) -> SandboxConfig:
     return SandboxConfig.model_validate(values)
 
 
-class _ProgressRenderer:
-    """Print line messages and draw live progress bars without interleaving.
+def _enable_windows_vt() -> bool:
+    """Try to enable ANSI/VT processing; return whether ANSI is available.
 
-    Progress bars form a block of lines anchored at the bottom of the terminal;
-    regular line messages are inserted above that block. Uses ANSI cursor
-    control, and degrades to plain printing when stdout is not a terminal.
+    The legacy Windows console does not interpret ``\\x1b[...`` sequences by
+    default, so a live progress bar would print a trailing ``[K``. Enabling
+    virtual-terminal processing fixes that. Non-Windows terminals handle ANSI
+    natively, and non-TTY output is handled separately by the renderer.
+    """
+    if sys.platform != "win32":
+        return True
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        mode = ctypes.c_uint32()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return False
+        # ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+        kernel32.SetConsoleMode(handle, mode.value | 0x0004)
+        updated = ctypes.c_uint32()
+        kernel32.GetConsoleMode(handle, ctypes.byref(updated))
+        return bool(updated.value & 0x0004)
+    except Exception:
+        return False
+
+
+class _ProgressRenderer:
+    """Draw live progress bars alongside line messages without interleaving.
+
+    When ANSI is available, progress bars form a block anchored at the bottom
+    and line messages are inserted above it. Otherwise it falls back to a
+    single carriage-return bar, which every terminal supports.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, ansi: bool) -> None:
+        self._ansi = ansi and bool(getattr(sys.stdout, "isatty", lambda: False)())
         self._entries: dict[str, str] = {}
         self._order: list[str] = []
-        self._tty = bool(getattr(sys.stdout, "isatty", lambda: False)())
+        self._active = False
+        self._width = 0
 
     def line(self, message: str) -> None:
-        if not self._tty:
-            print(message, flush=True)
+        if self._ansi:
+            n = len(self._order)
+            if n:
+                sys.stdout.write(f"\x1b[{n}A\r")
+            sys.stdout.write(message + "\x1b[K\n")
+            for key in self._order:
+                sys.stdout.write("\r" + self._entries[key] + "\x1b[K\n")
+            sys.stdout.flush()
             return
-        n = len(self._order)
-        if n:
-            sys.stdout.write(f"\x1b[{n}A\r")
-        sys.stdout.write(message + "\x1b[K\n")
-        for key in self._order:
-            sys.stdout.write("\r" + self._entries[key] + "\x1b[K\n")
-        sys.stdout.flush()
+        self._clear_line()
+        print(message, flush=True)
 
     def progress(self, progress) -> None:
         if progress is None:
             self._entries.clear()
             self._order.clear()
+            self._active = False
+            self._width = 0
             return
-        if not self._tty:
-            return
-        key = progress.label
         text = progress.render()
-        if key not in self._entries:
-            self._order.append(key)
+        if self._ansi:
+            key = progress.label
+            if key not in self._entries:
+                self._order.append(key)
+                self._entries[key] = text
+                sys.stdout.write("\r" + text + "\x1b[K\n")
+                sys.stdout.flush()
+                return
             self._entries[key] = text
-            sys.stdout.write("\r" + text + "\x1b[K\n")
-            sys.stdout.flush()
+            self._redraw()
             return
-        self._entries[key] = text
-        self._redraw()
+        self._active = True
+        if len(text) < self._width:
+            text += " " * (self._width - len(text))
+        else:
+            self._width = len(text)
+        sys.stdout.write("\r" + text)
+        sys.stdout.flush()
 
     def _redraw(self) -> None:
         n = len(self._order)
@@ -161,11 +200,18 @@ class _ProgressRenderer:
             sys.stdout.write("\r" + self._entries[key] + "\x1b[K\n")
         sys.stdout.flush()
 
+    def _clear_line(self) -> None:
+        if self._active:
+            sys.stdout.write("\r" + " " * self._width + "\r")
+            sys.stdout.flush()
+            self._active = False
+            self._width = 0
+
 
 async def _simulate(args: argparse.Namespace) -> int:
     config = _config(args)
     sandbox = CounselingSandbox(config)
-    renderer = _ProgressRenderer()
+    renderer = _ProgressRenderer(_enable_windows_vt())
     try:
         result = await sandbox.run_case(
             args.case,
@@ -180,7 +226,10 @@ async def _simulate(args: argparse.Namespace) -> int:
         sandbox.store.close()
     visualization = None
     if not args.no_visualization:
-        with available_run_dir(config.trace_dir, result.run_id) as run_dir:
+        trace_dir = config.trace_dir
+        if trace_dir is None:
+            raise RuntimeError("trace_dir 未解析")
+        with available_run_dir(trace_dir, result.run_id) as run_dir:
             visualization = generate_run_report(result, run_dir / "report.html")
     if args.json:
         print(result.model_dump_json(indent=2))
@@ -241,7 +290,11 @@ def _visualize(root: Path, run_id: str, output: Path | None) -> int:
 
 def _runs(args: argparse.Namespace, root: Path) -> int:
     config = default_config(root)
-    manager = RunManager(config.database_path, config.trace_dir)
+    database_path = config.database_path
+    trace_dir = config.trace_dir
+    if database_path is None or trace_dir is None:
+        raise RuntimeError("运行时路径未解析")
+    manager = RunManager(database_path, trace_dir)
     try:
         if args.runs_command == "list":
             print(json.dumps(manager.list_runs(), ensure_ascii=False, indent=2))
