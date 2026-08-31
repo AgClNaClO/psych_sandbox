@@ -52,18 +52,21 @@ def _public_memory(memory: SessionMemory) -> dict:
 
     Opaque summaries, evolving profiles, supervisor feedback, risk/state
     histories and skill histories are deliberately not judge inputs. Facts
-    already admitted to unlocked_profile are the disclosure boundary.
+    already admitted to unlocked_client_info are the disclosure boundary.
     """
-    profile = memory.unlocked_profile
+    profile = memory.unlocked_client_info
     return deepcopy({
-        "unlocked_profile": {
-            "public_background": profile.public_background,
+        "unlocked_client_info": {
+            "static_traits": profile.static_traits.model_dump(
+                mode="json", exclude={"language_features"}
+            ),
+            "main_problem": profile.main_problem,
+            "topic": profile.topic,
+            "core_demands": profile.core_demands,
+            "growth_experiences": list(profile.growth_experiences),
             "facts": [{"content": fact.content} for fact in profile.facts],
-            "confirmed_goals": profile.confirmed_goals,
-            "expressed_problems": profile.expressed_problems,
-            "theory": profile.theory,
+            "theory": deepcopy(profile.theory),
         },
-        "confirmed_goals": memory.confirmed_goals,
         "unresolved_topics": memory.unresolved_topics,
         "homework": memory.homework,
         "last_client_closing": memory.last_client_closing,

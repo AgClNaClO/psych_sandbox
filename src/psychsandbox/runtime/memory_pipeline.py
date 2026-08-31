@@ -7,7 +7,7 @@ from ..domain import (
     ClientProfile,
     ClinicalSummary,
     ExtractedClientInfo,
-    MergedClientProfile,
+    UnlockedClientInfo,
     Message,
     SessionPlan,
     StaticTraits,
@@ -29,7 +29,7 @@ class _ClientInfoGet(StrictModel):
 
 
 class _ClientInfoMerge(StrictModel):
-    client_info_merge: MergedClientProfile
+    client_info_merge: UnlockedClientInfo
 
 
 class _SessionSummaryWrapper(StrictModel):
@@ -60,6 +60,9 @@ class MemoryExtractionAgent:
         )
         raw = _ClientInfoGet.model_validate(result).client_info_get
         raw.source_session = session_number
+        # PsychEval language_features controls the private client actor; it is
+        # never a counselor-memory field, even if an extractor tries to infer it.
+        raw.static_traits.language_features = ""
         return raw
 
 
@@ -69,16 +72,12 @@ class ClientMergeAgent:
 
     async def merge(
         self,
-        history: MergedClientProfile | None,
+        history: UnlockedClientInfo,
         current: ExtractedClientInfo,
         global_profile: ClientProfile,
         therapy_select: list[str],
-    ) -> MergedClientProfile:
-        history_dump = (
-            history.model_dump(mode="json")
-            if history
-            else _empty_merged(global_profile.client_id, current.source_session)
-        )
+    ) -> UnlockedClientInfo:
+        history_dump = history.model_dump(mode="json")
         merge_payload = {
             "history_profile": history_dump,
             "current_profile": current.model_dump(mode="json"),
@@ -93,7 +92,10 @@ class ClientMergeAgent:
             output_schema=_ClientInfoMerge,
             temperature=0.1,
         )
-        return _ClientInfoMerge.model_validate(result).client_info_merge
+        merged = _ClientInfoMerge.model_validate(result).client_info_merge
+        merged = _prevent_global_backfill(merged, history, current)
+        merged.facts = history.facts
+        return merged
 
 
 class DialogueSummaryAgent:
@@ -137,26 +139,56 @@ def _format_dialogue(dialogue: list[Message]) -> str:
     return "\n".join(lines)
 
 
-def _empty_merged(client_id: str, updated_session: int) -> dict[str, Any]:
-    return {
-        "client_id": client_id,
-        "static_traits": StaticTraits().model_dump(mode="json"),
-        "main_problem": "",
-        "topic": "",
-        "core_demands": "",
-        "growth_experiences": [],
-        "theory": {},
-        "updated_session": updated_session,
-    }
-
-
 def _profile_for_global(profile: ClientProfile) -> dict[str, Any]:
+    traits = profile.static_traits.model_dump(mode="json")
+    traits.pop("language_features", None)
     return {
         "client_id": profile.client_id,
-        "static_traits": profile.static_traits.model_dump(mode="json"),
+        "static_traits": traits,
         "main_problem": profile.main_problem,
         "topic": profile.topic,
         "core_demands": profile.core_demands,
         "growth_experiences": profile.growth_experiences,
         "theory": profile.theory,
     }
+
+
+def _prevent_global_backfill(
+    merged: UnlockedClientInfo,
+    history: UnlockedClientInfo,
+    current: ExtractedClientInfo,
+) -> UnlockedClientInfo:
+    """Reject values that the merge model could only have copied from global truth."""
+
+    updates: dict[str, Any] = {}
+    for field in ("main_problem", "topic", "core_demands"):
+        allowed = {str(getattr(history, field) or ""), str(getattr(current, field) or "")}
+        if str(getattr(merged, field) or "") not in allowed:
+            updates[field] = getattr(history, field) or getattr(current, field) or ""
+    allowed_growth = list(dict.fromkeys(
+        list(history.growth_experiences) + list(current.growth_experiences)
+    ))
+    updates["growth_experiences"] = [
+        item for item in merged.growth_experiences if item in allowed_growth
+    ]
+    trait_updates = {}
+    for field in StaticTraits.model_fields:
+        if field == "language_features":
+            trait_updates[field] = ""
+            continue
+        allowed = {
+            str(getattr(history.static_traits, field) or ""),
+            str(getattr(current.static_traits, field) or ""),
+        }
+        value = str(getattr(merged.static_traits, field) or "")
+        trait_updates[field] = value if value in allowed else (
+            getattr(history.static_traits, field)
+            or getattr(current.static_traits, field)
+            or ""
+        )
+    updates["static_traits"] = StaticTraits(**trait_updates)
+    allowed_theory_keys = set(history.theory) | set(current.theory)
+    updates["theory"] = {
+        key: value for key, value in merged.theory.items() if key in allowed_theory_keys
+    }
+    return merged.model_copy(update=updates)

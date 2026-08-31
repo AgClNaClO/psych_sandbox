@@ -33,6 +33,8 @@ class MemoryConsolidator:
             update={
                 "completed_sessions": session.session_index,
                 "summaries": memory.summaries + [session.summary],
+                "clinical_summaries": memory.clinical_summaries
+                + ([session.clinical_summary] if session.clinical_summary else []),
                 "interventions_used": list(
                     dict.fromkeys(memory.interventions_used + session.interventions_used)
                 ),

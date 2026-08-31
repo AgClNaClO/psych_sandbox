@@ -369,12 +369,16 @@ def test_writer_rechecks_deletion_after_acquiring_lock(managed, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_new_run_checks_deletion_between_directory_creation_and_lock(root, tmp_path, sample_case, monkeypatch):
+async def test_new_run_checks_deletion_between_directory_creation_and_lock(
+    root, tmp_path, sample_case, repository, monkeypatch
+):
     from psychsandbox.runtime import CounselingSandbox, orchestrator
     from tests.deterministic_gateway import DeterministicGateway
 
     config = SandboxConfig(project_root=root, trace_dir=tmp_path / "runtime", database_path=tmp_path / "db.sqlite3")
-    sandbox = CounselingSandbox(config, gateway=DeterministicGateway())
+    sandbox = CounselingSandbox(
+        config, gateway=DeterministicGateway(), repository=repository
+    )
 
     def mark_before_lock(base, label, run_id):
         path = create_artifact_dir(base, label, run_id)

@@ -28,21 +28,25 @@ from psychsandbox.domain import (
     CounselorPlanning,
     CounselorTurn,
     DisclosureDecision,
+    DisclosureItem,
+    ExtractedClientInfo,
     HiddenFact,
     MetaSkill,
     RiskAssessment,
     RiskLevel,
     TrustChange,
+    TrustTier,
     SessionMemory,
     SessionStage,
     SkillSelectionConfig,
     SkillSelectionEvidence,
     UnlockedFact,
-    UnlockedClientProfile,
+    UnlockedClientInfo,
 )
 from tests.deterministic_gateway import DeterministicGateway
 from psychsandbox.runtime import DisclosureGate, StateUpdater
 from psychsandbox.runtime.leakage import PrematureDisclosureGuard
+from psychsandbox.runtime.memory_pipeline import _prevent_global_backfill
 from psychsandbox.skills import SkillCatalog, SkillRegistry
 from psychsandbox.skills.selection import SkillCandidateFilter
 
@@ -53,20 +57,29 @@ def test_disclosure_rejects_low_trust(sample_case):
 
 
 def test_disclosure_does_not_repeat(sample_case):
-    fact = sample_case.profile.hidden_facts[0]
+    fact = sample_case.profile.disclosure_items[0]
     state = sample_case.profile.initial_state.model_copy(update={"trust": 1})
     result = DisclosureGate().allowed(
-        sample_case.profile, state, " ".join(fact.required_topics), {fact.fact_id}
+        sample_case.profile, state, " ".join(fact.activation_tags), {fact.item_id}
     )
     assert fact not in result
 
 
 def test_disclosure_returns_blocked_signal_without_content(sample_case):
-    fact = max(sample_case.profile.hidden_facts, key=lambda item: item.sensitivity)
+    fact = max(
+        sample_case.profile.disclosure_items,
+        key=lambda item: item.trust_tier.threshold,
+    )
     profile = sample_case.profile.model_copy(
         update={
-            "hidden_facts": [
-                fact.model_copy(update={"activation_tags": ["唯一敏感话题"]})
+            "disclosure_items": [
+                fact.model_copy(
+                    update={
+                        "activation_tags": ["唯一敏感话题"],
+                        "trust_tier": TrustTier.SENSITIVE,
+                        "generates_discomfort": True,
+                    }
+                )
             ]
         }
     )
@@ -77,46 +90,50 @@ def test_disclosure_returns_blocked_signal_without_content(sample_case):
         "我想问问唯一敏感话题",
         set(),
     )
-    blocked = next(item for item in decision.blocked if item.fact_id == fact.fact_id)
+    blocked = next(item for item in decision.blocked if item.item_id == fact.item_id)
     assert blocked.category == fact.category
     assert "content" not in blocked.model_dump()
 
 
 def test_unlock_records_evidence(sample_case):
-    fact = sample_case.profile.hidden_facts[0]
+    fact = sample_case.profile.disclosure_items[0]
     unlocked = DisclosureGate().unlock(
-        sample_case.profile, [fact.fact_id], session_index=2, turn_index=3
+        sample_case.profile, [fact.item_id], session_index=2, turn_index=3
     )
     assert unlocked[0].evidence_session == 2
     assert unlocked[0].evidence_turn == 3
 
 
-def test_disclosure_advances_one_layer_at_a_time(sample_case):
-    fact = sample_case.profile.hidden_facts[0].model_copy(
-        update={
-            "content": "表层信息；更私密的细节",
-            "disclosure_layers": ["表层信息", "表层信息；更私密的细节"],
-            "activation_tags": ["特定成长话题"],
-            "topic_key": "specific_growth",
-            "minimum_trust": 0.2,
-            "minimum_topic_readiness": 0.3,
-        }
+def test_disclosure_uses_atomic_dependencies_without_layers(sample_case):
+    first = DisclosureItem(
+        item_id="growth:event",
+        evidence_ids=["growth:event"],
+        content="发生过一次失败",
+        activation_tags=["特定成长话题"],
+        trust_tier=TrustTier.BASIC,
     )
-    profile = sample_case.profile.model_copy(update={"hidden_facts": [fact]})
-    state = sample_case.profile.initial_state.model_copy(
-        update={"trust": 0.8, "topic_readiness": {"specific_growth": 0.8}}
+    meaning = DisclosureItem(
+        item_id="growth:meaning",
+        evidence_ids=["growth:meaning"],
+        content="我因此觉得很羞耻",
+        activation_tags=["特定成长话题"],
+        trust_tier=TrustTier.SENSITIVE,
+        depends_on=[first.item_id],
+        generates_discomfort=True,
     )
+    profile = sample_case.profile.model_copy(
+        update={"disclosure_items": [first, meaning]}
+    )
+    state = sample_case.profile.initial_state.model_copy(update={"trust": 0.8})
     gate = DisclosureGate()
 
-    first = gate.evaluate(profile, state, "想谈特定成长话题", {})
-    second = gate.evaluate(profile, state, "继续谈特定成长话题", {fact.fact_id: 1})
-    finished = gate.evaluate(profile, state, "继续谈特定成长话题", {fact.fact_id: 2})
+    initial = gate.evaluate(profile, state, "想谈特定成长话题", set())
+    after_event = gate.evaluate(
+        profile, state, "继续谈特定成长话题", {first.item_id}
+    )
 
-    assert first.retrieved[0].content == "表层信息"
-    assert first.retrieved[0].disclosure_level == 1
-    assert second.retrieved[0].content == "表层信息；更私密的细节"
-    assert second.retrieved[0].disclosure_level == 2
-    assert finished.retrieved == []
+    assert [item.item_id for item in initial.retrieved] == [first.item_id]
+    assert [item.item_id for item in after_event.retrieved] == [meaning.item_id]
 
 
 def test_state_stays_in_bounds():
@@ -217,7 +234,7 @@ def test_high_risk_catalog_returns_no_skills(root, sample_case):
 def test_counselor_payload_has_no_full_profile(sample_case):
     memory = SessionMemory(
         case_id=sample_case.case_id,
-        unlocked_profile=UnlockedClientProfile(client_id=sample_case.profile.client_id),
+        unlocked_client_info=UnlockedClientInfo(client_id=sample_case.profile.client_id),
     )
     payload = CounselorAgent(DeterministicGateway()).build_context_payload(
         memory=memory,
@@ -229,14 +246,58 @@ def test_counselor_payload_has_no_full_profile(sample_case):
     )
     dumped = str(payload)
     assert "full_client_profile" not in payload
-    for fact in sample_case.profile.hidden_facts:
+    assert "unlocked_profile" not in payload
+    assert "unlocked_client_info" in payload
+    assert "language_features" not in payload["unlocked_client_info"]["static_traits"]
+    assert sample_case.profile.static_traits.language_features not in dumped
+    assert sample_case.profile.core_demands not in dumped
+    for fact in sample_case.profile.disclosure_items:
         assert fact.content not in dumped
+
+
+def test_e8_cannot_backfill_unspoken_core_demands_from_global_truth():
+    history = UnlockedClientInfo(client_id="case")
+    current = ExtractedClientInfo(source_session=1)
+    model_output = UnlockedClientInfo(
+        client_id="case",
+        core_demands="这是全局真值中未表达的目标",
+        main_problem="这是全局真值中未表达的主诉",
+        updated_session=1,
+    )
+
+    constrained = _prevent_global_backfill(model_output, history, current)
+
+    assert constrained.core_demands == ""
+    assert constrained.main_problem == ""
+
+
+def test_legacy_memory_drops_preloaded_style_and_demands_before_replay():
+    memory = SessionMemory.model_validate({
+        "case_id": "case",
+        "completed_sessions": 1,
+        "unlocked_profile": {
+            "client_id": "client",
+            "public_background": {
+                "main_problem": "未由对话证实的完整主诉",
+                "language_style": "未由对话证实的语言风格",
+            },
+            "confirmed_goals": ["未由对话证实的核心诉求"],
+            "facts": [],
+        },
+        "confirmed_goals": ["未由对话证实的核心诉求"],
+        "evolving_profile": {"core_demands": "未由对话证实的核心诉求"},
+    })
+
+    assert memory.unlocked_client_info.main_problem == ""
+    assert memory.unlocked_client_info.core_demands == ""
+    assert memory.unlocked_client_info.static_traits.language_features == ""
+    assert any("dialogue replay" in item for item in memory.migration_warnings)
 
 
 def test_counselor_uses_plan_then_react_observation(root, sample_case):
     memory = SessionMemory(
         case_id=sample_case.case_id,
-        unlocked_profile=UnlockedClientProfile(client_id=sample_case.profile.client_id),
+        unlocked_client_info=UnlockedClientInfo(client_id=sample_case.profile.client_id),
     )
     gateway = CountingDeterministicGateway()
     result = asyncio.run(CounselorAgent(
@@ -262,7 +323,7 @@ def test_counselor_uses_plan_then_react_observation(root, sample_case):
 def test_high_risk_counselor_routes_to_safety(sample_case):
     memory = SessionMemory(
         case_id=sample_case.case_id,
-        unlocked_profile=UnlockedClientProfile(client_id=sample_case.profile.client_id),
+        unlocked_client_info=UnlockedClientInfo(client_id=sample_case.profile.client_id),
     )
     result = asyncio.run(CounselorAgent(DeterministicGateway()).respond(
         memory=memory,
@@ -334,11 +395,13 @@ class SkillQueryGateway(CountingDeterministicGateway):
 def _run_skill_query(gateway, catalog, sample_case, config=None):
     return asyncio.run(CounselorAgent(
         gateway, catalog, skill_selection=config,
-    ).respond(
-        memory=SessionMemory(
-            case_id=sample_case.case_id,
-            unlocked_profile=UnlockedClientProfile(client_id=sample_case.profile.client_id),
-        ),
+        ).respond(
+            memory=SessionMemory(
+                case_id=sample_case.case_id,
+                unlocked_client_info=UnlockedClientInfo(
+                    client_id=sample_case.profile.client_id
+                ),
+            ),
         plan=sample_case.global_plan[0], client_message="我很焦虑，想谈谈具体的困扰",
         recent_messages=[], risk=RiskAssessment(level=RiskLevel.LOW), counselor_turn_count=0,
     ))
@@ -379,7 +442,7 @@ def test_rejected_query_retries_once_and_excludes_entire_previous_group(
     assert gateway.requests[3]["input_payload"]["query_retry_available"] is False
     embedding_query = json.loads(gateway.embedding_requests[0][0])
     assert embedding_query["current_client_message"] == "我很焦虑，想谈谈具体的困扰"
-    for fact in sample_case.profile.hidden_facts:
+    for fact in sample_case.profile.disclosure_items:
         assert fact.content not in str(gateway.embedding_requests)
 
 
@@ -493,7 +556,7 @@ def test_vector_filter_rejects_invalid_embeddings(selection_catalog, sample_case
 
 
 def test_client_prompts_are_versioned_and_reexported():
-    assert CLIENT_PROMPT_VERSION == "psycheval_patientact_v4"
+    assert CLIENT_PROMPT_VERSION == "psycheval_patientact_v5"
     assert CLIENT_PROMPT_VERSION == CANONICAL_CLIENT_PROMPT_VERSION
     assert CLIENT_PLANNER_TEMPLATE == "simclient/planner_system.jinja2"
     assert CLIENT_UTTERANCE_TEMPLATE == "simclient/utterance_system.jinja2"
@@ -529,7 +592,8 @@ def test_client_planner_prompt_contract():
 
 def test_client_utterance_prompt_contract():
     payload_fields = (
-        "static_profile",
+        "client_identity",
+        "expression_style",
         "simulation_state",
         "counselor_message",
         "recent_messages",
@@ -543,7 +607,7 @@ def test_client_utterance_prompt_contract():
     required_rules = (
         "被动、渐进披露",
         "不得编造",
-        "不得提前扩展到更私密的层级",
+        "不得扩展或拼接出未授权事实",
         "不猜测咨询师指的是哪件事",
         "安全、具体的问题可以正常合作",
         "不要突然顿悟、痊愈、完全信任咨询师",
@@ -553,7 +617,8 @@ def test_client_utterance_prompt_contract():
     )
     rendered = render_prompt(
         CLIENT_UTTERANCE_TEMPLATE,
-        static_profile={},
+            client_identity={},
+            expression_style={},
         simulation_state={},
         counselor_message="最近怎么样？",
         recent_messages=[],
@@ -615,15 +680,15 @@ def test_client_two_stage_calls_and_strict_utterance_payload(sample_case):
     assert "session_plan" not in payload
     assert "growth_experiences" not in dumped
     assert "special_situations" not in dumped
-    for fact in sample_case.profile.hidden_facts:
+    for fact in sample_case.profile.disclosure_items:
         assert fact.content not in dumped
 
 
 def test_ambiguous_facts_request_clarification_without_disclosure(sample_case):
-    facts = sample_case.profile.hidden_facts[:2]
+    facts = sample_case.profile.disclosure_items[:2]
     disclosure = DisclosureDecision(
         retrieved=facts,
-        ambiguous_fact_ids=[fact.fact_id for fact in facts],
+        ambiguous_fact_ids=[fact.item_id for fact in facts],
     )
     agent = ClientAgent(DeterministicGateway())
     signal = asyncio.run(
@@ -683,8 +748,8 @@ class SelectivePlannerGateway(DeterministicGateway):
 
 
 def test_planner_fact_selection_constrains_utterance_payload(sample_case):
-    facts = sample_case.profile.hidden_facts[:2]
-    agent = ClientAgent(SelectivePlannerGateway(facts[0].fact_id))
+    facts = sample_case.profile.disclosure_items[:2]
+    agent = ClientAgent(SelectivePlannerGateway(facts[0].item_id))
     disclosure = DisclosureDecision(retrieved=facts)
     signal = asyncio.run(
         agent.plan_turn(
@@ -707,9 +772,9 @@ def test_planner_fact_selection_constrains_utterance_payload(sample_case):
         turn_index=1,
     )
 
-    assert signal.retrieved_fact_ids == [facts[0].fact_id]
-    assert [item["fact_id"] for item in payload["available_memories"]] == [
-        facts[0].fact_id
+    assert signal.retrieved_fact_ids == [facts[0].item_id]
+    assert [item["item_id"] for item in payload["available_memories"]] == [
+        facts[0].item_id
     ]
 
 
@@ -727,8 +792,8 @@ class UnsupportedDisclosureGateway(DeterministicGateway):
 
 
 def test_unspoken_fact_id_is_not_accepted_as_disclosure(sample_case):
-    fact = sample_case.profile.hidden_facts[0]
-    agent = ClientAgent(UnsupportedDisclosureGateway(fact.fact_id))
+    fact = sample_case.profile.disclosure_items[0]
+    agent = ClientAgent(UnsupportedDisclosureGateway(fact.item_id))
     generation, metadata = asyncio.run(
         agent.generate_utterance(
             profile=sample_case.profile,
@@ -736,31 +801,30 @@ def test_unspoken_fact_id_is_not_accepted_as_disclosure(sample_case):
             counselor_message="可以说说吗？",
             recent_messages=[],
             disclosure=DisclosureDecision(retrieved=[fact]),
-            signal=ClientTurnSignal(retrieved_fact_ids=[fact.fact_id]),
+            signal=ClientTurnSignal(retrieved_fact_ids=[fact.item_id]),
             already_disclosed_ids=set(),
             turn_index=1,
         )
     )
 
     assert generation.disclosed_fact_ids == []
-    assert metadata["attempts"][0]["unsubstantiated_fact_ids"] == [fact.fact_id]
+    assert metadata["attempts"][0]["unsubstantiated_fact_ids"] == [fact.item_id]
     assert metadata["disclosed_evidence"] == {}
 
 
-def test_disclosure_memory_uses_spoken_evidence_not_full_layer(sample_case):
-    fact = sample_case.profile.hidden_facts[0].model_copy(
-        update={
-            "content": "表层经历；更私密的意义",
-            "disclosure_layers": ["表层经历；更私密的意义"],
-        }
+def test_disclosure_memory_uses_spoken_evidence_not_full_atom(sample_case):
+    fact = DisclosureItem(
+        item_id="spoken-evidence",
+        evidence_ids=["spoken-evidence"],
+        content="表层经历；更私密的意义",
     )
     confirmed, rejected, evidence = PrematureDisclosureGuard().substantiate(
         "我现在能说的是表层经历。",
-        [fact.fact_id],
+        [fact.item_id],
         [fact],
     )
     unlocked = DisclosureGate().unlock(
-        sample_case.profile.model_copy(update={"hidden_facts": [fact]}),
+        sample_case.profile.model_copy(update={"disclosure_items": [fact]}),
         confirmed,
         session_index=1,
         turn_index=2,
@@ -774,13 +838,12 @@ def test_disclosure_memory_uses_spoken_evidence_not_full_layer(sample_case):
 
 
 def test_known_memories_are_available_without_being_new_disclosures(sample_case):
-    fact = sample_case.profile.hidden_facts[0]
+    fact = sample_case.profile.disclosure_items[0]
     known = UnlockedFact(
-        fact_id=fact.fact_id,
+        fact_id=fact.item_id,
         content="这是我上次已经说过的部分。",
         evidence_session=1,
         evidence_turn=2,
-        disclosure_level=len(fact.disclosure_layers),
     )
     payload = ClientAgent(DeterministicGateway()).build_utterance_payload(
         profile=sample_case.profile,
@@ -797,16 +860,15 @@ def test_known_memories_are_available_without_being_new_disclosures(sample_case)
     assert payload["known_memories"][0]["content"] == known.content
 
 
-def test_known_evidence_does_not_authorize_unspoken_same_layer_detail(sample_case):
-    fact = sample_case.profile.hidden_facts[0].model_copy(
-        update={
-            "content": "我说过的表层经历；我没有说过的私密意义",
-            "disclosure_layers": ["我说过的表层经历；我没有说过的私密意义"],
-        }
+def test_known_evidence_does_not_authorize_unspoken_atomic_detail(sample_case):
+    fact = DisclosureItem(
+        item_id="private-meaning",
+        evidence_ids=["private-meaning"],
+        content="我说过的表层经历；我没有说过的私密意义",
     )
     unauthorized = ClientAgent(DeterministicGateway())._unauthorized_remainders(
         [fact],
-        {},
+        set(),
         ["我说过的表层经历"],
     )
 
@@ -815,12 +877,12 @@ def test_known_evidence_does_not_authorize_unspoken_same_layer_detail(sample_cas
     assert "表层经历" not in unauthorized[0].content
 
 
-def test_public_main_problem_is_not_treated_as_private_leak(repository):
+def test_unasked_main_problem_is_treated_as_private_leak(repository):
     case = repository.get("psycheval-cbt-020")
     agent = ClientAgent(DeterministicGateway())
     unauthorized = agent._unauthorized_remainders(
-        case.profile.hidden_facts,
-        {},
+        case.profile.disclosure_items,
+        set(),
         agent._public_authorized_texts(case.profile, []),
     )
     result = PrematureDisclosureGuard().inspect(
@@ -830,7 +892,7 @@ def test_public_main_problem_is_not_treated_as_private_leak(repository):
         set(),
     )
 
-    assert result.leaked is False
+    assert result.leaked is True
 
 
 def test_close_paraphrase_has_fuzzy_leak_signal():
@@ -852,15 +914,8 @@ def test_close_paraphrase_has_fuzzy_leak_signal():
     )
 
 
-def test_cross_category_overlap_selects_one_best_fact(sample_case):
-    state = sample_case.profile.initial_state.model_copy(
-        update={
-            "trust": 1.0,
-            "topic_readiness": {
-                fact.topic_key: 1.0 for fact in sample_case.profile.hidden_facts
-            },
-        }
-    )
+def test_atomic_overlap_requires_clarification_instead_of_guessing(sample_case):
+    state = sample_case.profile.initial_state.model_copy(update={"trust": 1.0})
     decision = DisclosureGate().evaluate(
         sample_case.profile,
         state,
@@ -868,9 +923,8 @@ def test_cross_category_overlap_selects_one_best_fact(sample_case):
         {},
     )
 
-    assert [fact.fact_id for fact in decision.retrieved] == [
-        "psycheval-cbt-001:situation:1"
-    ]
+    assert decision.retrieved == []
+    assert decision.ambiguous_fact_ids
 
 
 def test_trust_signal_is_not_double_counted_by_text_markers():
@@ -908,7 +962,7 @@ class AlwaysLeakingGateway(DeterministicGateway):
 
 
 def test_client_leak_retries_then_uses_safe_fallback(sample_case):
-    fact = sample_case.profile.hidden_facts[0]
+    fact = sample_case.profile.disclosure_items[0]
     gateway = AlwaysLeakingGateway(fact)
     agent = ClientAgent(gateway, leak_retry_limit=1)
     signal = ClientTurnSignal(behavior=ClientBehaviorType.RESISTANCE)
@@ -930,13 +984,16 @@ def test_client_leak_retries_then_uses_safe_fallback(sample_case):
 
 
 def test_respectful_and_pushy_messages_diverge(sample_case):
-    fact = max(sample_case.profile.hidden_facts, key=lambda item: item.sensitivity)
+    fact = max(
+        sample_case.profile.disclosure_items,
+        key=lambda item: item.trust_tier.threshold,
+    )
     blocked = DisclosureDecision(
         blocked=[
             BlockedMemorySignal(
-                fact_id=fact.fact_id,
+                item_id=fact.item_id,
                 category=fact.category,
-                sensitivity=fact.sensitivity,
+                trust_tier=fact.trust_tier,
             )
         ]
     )
@@ -965,13 +1022,13 @@ def test_respectful_and_pushy_messages_diverge(sample_case):
 
 
 def test_blocked_memory_does_not_force_resistance_without_pressure(sample_case):
-    fact = sample_case.profile.hidden_facts[0]
+    fact = sample_case.profile.disclosure_items[0]
     disclosure = DisclosureDecision(
         blocked=[
             BlockedMemorySignal(
-                fact_id=fact.fact_id,
+                item_id=fact.item_id,
                 category=fact.category,
-                sensitivity=fact.sensitivity,
+                trust_tier=fact.trust_tier,
             )
         ]
     )

@@ -77,10 +77,23 @@ class CounselorAgent:
             "strategy_from_previous_review": plan.strategy,
             "target_meta_skill_ids": plan.target_meta_skill_ids,
             "forbidden_actions": plan.forbidden_actions,
-            "unlocked_profile": memory.unlocked_profile.model_dump(mode="json"),
+            "unlocked_client_info": memory.unlocked_client_info.model_dump(
+                mode="json",
+                exclude={"static_traits": {"language_features"}},
+            ),
+            "session_agenda": {
+                "objectives": plan.objectives,
+                "instruction": (
+                    "后台目标，不代表咨询师已经知道相关事实；若目标信息尚未出现在 "
+                    "unlocked_client_info，必须用开放式探索，不得按已知事实发问。"
+                ),
+            },
             "session_memory": {
                 "summaries": memory.summaries[-3:],
-                "confirmed_goals": memory.confirmed_goals,
+                "clinical_summaries": [
+                    item.model_dump(mode="json")
+                    for item in memory.clinical_summaries[-3:]
+                ],
                 "unresolved_topics": memory.unresolved_topics,
                 "homework": memory.homework,
                 "risk_history": memory.risk_history,
@@ -90,6 +103,7 @@ class CounselorAgent:
             "recent_messages": recent_messages[-8:],
             "risk_level": risk.level.value,
             "counselor_turn_count": counselor_turn_count,
+            "session_opening": counselor_turn_count == 0 and not recent_messages,
         }
 
     async def respond(
@@ -312,8 +326,11 @@ class CounselorAgent:
             message.get("content", "") for message in context.get("recent_messages", [])
             if message.get("role") == "client"
         )
-        profile = context.get("unlocked_profile", {})
-        for key in ("public_background", "confirmed_goals", "expressed_problems", "theory"):
+        profile = context.get("unlocked_client_info", {})
+        for key in (
+            "static_traits", "main_problem", "topic", "core_demands",
+            "growth_experiences", "theory",
+        ):
             values.extend(cls._strings(profile.get(key, {})))
         values.extend(fact.get("content", "") for fact in profile.get("facts", []))
         memory = context.get("session_memory", {})
@@ -390,7 +407,7 @@ class CounselorAgent:
             risk=low_risk,
         )
         review_payload = {
-            "session_plan": session.plan.model_dump(mode="json"),
+            "session_plan": self._safe_plan_payload(session.plan),
             "session_summary": session.summary,
             "dialogue": [item.model_dump(mode="json") for item in session.messages],
             "counselor_decisions": [
@@ -398,10 +415,17 @@ class CounselorAgent:
             ],
             "allowed_memory": {
                 "summaries": memory.summaries[-3:],
-                "confirmed_goals": memory.confirmed_goals,
+                "clinical_summaries": [
+                    item.model_dump(mode="json")
+                    for item in memory.clinical_summaries[-3:]
+                ],
+                "unlocked_client_info": memory.unlocked_client_info.model_dump(
+                    mode="json",
+                    exclude={"static_traits": {"language_features"}},
+                ),
                 "unresolved_topics": memory.unresolved_topics,
             },
-            "baseline_next_plan": baseline_next.model_dump(mode="json"),
+            "baseline_next_plan": self._safe_plan_payload(baseline_next),
             "next_meta_skill_catalog": [
                 item.model_dump(mode="json") for item in next_meta
             ],
@@ -432,6 +456,13 @@ class CounselorAgent:
                     review.unmet_objectives or session.plan.objectives
                 )[:8]
         return review
+
+    @staticmethod
+    def _safe_plan_payload(plan: SessionPlan) -> dict:
+        """Expose agenda and skill IDs, never private case-material pointers."""
+        return plan.model_dump(
+            mode="json", exclude={"persona_links", "case_materials"}
+        )
 
     @staticmethod
     def _constrain_selected_skills(

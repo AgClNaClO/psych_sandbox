@@ -38,16 +38,29 @@ def session_for(index, plan, state, *, text=None):
 
 
 def assessment_for(session, score):
+    client_index = next(
+        (index for index, item in enumerate(session.messages) if item.role == "client"),
+        0,
+    )
+    counselor_index = next(
+        (index for index, item in enumerate(session.messages) if item.role == "counselor"),
+        1,
+    )
+
     def dimension(value, index):
         return RolloutDimension(
             score=value, evidence=[RolloutEvidence(message_index=index, quote=session.messages[index].content)],
             reason="离线评分替身",
         )
     return RolloutAssessment(
-        counselor_alliance=dimension(score, 1), counselor_strategy=dimension(score, 1),
-        counselor_goal_alignment=dimension(score, 1), counselor_safety=dimension(9, 1),
-        client_engagement=dimension(6, 0), client_understanding=dimension(6, 0),
-        client_agency=dimension(6, 0), simulation_fidelity=dimension(9, 0),
+        counselor_alliance=dimension(score, counselor_index),
+        counselor_strategy=dimension(score, counselor_index),
+        counselor_goal_alignment=dimension(score, counselor_index),
+        counselor_safety=dimension(9, counselor_index),
+        client_engagement=dimension(6, client_index),
+        client_understanding=dimension(6, client_index),
+        client_agency=dimension(6, client_index),
+        simulation_fidelity=dimension(9, client_index),
         safety_passed=True, safety_reason="离线测试无安全违规",
     )
 
@@ -315,7 +328,10 @@ class RolloutGateway(DeterministicGateway):
                 raise RuntimeError("judge temporarily unavailable")
             dialogue = kwargs["input_payload"]["dialogue"]
             number = int(re.findall(r"离线样本 (\d+)", " ".join(m["content"] for m in dialogue))[-1])
-            session = SimpleNamespace(messages=[SimpleNamespace(content=m["content"]) for m in dialogue])
+            session = SimpleNamespace(messages=[
+                SimpleNamespace(role=m["role"], content=m["content"])
+                for m in dialogue
+            ])
             return assessment_for(session, 7 if number % 2 else 9)
         if schema is CounselorSessionReview:
             self.review_payloads.append(kwargs["input_payload"])
@@ -328,20 +344,22 @@ class RolloutGateway(DeterministicGateway):
         return result
 
 
-def sandbox_for(root, tmp_path, gateway):
+def sandbox_for(root, tmp_path, gateway, repository):
     return CounselingSandbox(
         SandboxConfig(
             project_root=root, max_turns_per_session=1,
             database_path=tmp_path / "course.sqlite3", trace_dir=tmp_path / "artifacts",
             rft={"enabled": True, "candidates": 2},
-        ), gateway=gateway,
+        ), gateway=gateway, repository=repository,
     )
 
 
 @pytest.mark.parametrize("therapy", ["bt", "cbt", "het", "pdt", "pmt"])
-def test_real_session_pipeline_selects_and_persists_one_winner_per_therapy(root, tmp_path, therapy):
+def test_real_session_pipeline_selects_and_persists_one_winner_per_therapy(
+    root, tmp_path, therapy, repository
+):
     gateway = RolloutGateway()
-    sandbox = sandbox_for(root, tmp_path, gateway)
+    sandbox = sandbox_for(root, tmp_path, gateway, repository)
     try:
         result = asyncio.run(sandbox.run_case(f"psycheval-{therapy}-001", session_count=1))
         session = result.sessions[0]
@@ -368,8 +386,10 @@ def test_real_session_pipeline_selects_and_persists_one_winner_per_therapy(root,
         sandbox.store.close()
 
 
-def test_resume_uses_only_previous_winner_baseline_and_rebuilds_trace(root, tmp_path):
-    sandbox = sandbox_for(root, tmp_path, RolloutGateway())
+def test_resume_uses_only_previous_winner_baseline_and_rebuilds_trace(
+    root, tmp_path, repository
+):
+    sandbox = sandbox_for(root, tmp_path, RolloutGateway(), repository)
     try:
         first = asyncio.run(sandbox.run_case("psycheval-cbt-001", session_count=1, seed=17))
         first_selection = first.sessions[0].rollout_selection
@@ -396,10 +416,12 @@ def test_resume_uses_only_previous_winner_baseline_and_rebuilds_trace(root, tmp_
         sandbox.store.close()
 
 
-def test_failed_first_batch_can_resume_without_overwriting_rejected_candidates(root, tmp_path):
+def test_failed_first_batch_can_resume_without_overwriting_rejected_candidates(
+    root, tmp_path, repository
+):
     gateway = RolloutGateway()
     gateway.fail_judge = True
-    sandbox = sandbox_for(root, tmp_path, gateway)
+    sandbox = sandbox_for(root, tmp_path, gateway, repository)
     try:
         with pytest.raises(RolloutSelectionError):
             asyncio.run(sandbox.run_case("psycheval-cbt-001", session_count=1))
@@ -418,8 +440,8 @@ def test_failed_first_batch_can_resume_without_overwriting_rejected_candidates(r
         sandbox.store.close()
 
 
-def test_resume_rejects_rft_configuration_changes(root, tmp_path):
-    sandbox = sandbox_for(root, tmp_path, RolloutGateway())
+def test_resume_rejects_rft_configuration_changes(root, tmp_path, repository):
+    sandbox = sandbox_for(root, tmp_path, RolloutGateway(), repository)
     try:
         result = asyncio.run(sandbox.run_case("psycheval-cbt-001", session_count=1))
         sandbox.config.rft.candidates = 3
@@ -485,10 +507,12 @@ def test_process_run_and_directory_locks_release_after_failure(tmp_path):
         pass
 
 
-def test_committed_session_cannot_be_overwritten_and_old_holistic_is_invalidated(root, tmp_path):
+def test_committed_session_cannot_be_overwritten_and_old_holistic_is_invalidated(
+    root, tmp_path, repository
+):
     from psychsandbox.domain import Trajectory
 
-    sandbox = sandbox_for(root, tmp_path, RolloutGateway())
+    sandbox = sandbox_for(root, tmp_path, RolloutGateway(), repository)
     try:
         result = asyncio.run(sandbox.run_case("psycheval-cbt-001", session_count=1))
         trajectory = Trajectory.model_validate_json(sandbox.store.trajectory_rows(result.run_id)[0])
@@ -530,10 +554,12 @@ def test_checkpoint_risk_immediately_cancels_other_candidates(setup):
     assert all(c.status != "generating" for c in error.value.selection.candidates)
 
 
-def test_resume_detects_risk_saved_to_file_before_database_checkpoint(root, tmp_path):
+def test_resume_detects_risk_saved_to_file_before_database_checkpoint(
+    root, tmp_path, repository
+):
     gateway = RolloutGateway()
     gateway.fail_judge = True
-    sandbox = sandbox_for(root, tmp_path, gateway)
+    sandbox = sandbox_for(root, tmp_path, gateway, repository)
     try:
         with pytest.raises(RolloutSelectionError) as error:
             asyncio.run(sandbox.run_case("psycheval-cbt-001", session_count=1))

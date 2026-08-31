@@ -53,7 +53,11 @@ class DeterministicGateway(ModelGateway):
     ) -> BaseModel:
         del role, system_prompt, temperature
         if output_schema is CounselorPlanning:
-            meta = input_payload.get("meta_skill_catalog", [])[:1]
+            meta = (
+                input_payload.get("meta_skill_catalog", [])[:1]
+                if input_payload.get("client_message", "").strip()
+                else []
+            )
             meta_ids = [item["meta_skill_id"] for item in meta]
             return CounselorPlanning(
                 reasoning_summary="来访者正在表达当前困扰，需要围绕本次目标分步推进。",
@@ -199,7 +203,9 @@ class DeterministicGateway(ModelGateway):
                     resistance_pattern=(
                         ResistancePatternType.DEFENSIVENESS if pushed else None
                     ),
-                    blocked_fact_ids=[item["fact_id"] for item in blocked],
+                    blocked_fact_ids=[
+                        item.get("item_id", item.get("fact_id")) for item in blocked
+                    ],
                     trust_change=(
                         TrustChange.SIGNIFICANT_DECREASE
                         if pushed
@@ -228,7 +234,9 @@ class DeterministicGateway(ModelGateway):
                     else ReactionIntensity.LOW
                 ),
                 behavior=behavior,
-                retrieved_fact_ids=[item["fact_id"] for item in retrieved],
+                retrieved_fact_ids=[
+                    item.get("item_id", item.get("fact_id")) for item in retrieved
+                ],
                 trust_change=(
                     TrustChange.SLIGHT_INCREASE
                     if respected
@@ -284,7 +292,7 @@ class DeterministicGateway(ModelGateway):
                 fact = allowed[0]
                 return ClientUtterance(
                     utterance=f"其实还有一件事我一直不太敢说：{fact['content']}",
-                    disclosed_fact_ids=[fact["fact_id"]],
+                    disclosed_fact_ids=[fact.get("item_id", fact.get("fact_id"))],
                 )
             responses = [
                 "最近这件事一直在我脑子里转，我很累，但又停不下来。",
@@ -327,18 +335,11 @@ def _extracted_client_info(payload: dict[str, Any]) -> dict[str, Any]:
 def _merged_client_profile(payload: dict[str, Any]) -> dict[str, Any]:
     history = payload.get("history_profile", {})
     current = payload.get("current_profile", {})
-    global_profile = payload.get("global_profile", {})
     merged = {
-        "client_id": global_profile.get("client_id", ""),
-        "main_problem": history.get("main_problem")
-        or current.get("main_problem")
-        or global_profile.get("main_problem", ""),
-        "topic": history.get("topic")
-        or current.get("topic")
-        or global_profile.get("topic", ""),
-        "core_demands": history.get("core_demands")
-        or current.get("core_demands")
-        or global_profile.get("core_demands", ""),
+        "client_id": history.get("client_id", ""),
+        "main_problem": history.get("main_problem") or current.get("main_problem", ""),
+        "topic": history.get("topic") or current.get("topic", ""),
+        "core_demands": history.get("core_demands") or current.get("core_demands", ""),
         "growth_experiences": list(
             dict.fromkeys(
                 (history.get("growth_experiences", []) or [])
@@ -347,6 +348,7 @@ def _merged_client_profile(payload: dict[str, Any]) -> dict[str, Any]:
         ),
         "theory": history.get("theory") or current.get("theory") or {},
         "updated_session": int(payload.get("session_number", 1)),
+        "facts": history.get("facts", []),
     }
     merged["static_traits"] = {
         key: history.get("static_traits", {}).get(key)
@@ -385,6 +387,8 @@ def _clinical_summary(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _counselor_response(intervention: str, stage: str, turn: int = 0) -> str:
+    if turn == 0:
+        return "你好，欢迎你来。我们可以慢慢开始，我可以怎么称呼你？"
     if stage == "consolidation":
         return "今天我们聊了不少。如果只选一件事这周试试，你会选什么？"
     templates = {

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from psychsandbox.domain import SandboxConfig, SkillStatus, SkillVersion
+from psychsandbox.domain import SandboxConfig, SkillStatus, SkillVersion, StaticTraits
 from psychsandbox.evolution import SkillEvolutionManager
 from psychsandbox.model_client import ModelGateway
 from psychsandbox.runtime import CounselingSandbox, SQLiteStore
@@ -16,14 +16,14 @@ from tests.deterministic_gateway import DeterministicGateway
 
 
 @pytest.fixture
-def sandbox(root, tmp_path):
+def sandbox(root, tmp_path, repository):
     config = SandboxConfig(
         project_root=root,
         max_turns_per_session=2,
         database_path=tmp_path / "test.sqlite3",
         trace_dir=tmp_path / "traces",
     )
-    return CounselingSandbox(config, gateway=DeterministicGateway())
+    return CounselingSandbox(config, gateway=DeterministicGateway(), repository=repository)
 
 
 def test_three_session_end_to_end(sandbox):
@@ -32,10 +32,82 @@ def test_three_session_end_to_end(sandbox):
     assert all(session.supervisor_report for session in result.sessions)
 
 
+def test_first_session_is_counselor_first_and_initial_memory_is_empty(sandbox):
+    case = sandbox.repository.get("psycheval-cbt-001")
+    initial = sandbox._initial_memory(case)
+    assert initial.unlocked_client_info.client_id == case.profile.client_id
+    assert initial.unlocked_client_info.main_problem == ""
+    assert initial.unlocked_client_info.core_demands == ""
+    assert initial.unlocked_client_info.facts == []
+
+    result = asyncio.run(sandbox.run_case(case.case_id, session_count=1))
+    assert result.sessions[0].messages[0].role == "counselor"
+
+
 def test_each_session_has_memory_artifacts(sandbox):
     result = asyncio.run(sandbox.run_case("psycheval-cbt-002", session_count=3))
     assert all(session.summary and session.next_session_plan for session in result.sessions)
     assert result.final_memory.completed_sessions == 3
+
+
+def test_e7_e8_e9_feed_counselor_review_before_next_session(root, tmp_path, repository):
+    class MemoryClosureGateway(DeterministicGateway):
+        def __init__(self):
+            self.calls: list[tuple[str, dict]] = []
+
+        async def complete_structured(self, **kwargs):
+            schema = kwargs["output_schema"]
+            payload = kwargs["input_payload"]
+            self.calls.append((schema.__name__, payload))
+            if schema.__name__ == "_ClientInfoGet":
+                return schema.model_validate({
+                    "client_info_get": {
+                        "static_traits": StaticTraits(name="小林").model_dump(mode="json"),
+                        "main_problem": "最近总担心自己出错",
+                        "topic": "情绪管理",
+                        "core_demands": "希望不再被担心牵着走",
+                        "growth_experiences": [],
+                        "theory": {},
+                        "source_session": payload["current_session_number"],
+                    }
+                })
+            return await super().complete_structured(**kwargs)
+
+    gateway = MemoryClosureGateway()
+    config = SandboxConfig(
+        project_root=root,
+        max_turns_per_session=1,
+        database_path=tmp_path / "memory-closure.sqlite3",
+        trace_dir=tmp_path / "memory-closure-traces",
+    )
+    sandbox = CounselingSandbox(config, gateway=gateway, repository=repository)
+
+    result = asyncio.run(sandbox.run_case("psycheval-cbt-002", session_count=2))
+
+    first_review = next(
+        payload
+        for name, payload in gateway.calls
+        if name == "CounselorSessionReview"
+    )
+    assert (
+        first_review["allowed_memory"]["unlocked_client_info"]["main_problem"]
+        == "最近总担心自己出错"
+    )
+    assert first_review["allowed_memory"]["clinical_summaries"]
+    planning_payloads = [
+        payload for name, payload in gateway.calls if name == "CounselorPlanning"
+    ]
+    second_session_planning = planning_payloads[1]
+    assert (
+        second_session_planning["unlocked_client_info"]["main_problem"]
+        == "最近总担心自己出错"
+    )
+    assert second_session_planning["session_memory"]["clinical_summaries"]
+    assert result.sessions[1].messages[0].role == "counselor"
+    persisted = sandbox.store.load_memory(result.run_id)
+    assert persisted is not None
+    assert persisted.unlocked_client_info.main_problem == "最近总担心自己出错"
+    assert len(persisted.clinical_summaries) == 2
 
 
 def test_each_turn_has_safety_and_decision(sandbox):
@@ -43,21 +115,22 @@ def test_each_turn_has_safety_and_decision(sandbox):
     session = result.sessions[0]
     assert session.risk_events
     assert session.decisions
-    assert session.turn_records[0]["planning"]["action"] == "lookup_skills"
-    assert session.turn_records[0]["observation"]["status"] == "skills_found"
-    assert session.turn_records[0]["state_update"]["rule_delta"]
-    queries = session.turn_records[0]["skill_queries"]
+    assert session.turn_records[0]["planning"]["action"] == "respond_without_skill"
+    assert session.turn_records[1]["planning"]["action"] == "lookup_skills"
+    assert session.turn_records[1]["observation"]["status"] == "skills_found"
+    assert session.turn_records[1]["state_update"]["rule_delta"]
+    queries = session.turn_records[1]["skill_queries"]
     assert len(queries) == 1
     assert queries[0]["assessment"] == "suitable"
     assert queries[0]["planning"]["selection_evidence"]
     stored = sandbox.store.load_run(result.run_id)
-    assert stored.sessions[0].turn_records[0]["skill_queries"] == queries
-    record = session.turn_records[0]
-    stored_record = stored.sessions[0].turn_records[0]
+    assert stored.sessions[0].turn_records[1]["skill_queries"] == queries
+    record = session.turn_records[1]
+    stored_record = stored.sessions[0].turn_records[1]
     assert stored_record["planning"]["reasoning_summary"] == record["planning"]["reasoning_summary"]
     assert stored_record["client_turn_signal"]["rationale"] == record["client_turn_signal"]["rationale"]
     rows = (sandbox.run_dir / "trajectory.jsonl").read_text(encoding="utf-8").splitlines()
-    assert json.loads(rows[0])["session"]["turn_records"][0]["skill_queries"] == queries
+    assert json.loads(rows[0])["session"]["turn_records"][1]["skill_queries"] == queries
 
 
 def test_counselor_reviews_progress_and_replans_unmet_goals(sandbox):
@@ -80,8 +153,15 @@ def test_state_continues_across_sessions(sandbox):
     previous = result.sessions[0].final_state
     current = result.sessions[1].initial_state
     assert current.fatigue == max(0.1, round(previous.fatigue - 0.25, 4))
-    assert current.model_dump(exclude={"fatigue"}) == previous.model_dump(
-        exclude={"fatigue"}
+    baseline = sandbox.repository.get("psycheval-cbt-007").profile.initial_state
+    assert current.trust == round(
+        baseline.trust + 0.5 * (previous.trust - baseline.trust), 4
+    )
+    assert current.resistance == baseline.resistance
+    assert current.model_dump(
+        exclude={"fatigue", "trust", "resistance", "rupture_state"}
+    ) == previous.model_dump(
+        exclude={"fatigue", "trust", "resistance", "rupture_state"}
     )
 
 
@@ -146,7 +226,7 @@ def test_old_session_json_without_client_report_still_loads(sandbox):
     assert restored.client_simulation_report is None
 
 
-def test_patientact_pipeline_can_be_disabled(root, tmp_path):
+def test_patientact_pipeline_can_be_disabled(root, tmp_path, repository):
     config = SandboxConfig(
         project_root=root,
         max_turns_per_session=1,
@@ -156,7 +236,7 @@ def test_patientact_pipeline_can_be_disabled(root, tmp_path):
     )
     result = asyncio.run(
         CounselingSandbox(
-            config, gateway=DeterministicGateway()
+            config, gateway=DeterministicGateway(), repository=repository
         ).run_case("psycheval-cbt-009", session_count=1)
     )
     signal = result.sessions[0].turn_records[0]["client_turn_signal"]
@@ -170,14 +250,14 @@ class FailingGateway(ModelGateway):
         raise RuntimeError("synthetic model failure")
 
 
-def test_failed_run_is_persisted(root, tmp_path):
+def test_failed_run_is_persisted(root, tmp_path, repository):
     config = SandboxConfig(
         project_root=root,
         max_turns_per_session=1,
         database_path=tmp_path / "failed.sqlite3",
         trace_dir=tmp_path / "failed-traces",
     )
-    sandbox = CounselingSandbox(config, gateway=FailingGateway())
+    sandbox = CounselingSandbox(config, gateway=FailingGateway(), repository=repository)
     messages: list[str] = []
 
     with pytest.raises(RuntimeError, match="synthetic model failure"):
@@ -229,7 +309,11 @@ def test_repeated_runs_keep_separate_results_and_resume_in_new_instance(sandbox)
     assert first.run_id != second.run_id
     assert sandbox.run_dir != first_dir
     assert (first_dir / "result.json").read_bytes() == original
-    other = CounselingSandbox(sandbox.config, gateway=DeterministicGateway())
+    other = CounselingSandbox(
+        sandbox.config,
+        gateway=DeterministicGateway(),
+        repository=sandbox.repository,
+    )
     try:
         resumed = asyncio.run(other.run_case(
             first.case_id, session_count=2, resume_run_id=first.run_id
@@ -252,7 +336,9 @@ def test_runtime_diagnostics_and_temporary_files_stay_with_run(sandbox):
             return await super().complete_structured(**kwargs)
 
     gateway = RecordingGateway()
-    instance = CounselingSandbox(sandbox.config, gateway=gateway)
+    instance = CounselingSandbox(
+        sandbox.config, gateway=gateway, repository=sandbox.repository
+    )
     previous_tempdir = tempfile.gettempdir()
     try:
         asyncio.run(instance.run_case("psycheval-cbt-001", session_count=1))
@@ -263,13 +349,16 @@ def test_runtime_diagnostics_and_temporary_files_stay_with_run(sandbox):
         instance.store.close()
 
 
-def test_cli_simulate_report_and_visualize_share_artifacts(root, tmp_path, monkeypatch, capsys):
+def test_cli_simulate_report_and_visualize_share_artifacts(
+    root, tmp_path, repository, monkeypatch, capsys
+):
     from psychsandbox import cli
     from psychsandbox.artifacts import find_run_dir
     from psychsandbox.runtime import orchestrator
 
     monkeypatch.setenv("PSYCHSANDBOX_RUNTIME_DIR", str(tmp_path / "artifacts"))
     monkeypatch.setattr(orchestrator, "create_gateway", lambda: DeterministicGateway())
+    monkeypatch.setattr(cli.CaseRepository, "from_project", lambda _root: repository)
     args = cli.build_parser().parse_args([
         "--root", str(root), "simulate", "--case", "psycheval-cbt-001",
         "--sessions", "1", "--max-turns", "1", "--json",

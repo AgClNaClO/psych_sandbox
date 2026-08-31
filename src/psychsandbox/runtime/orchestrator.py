@@ -25,6 +25,7 @@ from ..evaluation import (
 )
 from ..client_simulation import ClientSimulator, ClientTurnInput
 from ..evaluation.rollout import SessionRolloutEvaluator
+from ..client_simulation.policies import create_client_policy
 from ..client_simulation.prompts import CLIENT_PROMPT_VERSION
 from ..domain import (
     CounselingCase,
@@ -37,7 +38,7 @@ from ..domain import (
     SessionPlan,
     SessionRecord,
     Trajectory,
-    UnlockedClientProfile,
+    UnlockedClientInfo,
 )
 from ..model_client import ModelGateway, create_gateway
 from ..skills import SkillCatalog, SkillRegistry
@@ -55,6 +56,7 @@ from .safety import SafetyStateMachine
 from .state import StateUpdater
 from .storage import SQLiteStore
 from .rollout import RolloutSelectionError, SessionRolloutRunner, has_saved_rollout_risk, selected_reward
+from .leakage import normalize_disclosure_text
 
 
 def _therapy_codes(therapy: str) -> list[str]:
@@ -150,7 +152,10 @@ class CounselingSandbox:
         self.disclosure = DisclosureGate()
         self.state_updater = StateUpdater()
         self.client_simulator = ClientSimulator(
-            self.client, self.disclosure, self.state_updater
+            self.client,
+            self.disclosure,
+            self.state_updater,
+            policy=create_client_policy(config.client_policy, self.client),
         )
         self.consolidator = MemoryConsolidator()
         self.longitudinal = LongitudinalEvaluator()
@@ -222,6 +227,39 @@ class CounselingSandbox:
             raise ValueError("Saved session is missing its committed memory")
         if previous_sessions and previous_sessions[-1].longitudinal_report and previous_sessions[-1].longitudinal_report.stage_action == "close":
             raise ValueError("The saved course is already closed")
+        if memory is not None:
+            if any("legacy unlocked_profile" in item for item in memory.migration_warnings):
+                legacy_facts = list(memory.unlocked_client_info.facts)
+                memory.unlocked_client_info = UnlockedClientInfo(
+                    client_id=case.profile.client_id
+                )
+                for previous in previous_sessions:
+                    extracted = await self.memory_extractor.extract(
+                        previous.messages,
+                        _therapy_codes(case.therapy),
+                        previous.session_index,
+                    )
+                    memory.unlocked_client_info = await self.client_merger.merge(
+                        memory.unlocked_client_info,
+                        extracted,
+                        case.profile,
+                        _therapy_codes(case.therapy),
+                    )
+                spoken = normalize_disclosure_text(" ".join(
+                    message.content
+                    for previous in previous_sessions
+                    for message in previous.messages
+                    if message.role == "client"
+                ))
+                evidenced = [
+                    fact for fact in legacy_facts
+                    if normalize_disclosure_text(fact.content) in spoken
+                ]
+                migrated, warnings = self.client_simulator.migrate_legacy_unlocked(
+                    case.profile, evidenced
+                )
+                memory.unlocked_client_info.facts = migrated
+                memory.migration_warnings.extend(warnings)
         run_id = resume_run_id or f"run-{uuid.uuid4().hex[:12]}"
         self.run_dir = (
             find_run_dir(self.config.trace_dir, run_id)
@@ -282,7 +320,9 @@ class CounselingSandbox:
                     memory_before = memory.model_copy(deep=True)
                     initial_state = (
                         self.client_simulator.prepare_session_state(
-                            sessions[-1].final_state
+                            sessions[-1].final_state,
+                            case.profile.initial_state,
+                            self.config.session_trust_retention,
                         )
                         if sessions else case.profile.initial_state.model_copy(deep=True)
                     )
@@ -307,6 +347,14 @@ class CounselingSandbox:
                     session.longitudinal_report = self.longitudinal.evaluate(
                         session, sessions
                     )
+                    # Only the selected dialogue reaches E.7/E.8/E.9.  Review
+                    # and next-session planning must see the newly merged memory.
+                    await self._consolidate_memory_pipeline(
+                        case, session, plan, memory
+                    )
+                    memory = self.consolidator.consolidate(
+                        memory, session, next_index=session_index + 1
+                    )
                     baseline_next = self._baseline_next_plan(
                         case, session, session_index + 1
                     )
@@ -325,12 +373,6 @@ class CounselingSandbox:
                         baseline_next,
                         session.longitudinal_report,
                         session.counselor_review,
-                    )
-                    await self._consolidate_memory_pipeline(
-                        case, session, plan, memory
-                    )
-                    memory = self.consolidator.consolidate(
-                        memory, session, next_index=session_index + 1
                     )
                     trajectory = Trajectory(
                         trajectory_id=f"traj-{uuid.uuid4().hex[:12]}",
@@ -440,16 +482,7 @@ class CounselingSandbox:
         client_simulator = client_simulator or self.client_simulator
         initial = state.model_copy(deep=True)
         session_started_at = time.monotonic()
-        messages = [
-            Message(
-                session_index=plan.session_index,
-                turn_index=0,
-                role="client",
-                content=client_simulator.start_session(
-                    case.profile, memory, plan.session_index
-                ),
-            )
-        ]
+        messages: list[Message] = []
         decisions, risks, interventions, new_fact_ids, turn_records = [], [], [], [], []
         recent_signals: list[ClientTurnSignal] = []
         end_reason = "max_turns"
@@ -474,7 +507,7 @@ class CounselingSandbox:
                 label=progress_label,
             ))
         for turn_index in range(1, self.config.max_turns_per_session + 1):
-            client_text = messages[-1].content
+            client_text = messages[-1].content if messages else ""
             risk = self.safety.assess_input(client_text)
             risks.append(risk)
             state_before = state.model_dump(mode="json")
@@ -522,7 +555,7 @@ class CounselingSandbox:
                     state=state,
                     counselor_turn=counselor_turn,
                     recent_messages=messages,
-                    unlocked_facts=memory.unlocked_profile.facts,
+                    unlocked_facts=memory.unlocked_client_info.facts,
                     recent_signals=recent_signals,
                     session_index=plan.session_index,
                     turn_index=turn_index,
@@ -533,8 +566,8 @@ class CounselingSandbox:
             signal = client_turn.signal
             client_generation = client_turn.generation
             leakage = client_turn.leakage
-            memory.unlocked_profile.facts = client_simulator.merge_unlocked(
-                memory.unlocked_profile.facts, client_turn.newly_unlocked
+            memory.unlocked_client_info.facts = client_simulator.merge_unlocked(
+                memory.unlocked_client_info.facts, client_turn.newly_unlocked
             )
             new_fact_ids.extend(
                 item.fact_id for item in client_turn.newly_unlocked
@@ -622,7 +655,12 @@ class CounselingSandbox:
                 pullback_after=self.config.client_pullback_after,
                 leak_retry_limit=self.config.disclosure_leak_retry_limit,
             )
-            simulator = ClientSimulator(client, DisclosureGate(), StateUpdater())
+            simulator = ClientSimulator(
+                client,
+                DisclosureGate(),
+                StateUpdater(),
+                policy=create_client_policy(self.config.client_policy, client),
+            )
             branch_case = case.model_copy(deep=True)
             session = await self._run_session(
                 branch_case, plan.model_copy(deep=True), branch_memory, branch_state,
@@ -649,20 +687,7 @@ class CounselingSandbox:
         profile = case.profile
         return SessionMemory(
             case_id=case.case_id,
-            unlocked_profile=UnlockedClientProfile(
-                client_id=profile.client_id,
-                public_background={
-                    "age": profile.static_traits.age,
-                    "gender": profile.static_traits.gender,
-                    "occupation": profile.static_traits.occupation,
-                    "main_problem": profile.main_problem,
-                    "topic": profile.topic,
-                    "language_style": profile.language_style,
-                },
-                expressed_problems=[profile.main_problem],
-                confirmed_goals=[profile.core_demands],
-            ),
-            confirmed_goals=[profile.core_demands],
+            unlocked_client_info=UnlockedClientInfo(client_id=profile.client_id),
         )
 
     def _plan_for(
@@ -717,8 +742,8 @@ class CounselingSandbox:
             therapy_codes,
             session.session_index,
         )
-        memory.evolving_profile = await self.client_merger.merge(
-            memory.evolving_profile,
+        memory.unlocked_client_info = await self.client_merger.merge(
+            memory.unlocked_client_info,
             extracted,
             case.profile,
             therapy_codes,

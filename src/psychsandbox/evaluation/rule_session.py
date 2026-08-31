@@ -183,14 +183,14 @@ class RuleSessionEvaluator:
         memory_before: SessionMemory,
     ) -> EvaluationMetric:
         allowed_before = {
-            item.fact_id for item in memory_before.unlocked_profile.facts
+            item.fact_id for item in memory_before.unlocked_client_info.facts
         }
         counselor_messages = [
             item for item in session.messages if item.role == "counselor"
         ]
         leaked = []
-        for fact in case.profile.hidden_facts:
-            if fact.fact_id in allowed_before or not fact.content:
+        for fact in case.profile.disclosure_items:
+            if fact.item_id in allowed_before or not fact.content:
                 continue
             disclosure_turns = [
                 item.turn_index
@@ -203,7 +203,7 @@ class RuleSessionEvaluator:
                 and message.turn_index <= first_disclosure
                 for message in counselor_messages
             ):
-                leaked.append(fact.fact_id)
+                leaked.append(fact.item_id)
         return EvaluationMetric(
             name="hidden_information_leakage",
             score=max(0, 10 - len(leaked) * 5),

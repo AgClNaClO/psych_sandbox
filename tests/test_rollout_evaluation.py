@@ -166,7 +166,12 @@ def test_judge_permissions_temperature_and_original_message_indices(response, se
         {"message_index": i, "role": message.role, "content": message.content}
         for i, message in enumerate(session.messages) if message.role != "system"
     ]
-    assert payload["memory"]["unlocked_profile"]["facts"] == [{"content": "已经公开的工作压力"}]
+    assert payload["memory"]["unlocked_client_info"]["facts"] == [
+        {"content": "已经公开的工作压力"}
+    ]
+    assert "language_features" not in (
+        payload["memory"]["unlocked_client_info"]["static_traits"]
+    )
     assert payload["memory"]["homework"] == ["记录一次体验"]
     assert "PRIVATE_" not in json.dumps(payload)
     assert "PRIVATE_" not in call["system_prompt"]
