@@ -33,3 +33,6 @@ rft:
   min_fidelity_score: 6
   judge_retries: 3  # 评分校验失败（如引用非原文精确子串）时的重试次数
   resample_limit: 2
+client:
+  policy: compact_patientact
+  session_trust_retention: 0.5

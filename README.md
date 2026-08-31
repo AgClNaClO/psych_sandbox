@@ -34,10 +34,14 @@ psych-sandbox visualize --run run-xxxxxxxxxxxx
 
 - 将运行时扩充为行为（BT）、认知行为（CBT）、人本—存在（HET）、心理动力（PDT）和后现代（PMT）五流派；每个流派使用独立病例字段、技能树、概念化重点和专属评估指标。
 - 新增 CBT 与人本—存在取向的独立 `TherapyProfile`，避免混用不同流派的数据与评估标准。
-- 将模拟来访者拆分为内部状态规划和自然语言表达两个阶段，增加话题边界、阻抗、提前披露防护及对话循环修复。当前来访者提示词版本为 `psycheval_patientact_v4`。
-- 修复来访者披露链路：规划器选择的事实才会进入语言模型；本轮声称披露的事实必须能从实际台词核验；跨会谈只复用已经说过的证据片段，不把完整隐藏层写入记忆。
-- 将同类/跨类别候选统一进行歧义消解，并将公开主诉从私密泄漏匹配中排除；保留确定性近似匹配、重试和安全替代回答作为纵深防护。
-- PatientAct 关系参数只从 PsychEval 有明确证据的核心信念、应对方式、敏感主题和情绪词派生；无来源的人格和依恋维度保持中性或未指定，不由模型臆造。
+- 将模拟来访者拆分为内部策略规划和自然语言表达两个阶段，增加语义原子门控、阻抗、
+  提前披露防护及对话循环修复。当前来访者提示词版本为 `psycheval_patientact_v5`。
+- 修复来访者披露链路：规划器选择的事实才会进入语言模型；本轮声称披露的事实必须能从
+  实际台词核验；跨会谈只复用已经说过的证据片段，不把完整隐藏层写入记忆。
+- 将同类/跨类别候选统一进行歧义消解，并将公开主诉从私密泄漏匹配中排除；保留确定性
+  近似匹配、重试和安全替代回答作为纵深防护。
+- PatientAct 互动先验只从 PsychEval 有明确来源的流派字段派生；新画像不再生成无来源的
+  Big Five 或依恋维度，PDT 之外也不会为凑齐结构而强制生成完整 CCRT。
 - 合入 `patientact-client-upgrade-v4` 的 E.7/E.8/E.9 会后记忆流水线、整体督导与存储更新。
 - 将咨询师升级为 API 驱动的 `evidence_vector_retry_v2`：先规划，再查询技能并观察结果，最后执行回复；技能选择要求公开适用依据；原子候选过多时才使用向量筛选，差查询最多纠错一次。
 - 新增独立的来访者真实性评估、规则会谈评估和跨 session 纵向趋势分析。
@@ -111,11 +115,18 @@ SQLite、JSONL 轨迹和后续经验池
 - 同类事实无法精确区分时的歧义信号。
 - 咨询师上一轮回复和近期对话。
 
-生成器看不到未授权成长经历、特殊情境、完整 CBT 概念化材料或咨询师内部 session 目标。事实门控先找候选，再由内部规划器选择真正相关的事实；跨类别候选如果无法唯一定位，来访者会请求具体化而不是同时披露。生成器返回的 `disclosed_fact_ids` 还要与实际台词核验，只有找到文本证据的事实才会解锁，记忆中保存的也是本轮说出的片段而不是整层隐藏档案。
+生成器看不到未授权成长经历、特殊情境、完整 CBT 概念化材料或咨询师内部 session 目标。
+事实门控先找候选，再由内部规划器选择真正相关的事实；跨类别候选如果无法唯一定位，来访者会
+请求具体化而不是同时披露。生成器返回的 `disclosed_fact_ids` 还要与实际台词核验，只有找到
+文本证据的事实才会解锁，记忆中保存的也是本轮说出的片段而不是完整私密档案。
 
 回答经过确定性提前披露检查；检查会排除公开主诉和已说过的旧记忆，并对相近改写做近似匹配。首次失败会重试，仍失败则使用符合当前行为信号的安全替代回答。该检查是纵深防护，不等同于完整语义理解；最终的多会话语义一致性仍由 PsychEval 整体督导和人工评审承担。
 
-PatientAct 参数采用“有证据才派生”的原则：核心信念、显式应对策略、高敏感事实标签和原文情绪词可进入关系画像；PsychEval 没有提供证据的 Big Five 和依恋类型保持中性/未指定。状态在会谈内允许非线性波动，信任变化只按内部规划器的本轮信号计算一次；跨会谈保留长期状态，同时恢复一部分短期疲劳，避免 6–10 次会谈中疲劳只能单向累积。
+PatientAct 参数采用“有证据才派生”的原则：PsychEval 原始字段先编译为可追溯的 `EvidenceNode`，
+再投影为原子 `DisclosureItem`、带来源的 5Ps 和按流派构建的 `InteractionPrior`。新画像不生成
+Big Five 或依恋类型；PDT 可从核心冲突、客体关系和反应模式形成 CCRT-like 结构，其他流派只保留
+其证据足以支持的互动倾向。状态在会谈内允许非线性波动，信任变化下一轮生效；跨会谈按配置系数
+保留信任并恢复短期状态，避免 6–10 次会谈中疲劳只能单向累积。
 
 ### 3.2 多流派咨询师
 
@@ -307,29 +318,37 @@ runs\runtime\时间__data-fetch__编号\external\psycheval\
 e04df535749e5bca76fcc45d9a85f3f46a082d91
 ```
 
-### 6.2 可选：生成单流派 processed 数据
+### 6.2 必需：编译 schema-v4 五流派 processed 数据
 
 ```bat
-psych-sandbox data convert --therapy cbt
+psych-sandbox data convert --therapy all --atomizer extractive
 ```
 
-`--therapy` 可取 `bt`、`cbt`、`het`、`pdt`、`pmt`。该命令生成单流派可重建缓存；每次转换保存到新目录，并更新最近成功缓存的指针；旧结果保留。正常仿真直接读取仓库内全部原始病例。
+schema-v4 运行时缓存是五流派原子替换单元，因此生产转换要求 `--therapy all` 和
+`--atomizer extractive`，并要求显式配置 `PROFILE_MODEL`，不会回退 `CLIENT_MODEL`。转换先按每流派 5 个固定
+样本执行 pilot，再对成长经历、`language_features`、`core_demands` 和 5Ps 候选字段执行逐字 span
+抽取。失败项保留原文并标记 `needs_review`；pilot fallback 超过 5% 时整批中止。
 
 转换结果作为可重建缓存写入：
 
 ```text
-runs\runtime\时间__data-convert-流派__编号\processed\psycheval\
+data\processed\psycheval\
 ├── all.jsonl
 ├── train.jsonl
 ├── validation.jsonl
 ├── test.jsonl
 ├── skills.json
+├── compilation_audit.json
+├── by_therapy\<流派>\atomization_audit.jsonl
 └── manifest.json
 ```
 
-`manifest.json` 保存案例数量、技能数量、上游提交、许可证、集合划分和源文件摘要。
+转换先在 `data\processed` 下写入独立 staging 目录，只有 schema、341 案例、五流派计数、来源 ID
+和源摘要全部通过验证后，才原子替换上述目录。`manifest.json` 还保存抽取模型、prompt 版本、
+fallback/needs_review 与 5Ps coverage 统计。该目录是可重建且被 Git 忽略的缓存，不提交到仓库。
 
-正常运行不依赖该目录；案例仓库会优先兼容 processed 数据，并直接读取仓库内的原始案例。
+正常运行必须存在有效的 schema-v4 processed 数据。案例仓库不会升级旧 processed，也不会从原始
+JSON 即时编译或覆盖；缺失或不匹配时会提示显式执行转换命令。
 
 ### 6.3 检查案例
 
@@ -446,6 +465,7 @@ psych-sandbox simulate ^
 set MODEL_API_KEY=你的密钥
 set MODEL_BASE_URL=https://你的兼容接口地址/v1
 set CLIENT_MODEL=来访者模型名称
+set PROFILE_MODEL=离线画像抽取模型名称
 set COUNSELOR_MODEL=咨询师模型名称
 set SUPERVISOR_MODEL=督导师模型名称
 set MODEL_TIMEOUT_SECONDS=90
@@ -537,7 +557,9 @@ outputs\
 checkpoints\
 ```
 
-旧版 `data\external` 与 `data\processed` 仅兼容读取；新的下载/转换缓存按次写入 `runs\runtime`。仓库内的 `data\<therapy>`、`assets` 和 `prompts` 是固定研究资源，但只有上述明确标为运行入口的子集会被当前代码加载。项目不采集真实医疗记录、真实咨询录音或真实求助者隐私。人工评测应仅使用公开案例、合成资料或经过批准的脱敏材料。
+下载产物按次保存在 `runs\runtime` 并通过最近成功指针供显式转换使用；转换后的唯一运行时案例缓存固定为
+`data\processed\psycheval`。运行时不会读取旧 processed、不会动态转换原始 JSON，也不会用本地 legacy profile
+回退。仓库内的 `data\<therapy>`、`assets` 和 `prompts` 是固定研究资源，但只有上述明确标为运行入口的子集会被当前代码加载。项目不采集真实医疗记录、真实咨询录音或真实求助者隐私。人工评测应仅使用公开案例、合成资料或经过批准的脱敏材料。
 
 PsychEval 采用 CC BY-NC 4.0，本项目对其数据的使用限于非商业教学研究。转换器增加了统一字段、确定性划分、派生元技能 ID 和仿真人格先验，但不会伪造官方缺失的原子技能 ID。详见 [NOTICE.md](NOTICE.md) 和 [THIRD_PARTY_LICENSES](THIRD_PARTY_LICENSES/README.md)。
 

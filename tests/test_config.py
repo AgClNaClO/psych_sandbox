@@ -310,12 +310,16 @@ def test_simulate_uses_resolved_config(
 
 
 @pytest.mark.parametrize(
-    "command", [["data", "fetch", "psycheval"], ["data", "convert", "--therapy", "bt"]]
+    "command", [["data", "fetch", "psycheval"], ["data", "convert", "--therapy", "all"]]
 )
 def test_data_commands_do_not_require_runtime_config(tmp_path, monkeypatch, command):
     _write_runtime(tmp_path, {"rft": {"candidates": 0}})
-    handler = Mock(return_value=0)
-    monkeypatch.setattr(cli, "_data", handler)
+    if command[1] == "fetch":
+        handler = Mock(return_value=0)
+        monkeypatch.setattr(cli, "_data", handler)
+    else:
+        handler = AsyncMock(return_value={})
+        monkeypatch.setattr(cli, "_convert_data", handler)
     monkeypatch.setattr(cli, "load_dotenv", Mock())
     monkeypatch.setattr("sys.argv", ["psych-sandbox", "--root", str(tmp_path), *command])
 

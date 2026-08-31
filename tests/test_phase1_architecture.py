@@ -15,7 +15,7 @@ from psychsandbox.visualization import generate_run_report
 from tests.deterministic_gateway import DeterministicGateway
 
 
-def _sandbox(root, tmp_path, *, max_turns: int = 2) -> CounselingSandbox:
+def _sandbox(root, tmp_path, repository, *, max_turns: int = 2) -> CounselingSandbox:
     return CounselingSandbox(
         SandboxConfig(
             project_root=root,
@@ -24,19 +24,26 @@ def _sandbox(root, tmp_path, *, max_turns: int = 2) -> CounselingSandbox:
             trace_dir=tmp_path / "traces",
         ),
         gateway=DeterministicGateway(),
+        repository=repository,
     )
 
 
-def test_converted_case_has_complete_five_ps(sample_case):
+def test_converted_case_has_source_grounded_five_ps_without_forced_sections(sample_case):
     formulation = sample_case.profile.formulation_5ps
-    assert set(formulation.covered_sections()) == {
-        "presenting",
-        "predisposing",
-        "precipitating",
-        "perpetuating",
-        "protective",
-    }
-    assert formulation.source_fields
+    assert {"presenting", "precipitating", "perpetuating"}.issubset(
+        set(formulation.covered_sections())
+    )
+    assert all(
+        item.source_ids
+        for section in (
+            formulation.presenting_problem,
+            formulation.predisposing_factors,
+            formulation.precipitating_factors,
+            formulation.perpetuating_factors,
+            formulation.protective_factors,
+        )
+        for item in section
+    )
 
 
 def test_phase_one_has_five_registered_therapy_profiles():
@@ -90,13 +97,14 @@ def test_each_therapy_uses_its_configured_holistic_instruments(
 def test_each_therapy_runs_with_specific_skills_and_metric(
     root,
     tmp_path,
+    repository,
     therapy_code,
     therapy_id,
     metric_name,
     counselor_instrument,
     client_instrument,
 ):
-    sandbox = _sandbox(root, tmp_path)
+    sandbox = _sandbox(root, tmp_path, repository)
     result = asyncio.run(
         sandbox.run_case(
             f"psycheval-{therapy_code}-001",
@@ -125,8 +133,8 @@ def test_each_therapy_runs_with_specific_skills_and_metric(
     }
 
 
-def test_longitudinal_report_and_feedback_plan_are_persisted(root, tmp_path):
-    sandbox = _sandbox(root, tmp_path)
+def test_longitudinal_report_and_feedback_plan_are_persisted(root, tmp_path, repository):
+    sandbox = _sandbox(root, tmp_path, repository)
     result = asyncio.run(
         sandbox.run_case("psycheval-cbt-001", session_count=3)
     )
@@ -144,8 +152,8 @@ def test_longitudinal_report_and_feedback_plan_are_persisted(root, tmp_path):
     assert restored.sessions[1].longitudinal_report is not None
 
 
-def test_supervision_can_advance_next_session_stage(root, tmp_path):
-    sandbox = _sandbox(root, tmp_path, max_turns=8)
+def test_supervision_can_advance_next_session_stage(root, tmp_path, repository):
+    sandbox = _sandbox(root, tmp_path, repository, max_turns=8)
     result = asyncio.run(
         sandbox.run_case("psycheval-cbt-001", session_count=1)
     )
@@ -154,8 +162,8 @@ def test_supervision_can_advance_next_session_stage(root, tmp_path):
     assert session.next_session_plan.stage is SessionStage.INTERVENTION
 
 
-def test_six_session_course_keeps_state_and_memory_continuity(root, tmp_path):
-    sandbox = _sandbox(root, tmp_path, max_turns=1)
+def test_six_session_course_keeps_state_and_memory_continuity(root, tmp_path, repository):
+    sandbox = _sandbox(root, tmp_path, repository, max_turns=1)
     result = asyncio.run(
         sandbox.run_case("psycheval-cbt-001", session_count=6)
     )
@@ -166,16 +174,24 @@ def test_six_session_course_keeps_state_and_memory_continuity(root, tmp_path):
         result.sessions[1:],
         strict=True,
     ):
+        baseline = sandbox.repository.get("psycheval-cbt-001").profile.initial_state
+        expected_trust = baseline.trust + 0.5 * (
+            previous.final_state.trust - baseline.trust
+        )
+        assert current.initial_state.trust == round(expected_trust, 4)
+        assert current.initial_state.resistance == baseline.resistance
         assert current.initial_state.model_dump(
-            exclude={"fatigue"}
-        ) == previous.final_state.model_dump(exclude={"fatigue"})
+            exclude={"fatigue", "trust", "resistance", "rupture_state"}
+        ) == previous.final_state.model_dump(
+            exclude={"fatigue", "trust", "resistance", "rupture_state"}
+        )
         assert current.initial_state.fatigue == max(
             0.1, round(previous.final_state.fatigue - 0.25, 4)
         )
 
 
-def test_visual_report_contains_process_results_and_turns(root, tmp_path):
-    sandbox = _sandbox(root, tmp_path, max_turns=1)
+def test_visual_report_contains_process_results_and_turns(root, tmp_path, repository):
+    sandbox = _sandbox(root, tmp_path, repository, max_turns=2)
     result = asyncio.run(
         sandbox.run_case("psycheval-cbt-002", session_count=2)
     )
@@ -260,8 +276,8 @@ def test_decision_summary_shows_rejected_and_accepted_query_plans():
     assert "hidden-provider-field" not in html
 
 
-def test_resume_rejects_different_case(root, tmp_path):
-    sandbox = _sandbox(root, tmp_path, max_turns=1)
+def test_resume_rejects_different_case(root, tmp_path, repository):
+    sandbox = _sandbox(root, tmp_path, repository, max_turns=1)
     first = asyncio.run(
         sandbox.run_case("psycheval-cbt-003", session_count=1)
     )

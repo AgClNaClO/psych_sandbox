@@ -7,7 +7,7 @@ Read this file when changing simulation flow, information permissions, therapy a
 - **Case**: one source-grounded runnable record from `data/<therapy>`.
 - **Session**: one bounded consultation containing several counselor/client turns and consolidation.
 - **Plan**: the current therapy stage, objectives, allowed meta skills and carry-over strategy.
-- **Memory**: spoken evidence, evolving profile, summaries, unresolved items and skill history. A hidden fact is not memory until client wording supplies verifiable evidence.
+- **Memory**: `UnlockedClientInfo` built from spoken evidence, clinical summaries, unresolved items and skill history. A private evidence atom is not counselor memory until client wording supplies verifiable evidence.
 - **Counselor review**: session-boundary API assessment of goal evidence and, when needed, a revised strategy.
 - **Rule evaluation**: deterministic per-session audit; it does not choose the next plan.
 - **Holistic supervision**: API PsychEval scoring once after all sessions; it does not choose the next plan.
@@ -37,3 +37,4 @@ Read this file when changing simulation flow, information permissions, therapy a
 5. SQLite, JSONL and HTML represent the same normalized `RunResult` contracts.
 6. RFT uses the previous committed winner as its sole baseline. Only the selected session enters consolidation; failed, duplicate and rejected branches stay in separate audit storage. See `../SESSION_RFT.md`.
 7. Confirmed run deletion removes only that run's records/files. Shared cases/skills survive; deletion journals block resume and report writers until cleanup is complete. Directory absence alone is not deletion consent.
+8. `ClientProfile.schema_version="4"` versions the private client case contract. `trace_schema_version=4` independently versions persisted trajectory structure; matching numbers do not make them the same schema.

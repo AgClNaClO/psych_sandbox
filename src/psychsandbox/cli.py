@@ -3,8 +3,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
+import shutil
 import sqlite3
 import sys
+import uuid
 from contextlib import closing
 from pathlib import Path
 
@@ -15,9 +18,15 @@ from .artifacts import (
     set_latest_data, write_json,
 )
 from .config import default_config
-from .datasets import CaseRepository, convert_psycheval, fetch_psycheval
+from .datasets import (
+    CaseRepository,
+    convert_psycheval_extractive,
+    fetch_psycheval,
+    merge_therapy_conversions,
+)
 from .domain import SandboxConfig
 from .runtime import CounselingSandbox, SQLiteStore
+from .model_client import create_gateway
 from .runtime.run_management import RunManager, available_run_dir
 from .therapies import normalize_therapy_id
 from .visualization import generate_run_report
@@ -44,7 +53,10 @@ def build_parser() -> argparse.ArgumentParser:
     fetch.add_argument("dataset", choices=["psycheval"])
     convert = data_commands.add_parser("convert")
     convert.add_argument(
-        "--therapy", choices=["bt", "cbt", "het", "pdt", "pmt"], default="cbt"
+        "--therapy", choices=["all", "bt", "cbt", "het", "pdt", "pmt"], default="all"
+    )
+    convert.add_argument(
+        "--atomizer", choices=["extractive", "rules"], default="extractive"
     )
 
     cases = commands.add_parser("cases")
@@ -321,22 +333,19 @@ def _open_store(root: Path) -> SQLiteStore:
 
 
 def _data(args: argparse.Namespace, root: Path) -> int:
-    kind = "external" if args.data_command == "fetch" else "processed"
-    label = "data-fetch" if kind == "external" else f"data-convert-{args.therapy}"
+    if args.data_command != "fetch":
+        raise RuntimeError(
+            "schema-v4 conversion is handled only by the atomic staging pipeline"
+        )
+    kind = "external"
+    label = "data-fetch"
     run_dir = create_artifact_dir(runtime_root(root), label)
     destination = run_dir / kind / "psycheval"
     metadata = {"command": label, "status": "running"}
     write_json(run_dir / "run.json", metadata)
     with local_temp_dir(run_dir / "tmp"):
         try:
-            if kind == "external":
-                fetch_psycheval(destination)
-            else:
-                source_dir = root
-                if not (root / "data" / args.therapy).is_dir():
-                    source_dir = latest_data_dir(root, "external")
-                manifest = convert_psycheval(source_dir, destination, therapy=args.therapy)
-                print(json.dumps(manifest, ensure_ascii=False, indent=2))
+            fetch_psycheval(destination)
             set_latest_data(root, kind, destination)
             metadata["status"] = "completed"
         except BaseException:
@@ -348,6 +357,69 @@ def _data(args: argparse.Namespace, root: Path) -> int:
     return 0
 
 
+async def _convert_data(args: argparse.Namespace, root: Path) -> dict:
+    if args.therapy != "all":
+        raise RuntimeError(
+            "schema-v4 runtime cache is atomic and must be compiled with --therapy all"
+        )
+    therapies = (
+        ["bt", "cbt", "het", "pdt", "pmt"]
+        if args.therapy == "all" else [args.therapy]
+    )
+    source_dir = root
+    if not all((source_dir / "data" / therapy).is_dir() for therapy in therapies):
+        source_dir = latest_data_dir(root, "external")
+    output_root = root / "data" / "processed" / "psycheval"
+    staging_root = output_root.parent / f".psycheval-staging-{uuid.uuid4().hex[:8]}"
+    if args.atomizer != "extractive":
+        raise RuntimeError(
+            "schema-v4 production conversion requires --atomizer extractive"
+        )
+    if not os.getenv("PROFILE_MODEL"):
+        raise RuntimeError("PROFILE_MODEL must be configured for schema-v4 conversion")
+    gateway = (
+        create_gateway(
+            diagnostic_dir=staging_root / "diagnostics",
+            required_roles={"profile"},
+        )
+        if args.atomizer == "extractive" else None
+    )
+    if not getattr(gateway, "models", {}).get("profile"):
+        raise RuntimeError("PROFILE_MODEL must be configured for schema-v4 conversion")
+    manifests = []
+    try:
+        for therapy in therapies:
+            output = (
+                staging_root / "by_therapy" / therapy
+                if args.therapy == "all" else staging_root
+            )
+            manifest = await convert_psycheval_extractive(
+                source_dir,
+                output,
+                therapy=therapy,
+                gateway=gateway,
+                cache_dir=(
+                    root / "data" / "processed" / ".psycheval-profile-cache" / therapy
+                ),
+            )
+            manifests.append(manifest)
+        combined = (
+            merge_therapy_conversions(staging_root, manifests)
+            if args.therapy == "all" else manifests[0]
+        )
+        if args.therapy == "all":
+            repository = CaseRepository(staging_root, raw_data_dir=source_dir)
+            repository.list()
+        if output_root.exists():
+            shutil.rmtree(output_root)
+        staging_root.replace(output_root)
+        return combined
+    except BaseException:
+        if staging_root.exists():
+            shutil.rmtree(staging_root)
+        raise
+
+
 def main() -> int:
     # Auto-load .env from project root so MODEL_API_KEY etc. are available
     load_dotenv(Path(__file__).resolve().parents[2] / ".env")
@@ -356,7 +428,12 @@ def main() -> int:
     if args.command == "runs":
         return _runs(args, root)
     if args.command == "data":
-        return _data(args, root)
+        if args.data_command == "fetch":
+            return _data(args, root)
+        else:
+            manifest = asyncio.run(_convert_data(args, root))
+            print(json.dumps(manifest, ensure_ascii=False, indent=2))
+        return 0
     if args.command == "cases":
         repository = CaseRepository.from_project(root)
         for case in repository.list(normalize_therapy_id(args.therapy)):
