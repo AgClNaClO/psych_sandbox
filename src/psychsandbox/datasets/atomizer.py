@@ -43,7 +43,8 @@ class AtomizationAudit(StrictModel):
 
 ATOMIZER_SYSTEM_PROMPT = """你是 PsychEval 来访者资料的有来源抽取器。你只能切分输入原文，不能改写、概括、解释或补充。
 每个 span 必须是原文中一个连续、完整、可单独披露的语义事实，并返回 Python 风格的 start（含）和 end（不含）。
-text 必须严格等于 source_text[start:end]。activation_tags 必须逐字出现在该 span 中。
+text 必须是 source_text 中逐字连续出现的原文。start/end 请尽量准确，但程序会依据 text 重新定位。
+activation_tags 必须逐字出现在该 span 中；不确定时返回空列表，不要概括或改写标签。
 purpose=growth 时 kind 只能是 event/emotion/belief/meaning/coping/consequence/resource。
 purpose=language 时，把内容分为 verbal_style/interaction_style/affective_expression/conditional_observation/case_fact；只有前三类是纯表达风格。包含具体人物、事件、症状、经历、目标或关系事实的内容不能标成纯风格。
 purpose=core_demands 时 kind 只能是 client_goal 或 treatment_instruction；来访者想获得的改变是 client_goal，指定咨询技术、疗程或咨询师动作是 treatment_instruction。
@@ -72,23 +73,44 @@ class ExtractiveAtomizer:
             except Exception:
                 pass
         try:
-            result = await self.gateway.complete_structured(
-                role="profile",
-                system_prompt=ATOMIZER_SYSTEM_PROMPT,
-                input_payload={
+            validation_error = ""
+            previous_output: dict | None = None
+            for semantic_attempt in range(2):
+                payload = {
                     "source_path": source_path,
                     "source_text": source_text,
                     "purpose": purpose,
                     "profile_schema_version": "4",
-                },
-                output_schema=ExtractedSpans,
-                temperature=0.0,
-            )
-            parsed = ExtractedSpans.model_validate(result)
-            spans = self._validate(source_text, parsed, purpose)
-            self.cache_dir.mkdir(parents=True, exist_ok=True)
-            cache_path.write_text(parsed.model_dump_json(indent=2), encoding="utf-8")
-            return spans, AtomizationAudit()
+                }
+                if validation_error:
+                    payload.update({
+                        "atomizer_repair_instruction": (
+                            "上次输出通过了 JSON schema，但没有通过逐字原文校验。"
+                            "请根据 validation_error 重新切分完整原文；不得改写、遗漏或补写。"
+                        ),
+                        "validation_error": validation_error,
+                        "invalid_previous_spans": previous_output,
+                    })
+                result = await self.gateway.complete_structured(
+                    role="profile",
+                    system_prompt=ATOMIZER_SYSTEM_PROMPT,
+                    input_payload=payload,
+                    output_schema=ExtractedSpans,
+                    temperature=0.0,
+                )
+                parsed = ExtractedSpans.model_validate(result)
+                try:
+                    spans = self._validate(source_text, parsed, purpose)
+                except ValueError as exc:
+                    if semantic_attempt == 0:
+                        validation_error = str(exc)
+                        previous_output = parsed.model_dump(mode="json")
+                        continue
+                    raise
+                self.cache_dir.mkdir(parents=True, exist_ok=True)
+                cache_path.write_text(parsed.model_dump_json(indent=2), encoding="utf-8")
+                return spans, AtomizationAudit()
+            raise RuntimeError("atomizer semantic retry loop ended unexpectedly")
         except Exception as exc:
             return [self._fallback(source_text, purpose)], AtomizationAudit(
                 fallback=True,
@@ -129,8 +151,9 @@ class ExtractiveAtomizer:
             if start < 0:
                 raise ValueError("atomizer text is not an exact source span")
             end = start + len(item.text)
-            if any(tag not in item.text for tag in item.activation_tags):
-                raise ValueError("activation tag is not present in its source span")
+            activation_tags = tuple(
+                tag for tag in item.activation_tags if tag and tag in item.text
+            )
             if purpose == "language" and item.kind in {
                 "verbal_style", "interaction_style", "affective_expression"
             } and _looks_like_case_fact(item.text):
@@ -143,7 +166,7 @@ class ExtractiveAtomizer:
                     end=end,
                     text=item.text,
                     kind=item.kind,
-                    activation_tags=tuple(item.activation_tags),
+                    activation_tags=activation_tags,
                     trust_tier=item.trust_tier,
                     five_ps_roles=tuple(item.five_ps_roles),
                     needs_review=False,

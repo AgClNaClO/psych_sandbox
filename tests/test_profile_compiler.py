@@ -20,12 +20,22 @@ class AtomizerGateway(ModelGateway):
     def __init__(self, *, invalid: bool = False, wrong_offsets: bool = False):
         self.invalid = invalid
         self.wrong_offsets = wrong_offsets
+        self.semantic_failure = ""
         self.calls = 0
         self.models = {"profile": "test-profile-model"}
 
     async def complete_structured(self, **kwargs):
         self.calls += 1
         schema = kwargs["output_schema"]
+        if self.semantic_failure and self.calls == 1:
+            spans = [] if self.semantic_failure == "empty" else [{
+                "start": 0,
+                "end": 5,
+                "text": "家庭支持。",
+                "activation_tags": ["家庭"],
+                "trust_tier": "moderate",
+            }]
+            return schema.model_validate({"spans": spans})
         if self.invalid:
             return schema.model_validate(
                 {
@@ -150,6 +160,40 @@ def test_pilot_failure_reports_the_underlying_atomizer_reason(root, tmp_path):
                 cache_dir=tmp_path / "cache",
             )
         )
+
+
+@pytest.mark.parametrize("failure", ["empty", "omitted"])
+def test_extractive_atomizer_retries_semantic_validation_failure(tmp_path, failure):
+    gateway = AtomizerGateway()
+    gateway.semantic_failure = failure
+    spans, audit = asyncio.run(
+        ExtractiveAtomizer(gateway, tmp_path).atomize(
+            source_path="client_info.growth_experiences[0]",
+            source_text="家庭支持。实习失败。",
+        )
+    )
+
+    assert [item.text for item in spans] == ["家庭支持。", "实习失败。"]
+    assert audit.fallback is False
+    assert gateway.calls == 2
+
+
+def test_extractive_atomizer_drops_ungrounded_activation_tag(tmp_path):
+    class InvalidTagGateway(AtomizerGateway):
+        async def complete_structured(self, **kwargs):
+            result = await super().complete_structured(**kwargs)
+            result.spans[0].activation_tags = ["家庭", "原文里不存在的标签"]
+            return result
+
+    spans, audit = asyncio.run(
+        ExtractiveAtomizer(InvalidTagGateway(), tmp_path).atomize(
+            source_path="client_info.growth_experiences[0]",
+            source_text="家庭支持。实习失败。",
+        )
+    )
+
+    assert spans[0].activation_tags == ("家庭",)
+    assert audit.fallback is False
 
 
 def test_three_free_text_fields_are_separated_without_counselor_leakage():
