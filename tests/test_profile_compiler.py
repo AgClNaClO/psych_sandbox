@@ -2,9 +2,14 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from psychsandbox.datasets.atomizer import ExtractiveAtomizer
 from psychsandbox.datasets.profile_compiler import AtomicSpan, stable_evidence_id
-from psychsandbox.datasets.psycheval import PsychEvalAdapter
+from psychsandbox.datasets.psycheval import (
+    PsychEvalAdapter,
+    convert_psycheval_extractive,
+)
 from psychsandbox.domain import ClientState, TrustTier
 from psychsandbox.model_client import ModelGateway
 
@@ -12,8 +17,9 @@ from psychsandbox.model_client import ModelGateway
 class AtomizerGateway(ModelGateway):
     provider_name = "atomizer-test"
 
-    def __init__(self, *, invalid: bool = False):
+    def __init__(self, *, invalid: bool = False, wrong_offsets: bool = False):
         self.invalid = invalid
+        self.wrong_offsets = wrong_offsets
         self.calls = 0
         self.models = {"profile": "test-profile-model"}
 
@@ -30,6 +36,27 @@ class AtomizerGateway(ModelGateway):
                         "activation_tags": ["模型"],
                         "trust_tier": "sensitive",
                     }]
+                }
+            )
+        if self.wrong_offsets:
+            return schema.model_validate(
+                {
+                    "spans": [
+                        {
+                            "start": 1,
+                            "end": 6,
+                            "text": "家庭支持。",
+                            "activation_tags": ["家庭"],
+                            "trust_tier": "moderate",
+                        },
+                        {
+                            "start": 7,
+                            "end": 12,
+                            "text": "实习失败。",
+                            "activation_tags": ["实习"],
+                            "trust_tier": "sensitive",
+                        },
+                    ]
                 }
             )
         return schema.model_validate(
@@ -91,6 +118,38 @@ def test_extractive_atomizer_falls_back_on_hallucinated_span(tmp_path):
     assert audit.validation_failed is True
     assert audit.needs_review is True
     assert spans[0].needs_review is True
+
+
+def test_extractive_atomizer_locates_exact_text_instead_of_trusting_model_offsets(
+    tmp_path,
+):
+    spans, audit = asyncio.run(
+        ExtractiveAtomizer(
+            AtomizerGateway(wrong_offsets=True), tmp_path
+        ).atomize(
+            source_path="client_info.growth_experiences[0]",
+            source_text="家庭支持。实习失败。",
+        )
+    )
+
+    assert [(item.start, item.end, item.text) for item in spans] == [
+        (0, 5, "家庭支持。"),
+        (5, 10, "实习失败。"),
+    ]
+    assert audit.fallback is False
+
+
+def test_pilot_failure_reports_the_underlying_atomizer_reason(root, tmp_path):
+    with pytest.raises(RuntimeError, match=r"43/43.*reasons:.*exact source span"):
+        asyncio.run(
+            convert_psycheval_extractive(
+                root,
+                tmp_path / "output",
+                therapy="bt",
+                gateway=AtomizerGateway(invalid=True),
+                cache_dir=tmp_path / "cache",
+            )
+        )
 
 
 def test_three_free_text_fields_are_separated_without_counselor_leakage():

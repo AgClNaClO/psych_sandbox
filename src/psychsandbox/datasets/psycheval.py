@@ -1036,6 +1036,7 @@ async def convert_psycheval_extractive(
     pilot_paths.extend(random.Random(42).sample(remaining, k=min(2, len(remaining))))
     pilot_total = 0
     pilot_fallbacks = 0
+    pilot_failure_reasons: dict[str, int] = {}
     for path in pilot_paths:
         for source_path, text, purpose in sources_for(raw_by_path[path]):
             _, item_audit = await atomizer.atomize(
@@ -1043,9 +1044,19 @@ async def convert_psycheval_extractive(
             )
             pilot_total += 1
             pilot_fallbacks += int(item_audit.fallback)
+            if item_audit.fallback:
+                reason = item_audit.reason or "unknown atomizer failure"
+                pilot_failure_reasons[reason] = pilot_failure_reasons.get(reason, 0) + 1
     if pilot_total and pilot_fallbacks / pilot_total > 0.05:
+        reasons = sorted(
+            pilot_failure_reasons.items(), key=lambda item: (-item[1], item[0])
+        )[:3]
+        reason_summary = "; ".join(
+            f"{count}x {reason}" for reason, count in reasons
+        )
         raise RuntimeError(
-            f"{therapy} pilot fallback ratio {pilot_fallbacks}/{pilot_total} exceeds 5%"
+            f"{therapy} pilot fallback ratio {pilot_fallbacks}/{pilot_total} exceeds 5%; "
+            f"reasons: {reason_summary}"
         )
 
     spans_by_case: dict[str, dict[str, list[AtomicSpan]]] = {}

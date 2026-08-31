@@ -109,7 +109,10 @@ class ExtractiveAtomizer:
     def _validate(source: str, output: ExtractedSpans, purpose: str) -> list[AtomicSpan]:
         if not output.spans:
             raise ValueError("atomizer returned no spans")
-        ordered = sorted(output.spans, key=lambda item: (item.start, item.end))
+        # Models are good at selecting verbatim text but unreliable at counting
+        # Unicode code points.  Treat returned text and order as authoritative,
+        # then derive character offsets deterministically from the source.
+        ordered = list(output.spans)
         previous_end = 0
         uncovered: list[str] = []
         result: list[AtomicSpan] = []
@@ -122,22 +125,22 @@ class ExtractiveAtomizer:
         for item in ordered:
             if item.kind not in allowed:
                 raise ValueError(f"invalid {purpose} span kind: {item.kind}")
-            if item.start < previous_end or item.end > len(source) or item.start >= item.end:
-                raise ValueError("atomizer spans overlap or are out of bounds")
-            if source[item.start:item.end] != item.text:
+            start = source.find(item.text, previous_end)
+            if start < 0:
                 raise ValueError("atomizer text is not an exact source span")
+            end = start + len(item.text)
             if any(tag not in item.text for tag in item.activation_tags):
                 raise ValueError("activation tag is not present in its source span")
             if purpose == "language" and item.kind in {
                 "verbal_style", "interaction_style", "affective_expression"
             } and _looks_like_case_fact(item.text):
                 raise ValueError("factual language_features content cannot enter expression style")
-            uncovered.append(source[previous_end:item.start])
-            previous_end = item.end
+            uncovered.append(source[previous_end:start])
+            previous_end = end
             result.append(
                 AtomicSpan(
-                    start=item.start,
-                    end=item.end,
+                    start=start,
+                    end=end,
                     text=item.text,
                     kind=item.kind,
                     activation_tags=tuple(item.activation_tags),
