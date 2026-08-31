@@ -90,6 +90,30 @@ class TrustChange(StrEnum):
     SIGNIFICANT_INCREASE = "significant_increase"
 
 
+class DerivationType(StrEnum):
+    DIRECT = "direct"
+    STRUCTURED_MAPPING = "structured_mapping"
+    MODEL_HYPOTHESIS = "model_hypothesis"
+
+
+class TrustTier(StrEnum):
+    ROUTINE = "routine"
+    BASIC = "basic"
+    MODERATE = "moderate"
+    SENSITIVE = "sensitive"
+    DEEP = "deep"
+
+    @property
+    def threshold(self) -> float:
+        return {
+            TrustTier.ROUTINE: 0.25,
+            TrustTier.BASIC: 0.30,
+            TrustTier.MODERATE: 0.40,
+            TrustTier.SENSITIVE: 0.55,
+            TrustTier.DEEP: 0.70,
+        }[self]
+
+
 class RuptureState(StrEnum):
     NONE = "none"
     EMERGING = "emerging"
@@ -137,23 +161,93 @@ class ClientRelationalProfile(StrictModel):
     confidence: float = Field(default=0, ge=0, le=1)
 
 
+class EvidenceNode(StrictModel):
+    evidence_id: str
+    source_path: str
+    source_text: str
+    source_start: int = Field(default=0, ge=0)
+    source_end: int = Field(default=0, ge=0)
+    kind: str
+    therapy: str
+    provenance: str = "psycheval"
+    five_ps_roles: list[str] = Field(default_factory=list)
+    needs_review: bool = False
+
+    @model_validator(mode="after")
+    def valid_source_offsets(self) -> EvidenceNode:
+        if self.source_end < self.source_start:
+            raise ValueError("evidence source_end must not precede source_start")
+        return self
+
+
+class FormulationItem(StrictModel):
+    text: str
+    source_ids: list[str] = Field(default_factory=list)
+    derivation: DerivationType = DerivationType.DIRECT
+
+
+class CCRT(StrictModel):
+    domain: str = "therapist"
+    wish: str = ""
+    expected_response: str = ""
+    self_response: str = ""
+    source_ids: list[str] = Field(default_factory=list)
+    derivation: DerivationType = DerivationType.STRUCTURED_MAPPING
+
+
+class EvidenceBackedPattern(StrictModel):
+    text: str
+    source_ids: list[str] = Field(default_factory=list)
+    derivation: DerivationType = DerivationType.STRUCTURED_MAPPING
+
+
+class ClientExpressionStyle(StrictModel):
+    """Source-backed client-only speaking guidance without case-event content."""
+
+    verbal_style: list[EvidenceBackedPattern] = Field(default_factory=list)
+    interaction_style: list[EvidenceBackedPattern] = Field(default_factory=list)
+    affective_expression: list[EvidenceBackedPattern] = Field(default_factory=list)
+
+
+class FivePsCoverageStatus(StrEnum):
+    SUPPORTED = "supported"
+    SOURCE_ABSENT = "source_absent"
+    UNCERTAIN = "uncertain"
+
+
+class FivePsCoverage(StrictModel):
+    status: FivePsCoverageStatus = FivePsCoverageStatus.SOURCE_ABSENT
+    source_ids: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+
+class InteractionPrior(StrictModel):
+    """Evidence-backed simulation prior; never a diagnosis or discloseable fact."""
+
+    therapist_pattern: CCRT | None = None
+    coping_patterns: list[EvidenceBackedPattern] = Field(default_factory=list)
+    emotional_access: list[EvidenceBackedPattern] = Field(default_factory=list)
+    expected_misattunement: list[EvidenceBackedPattern] = Field(default_factory=list)
+    source_ids: list[str] = Field(default_factory=list)
+
+
 class FivePsFormulation(StrictModel):
     """Auditable 5Ps case formulation used by the private client model.
 
-    Empty lists are allowed for legacy records, but newly converted cases should
-    populate every section and retain the source fields used for the derivation.
+    This is a cross-therapy evidence projection, not the canonical therapy
+    formulation.
     """
 
-    presenting_problem: str = ""
-    predisposing_factors: list[str] = Field(default_factory=list)
-    precipitating_factors: list[str] = Field(default_factory=list)
-    perpetuating_factors: list[str] = Field(default_factory=list)
-    protective_factors: list[str] = Field(default_factory=list)
-    source_fields: list[str] = Field(default_factory=list)
+    presenting_problem: list[FormulationItem] = Field(default_factory=list)
+    predisposing_factors: list[FormulationItem] = Field(default_factory=list)
+    precipitating_factors: list[FormulationItem] = Field(default_factory=list)
+    perpetuating_factors: list[FormulationItem] = Field(default_factory=list)
+    protective_factors: list[FormulationItem] = Field(default_factory=list)
+    coverage: dict[str, FivePsCoverage] = Field(default_factory=dict)
 
     def covered_sections(self) -> list[str]:
         sections = {
-            "presenting": bool(self.presenting_problem.strip()),
+            "presenting": bool(self.presenting_problem),
             "predisposing": bool(self.predisposing_factors),
             "precipitating": bool(self.precipitating_factors),
             "perpetuating": bool(self.perpetuating_factors),
@@ -171,12 +265,38 @@ class ClientState(StrictModel):
     trust: float = Field(default=0.25, ge=0, le=1)
     resistance: float = Field(default=0.4, ge=0, le=1)
     hope: float = Field(default=0.35, ge=0, le=1)
-    topic_readiness: dict[str, float] = Field(default_factory=dict)
     fatigue: float = Field(default=0.1, ge=0, le=1)
     rupture_state: RuptureState = RuptureState.NONE
 
+    @model_validator(mode="before")
+    @classmethod
+    def discard_legacy_topic_readiness(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "topic_readiness" in value:
+            value = dict(value)
+            value.pop("topic_readiness", None)
+        return value
+
+
+class DisclosureItem(StrictModel):
+    item_id: str
+    evidence_ids: list[str]
+    content: str
+    category: str = "background"
+    activation_tags: list[str] = Field(default_factory=list)
+    activation_examples: list[str] = Field(default_factory=list)
+    trust_tier: TrustTier = TrustTier.MODERATE
+    generates_discomfort: bool = False
+    session_scope: list[int] = Field(default_factory=list)
+    depends_on: list[str] = Field(default_factory=list)
+
+    @property
+    def fact_id(self) -> str:
+        """One-version compatibility alias for pre-v3 callers."""
+        return self.item_id
+
 
 class HiddenFact(StrictModel):
+    """Legacy v2 input contract. New profiles use DisclosureItem."""
     fact_id: str
     content: str
     category: str = "background"
@@ -206,21 +326,76 @@ class HiddenFact(StrictModel):
             self.generates_discomfort = self.sensitivity >= 0.6
         return self
 
+    def to_disclosure_item(self) -> DisclosureItem:
+        if self.minimum_trust >= 0.70:
+            tier = TrustTier.DEEP
+        elif self.minimum_trust >= 0.55:
+            tier = TrustTier.SENSITIVE
+        elif self.minimum_trust >= 0.40:
+            tier = TrustTier.MODERATE
+        else:
+            tier = TrustTier.BASIC
+        return DisclosureItem(
+            item_id=self.fact_id,
+            evidence_ids=[self.fact_id],
+            content=self.content,
+            category=self.category,
+            activation_tags=self.activation_tags,
+            activation_examples=self.activation_examples,
+            trust_tier=tier,
+            generates_discomfort=bool(self.generates_discomfort),
+        )
+
 
 class BlockedMemorySignal(StrictModel):
-    fact_id: str
+    item_id: str
     category: str
-    sensitivity: float = Field(ge=0, le=1)
+    trust_tier: TrustTier
     activation_evidence: list[str] = Field(default_factory=list)
     reason: str = "insufficient_trust"
 
+    @property
+    def fact_id(self) -> str:
+        """One-version compatibility alias; serialized output uses item_id."""
+        return self.item_id
+
+    @model_validator(mode="before")
+    @classmethod
+    def upgrade_legacy_signal(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        value = dict(value)
+        if "fact_id" in value and "item_id" not in value:
+            value["item_id"] = value.pop("fact_id")
+        sensitivity = value.pop("sensitivity", None)
+        if "trust_tier" not in value:
+            score = float(sensitivity or 0.5)
+            value["trust_tier"] = (
+                "deep" if score >= 0.8 else
+                "sensitive" if score >= 0.6 else
+                "moderate" if score >= 0.4 else "basic"
+            )
+        return value
+
 
 class DisclosureDecision(StrictModel):
-    retrieved: list[HiddenFact] = Field(default_factory=list)
+    retrieved: list[DisclosureItem] = Field(default_factory=list)
     blocked: list[BlockedMemorySignal] = Field(default_factory=list)
     activated_fact_ids: list[str] = Field(default_factory=list)
     activation_evidence: dict[str, list[str]] = Field(default_factory=dict)
     ambiguous_fact_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def upgrade_legacy_retrieved(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        value = dict(value)
+        value["retrieved"] = [
+            item.to_disclosure_item() if isinstance(item, HiddenFact) else item
+            for item in value.get("retrieved", [])
+        ]
+        return value
 
 
 class ClientTurnSignal(StrictModel):
@@ -232,6 +407,8 @@ class ClientTurnSignal(StrictModel):
     blocked_fact_ids: list[str] = Field(default_factory=list)
     trust_change: TrustChange = TrustChange.UNCHANGED
     rationale: str = ""
+    policy: str = ""
+    planning_model_calls: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def resistance_requires_pattern(self) -> ClientTurnSignal:
@@ -251,6 +428,7 @@ class ClientUtterance(StrictModel):
 
 
 class ClientProfile(StrictModel):
+    schema_version: Literal["4"] = "4"
     client_id: str
     static_traits: StaticTraits
     main_problem: str
@@ -259,20 +437,70 @@ class ClientProfile(StrictModel):
     growth_experiences: list[str] = Field(default_factory=list)
     formulation_5ps: FivePsFormulation = Field(default_factory=FivePsFormulation)
     theory: dict[str, Any] = Field(default_factory=dict)
-    personality: BigFive = Field(default_factory=BigFive)
-    relational: ClientRelationalProfile = Field(default_factory=ClientRelationalProfile)
+    evidence_nodes: list[EvidenceNode] = Field(default_factory=list)
+    disclosure_items: list[DisclosureItem] = Field(default_factory=list)
+    interaction_prior: InteractionPrior = Field(default_factory=InteractionPrior)
+    expression_style: ClientExpressionStyle = Field(default_factory=ClientExpressionStyle)
+    personality: BigFive = Field(default_factory=BigFive, exclude=True)
+    relational: ClientRelationalProfile = Field(
+        default_factory=ClientRelationalProfile, exclude=True
+    )
     initial_state: ClientState = Field(default_factory=ClientState)
-    language_style: str = ""
-    opening: str = ""
-    hidden_facts: list[HiddenFact] = Field(default_factory=list)
 
-    @field_validator("hidden_facts")
+    @field_validator("evidence_nodes")
     @classmethod
-    def unique_hidden_ids(cls, facts: list[HiddenFact]) -> list[HiddenFact]:
-        ids = [item.fact_id for item in facts]
+    def unique_evidence_ids(cls, nodes: list[EvidenceNode]) -> list[EvidenceNode]:
+        ids = [item.evidence_id for item in nodes]
         if len(ids) != len(set(ids)):
-            raise ValueError("hidden fact IDs must be unique")
-        return facts
+            raise ValueError("evidence node IDs must be unique")
+        return nodes
+
+    @field_validator("disclosure_items")
+    @classmethod
+    def unique_disclosure_ids(
+        cls, items: list[DisclosureItem]
+    ) -> list[DisclosureItem]:
+        ids = [item.item_id for item in items]
+        if len(ids) != len(set(ids)):
+            raise ValueError("disclosure item IDs must be unique")
+        return items
+
+    @model_validator(mode="after")
+    def validate_evidence_projections(self) -> ClientProfile:
+        evidence_ids = {item.evidence_id for item in self.evidence_nodes}
+        if any(
+            not item.evidence_ids or not set(item.evidence_ids).issubset(evidence_ids)
+            for item in self.disclosure_items
+        ):
+            raise ValueError("disclosure items must reference existing evidence")
+        sections = (
+            self.formulation_5ps.presenting_problem,
+            self.formulation_5ps.predisposing_factors,
+            self.formulation_5ps.precipitating_factors,
+            self.formulation_5ps.perpetuating_factors,
+            self.formulation_5ps.protective_factors,
+        )
+        for item in (entry for section in sections for entry in section):
+            if (
+                not item.source_ids
+                or not set(item.source_ids).issubset(evidence_ids)
+                or item.derivation is DerivationType.MODEL_HYPOTHESIS
+            ):
+                raise ValueError("5Ps items require legal evidence and no hypotheses")
+        for coverage in self.formulation_5ps.coverage.values():
+            if not set(coverage.source_ids).issubset(evidence_ids):
+                raise ValueError("5Ps coverage must reference existing evidence")
+        style_items = (
+            self.expression_style.verbal_style
+            + self.expression_style.interaction_style
+            + self.expression_style.affective_expression
+        )
+        if any(
+            not item.source_ids or not set(item.source_ids).issubset(evidence_ids)
+            for item in style_items
+        ):
+            raise ValueError("expression style must reference existing evidence")
+        return self
 
 
 class UnlockedFact(StrictModel):
@@ -281,16 +509,21 @@ class UnlockedFact(StrictModel):
     evidence_session: int = Field(ge=1)
     evidence_turn: int = Field(ge=0)
     disclosure_method: Literal["explicit", "confirmed_inference"] = "explicit"
-    disclosure_level: int = Field(default=1, ge=1)
+    disclosure_level: int = Field(default=1, ge=1, exclude=True)
 
 
-class UnlockedClientProfile(StrictModel):
+class UnlockedClientInfo(StrictModel):
+    """The counselor's sole structured knowledge, built only from spoken evidence."""
+
     client_id: str
-    public_background: dict[str, Any] = Field(default_factory=dict)
-    facts: list[UnlockedFact] = Field(default_factory=list)
-    confirmed_goals: list[str] = Field(default_factory=list)
-    expressed_problems: list[str] = Field(default_factory=list)
+    static_traits: StaticTraits = Field(default_factory=StaticTraits)
+    main_problem: str = ""
+    topic: str = ""
+    core_demands: str = ""
+    growth_experiences: list[str] = Field(default_factory=list)
     theory: dict[str, Any] = Field(default_factory=dict)
+    facts: list[UnlockedFact] = Field(default_factory=list)
+    updated_session: int = Field(default=0, ge=0)
 
 
 class MetaSkill(StrictModel):
@@ -362,24 +595,6 @@ class ExtractedClientInfo(StrictModel):
     source_session: int = Field(default=1, ge=1)
 
 
-class MergedClientProfile(StrictModel):
-    """Counselor's longitudinal, deduplicated memory of a client (E.8).
-
-    This is the merge of previously-known plus newly-extracted information,
-    controlled by ground truth so that hallucinated or contradicting entries
-    are dropped. It never contains facts the counselor has not observed.
-    """
-
-    client_id: str
-    static_traits: StaticTraits = Field(default_factory=StaticTraits)
-    main_problem: str = ""
-    topic: str = ""
-    core_demands: str = ""
-    growth_experiences: list[str] = Field(default_factory=list)
-    theory: dict[str, Any] = Field(default_factory=dict)
-    updated_session: int = Field(default=1, ge=1)
-
-
 class GoalAssessment(StrictModel):
     objective_recap: str = ""
     completion_status: str = ""
@@ -417,8 +632,8 @@ class SessionMemory(StrictModel):
     case_id: str
     completed_sessions: int = Field(default=0, ge=0)
     summaries: list[str] = Field(default_factory=list)
-    unlocked_profile: UnlockedClientProfile
-    confirmed_goals: list[str] = Field(default_factory=list)
+    clinical_summaries: list[ClinicalSummary] = Field(default_factory=list)
+    unlocked_client_info: UnlockedClientInfo
     unresolved_topics: list[str] = Field(default_factory=list)
     homework: list[str] = Field(default_factory=list)
     interventions_used: list[str] = Field(default_factory=list)
@@ -427,7 +642,32 @@ class SessionMemory(StrictModel):
     relationship_events: list[str] = Field(default_factory=list)
     between_session_context: list[str] = Field(default_factory=list)
     last_client_closing: str = ""
-    evolving_profile: MergedClientProfile | None = None
+    migration_warnings: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_unlocked_profile(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or "unlocked_client_info" in value:
+            return value
+        legacy = value.get("unlocked_profile")
+        if not isinstance(legacy, dict):
+            return value
+        value = dict(value)
+        value["unlocked_client_info"] = {
+            "client_id": legacy.get("client_id", ""),
+            "facts": legacy.get("facts", []),
+            "updated_session": value.get("completed_sessions", 0),
+        }
+        warnings = list(value.get("migration_warnings", []) or [])
+        warnings.append(
+            "legacy unlocked_profile detected; preloaded background, language style "
+            "and core demands were discarded and dialogue replay is required"
+        )
+        value["migration_warnings"] = warnings
+        value.pop("unlocked_profile", None)
+        value.pop("confirmed_goals", None)
+        value.pop("evolving_profile", None)
+        return value
 
 
 class Message(StrictModel):
@@ -831,10 +1071,20 @@ class SandboxConfig(StrictModel):
     temperature_counselor: float = Field(default=0.4, ge=0, le=2)
     temperature_supervisor: float = Field(default=0.1, ge=0, le=2)
     patientact_enabled: bool = True
+    client_policy: Literal[
+        "compact_patientact", "faithful_patientact", "simple"
+    ] = "compact_patientact"
+    session_trust_retention: float = Field(default=0.5, ge=0, le=1)
     client_pullback_after: int = Field(default=2, ge=1, le=10)
     disclosure_leak_retry_limit: int = Field(default=1, ge=0, le=3)
     skill_selection: SkillSelectionConfig = Field(default_factory=SkillSelectionConfig)
     rft: RFTConfig = Field(default_factory=RFTConfig)
+
+    @model_validator(mode="after")
+    def map_legacy_patientact_switch(self) -> SandboxConfig:
+        if not self.patientact_enabled:
+            self.client_policy = "simple"
+        return self
 
     def model_post_init(self, __context: Any) -> None:
         from ..artifacts import latest_data_dir, runtime_root

@@ -56,6 +56,7 @@ def default_config(root: Path = PROJECT_ROOT) -> SandboxConfig:
         return SandboxConfig(project_root=root)
     raw = load_runtime(root)
     patientact = raw.get("patientact", {})
+    client = raw.get("client", {})
     temperatures = raw.get("temperature", {})
     return SandboxConfig(
         project_root=root,
@@ -69,6 +70,11 @@ def default_config(root: Path = PROJECT_ROOT) -> SandboxConfig:
         temperature_counselor=temperatures.get("counselor", 0.4),
         temperature_supervisor=temperatures.get("supervisor", 0.1),
         patientact_enabled=patientact.get("enabled", True),
+        client_policy=client.get(
+            "policy",
+            "compact_patientact" if patientact.get("enabled", True) else "simple",
+        ),
+        session_trust_retention=client.get("session_trust_retention", 0.5),
         client_pullback_after=patientact.get("pullback_after", 2),
         disclosure_leak_retry_limit=patientact.get(
             "disclosure_leak_retry_limit", 1

@@ -64,7 +64,12 @@ class ModelGateway(ABC):
 class OpenAICompatibleGateway(ModelGateway):
     provider_name = "openai_compatible"
 
-    def __init__(self, diagnostic_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        diagnostic_dir: Path | None = None,
+        *,
+        required_roles: set[str] | None = None,
+    ) -> None:
         try:
             from openai import AsyncOpenAI
         except ImportError as exc:
@@ -84,9 +89,12 @@ class OpenAICompatibleGateway(ModelGateway):
             "counselor": counselor,
             "supervisor": os.getenv("SUPERVISOR_MODEL", counselor),
             "summarizer": os.getenv("SUMMARY_MODEL", counselor),
+            "profile": os.getenv("PROFILE_MODEL", ""),
         }
-        if not self.models["client"] or not counselor:
-            raise RuntimeError("CLIENT_MODEL and COUNSELOR_MODEL are required")
+        required = required_roles or {"client", "counselor"}
+        missing = sorted(role for role in required if not self.models.get(role))
+        if missing:
+            raise RuntimeError(f"Required model roles are not configured: {', '.join(missing)}")
         structured_mode = os.getenv("MODEL_STRUCTURED_OUTPUT", "auto").strip().lower()
         if structured_mode not in {"auto", "json_schema", "off"}:
             raise RuntimeError(
@@ -306,8 +314,15 @@ class OpenAICompatibleGateway(ModelGateway):
         )
 
 
-def create_gateway(*, diagnostic_dir: Path | None = None) -> ModelGateway:
-    return OpenAICompatibleGateway(diagnostic_dir=diagnostic_dir)
+def create_gateway(
+    *,
+    diagnostic_dir: Path | None = None,
+    required_roles: set[str] | None = None,
+) -> ModelGateway:
+    return OpenAICompatibleGateway(
+        diagnostic_dir=diagnostic_dir,
+        required_roles=required_roles,
+    )
 
 
 def _is_ecnu_endpoint(base_url: str) -> bool:

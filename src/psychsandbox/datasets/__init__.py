@@ -4,7 +4,9 @@ from .psycheval import (
     CaseRepository,
     PsychEvalAdapter,
     convert_psycheval,
+    convert_psycheval_extractive,
     fetch_psycheval,
+    merge_therapy_conversions,
 )
 
 __all__ = [
@@ -13,6 +15,7 @@ __all__ = [
     "CaseRepository",
     "PsychEvalAdapter",
     "convert_psycheval",
+    "convert_psycheval_extractive",
     "fetch_psycheval",
+    "merge_therapy_conversions",
 ]
-

@@ -12,7 +12,7 @@ import pytest
 sys.dont_write_bytecode = True
 
 from psychsandbox.artifacts import create_artifact_dir, write_json
-from psychsandbox.datasets import CaseRepository
+from psychsandbox.datasets import CaseRepository, convert_psycheval, merge_therapy_conversions
 
 
 @pytest.hookimpl(tryfirst=True)
@@ -95,8 +95,25 @@ def root() -> Path:
 
 
 @pytest.fixture(scope="session")
-def repository(root: Path) -> CaseRepository:
-    return CaseRepository.from_project(root)
+def repository(root: Path, tmp_path_factory) -> CaseRepository:
+    """Build an isolated schema-v4 cache; production never performs this fallback."""
+    output = tmp_path_factory.mktemp("schema-v4") / "psycheval"
+    manifests = []
+    for therapy in ("bt", "cbt", "het", "pdt", "pmt"):
+        manifest = convert_psycheval(
+                root,
+                output / "by_therapy" / therapy,
+                therapy=therapy,
+                atomizer="rules",
+            )
+        manifest.update({
+            "atomizer": "extractive",
+            "atomizer_prompt_version": "psycheval_extract_only_v2",
+            "atomizer_model": "deterministic-test-double",
+        })
+        manifests.append(manifest)
+    merge_therapy_conversions(output, manifests)
+    return CaseRepository(output, raw_data_dir=root)
 
 
 @pytest.fixture(scope="session")

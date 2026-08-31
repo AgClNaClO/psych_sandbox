@@ -1,44 +1,91 @@
 from __future__ import annotations
 
 import pytest
+import json
 
 from psychsandbox.datasets.psycheval import (
+    CaseRepository,
     PsychEvalAdapter,
     _case_split,
+    _files_digest,
     convert_psycheval,
 )
+from psychsandbox.datasets.profile_compiler import ATOMIZER_PROMPT_VERSION
+from psychsandbox.runtime import DisclosureGate
+
+
+def test_repository_rejects_stale_processed_without_raw_fallback(tmp_path):
+    processed = tmp_path / "processed"
+    processed.mkdir()
+    (processed / "manifest.json").write_text(
+        '{"profile_schema_version":"3","case_count":148}', encoding="utf-8"
+    )
+    (processed / "all.jsonl").write_text("", encoding="utf-8")
+
+    repository = CaseRepository(processed, raw_data_dir=tmp_path / "raw")
+
+    with pytest.raises(RuntimeError, match="schema-v4"):
+        repository.list()
+
+
+def _valid_manifest(root):
+    return {
+        "profile_schema_version": "4",
+        "case_count": 341,
+        "atomizer": "extractive",
+        "atomizer_prompt_version": ATOMIZER_PROMPT_VERSION,
+        "atomizer_model": "test-model",
+        "therapy_counts": {"bt": 43, "cbt": 148, "het": 50, "pdt": 50, "pmt": 50},
+        "therapies": {
+            therapy: {
+                "source_digest": _files_digest(sorted(
+                    (root / "data" / therapy).glob("*.json"),
+                    key=lambda path: int(path.stem),
+                ))
+            }
+            for therapy in ("bt", "cbt", "het", "pdt", "pmt")
+        },
+    }
+
+
+def test_repository_rejects_hidden_fact_record_even_with_current_manifest(root, tmp_path):
+    processed = tmp_path / "processed"
+    processed.mkdir()
+    (processed / "manifest.json").write_text(
+        json.dumps(_valid_manifest(root)), encoding="utf-8"
+    )
+    (processed / "all.jsonl").write_text(
+        json.dumps({"profile": {"schema_version": "4", "hidden_facts": []}}) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="strict schema-v4"):
+        CaseRepository(processed, raw_data_dir=root).list()
+
+
+def test_repository_rejects_source_digest_mismatch(root, tmp_path):
+    processed = tmp_path / "processed"
+    processed.mkdir()
+    manifest = _valid_manifest(root)
+    manifest["therapies"]["cbt"]["source_digest"] = "stale"
+    (processed / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (processed / "all.jsonl").write_text("", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="source digest mismatch"):
+        CaseRepository(processed, raw_data_dir=root).list()
 
 
 def test_official_case_count(repository):
     assert len(repository.list("cbt")) == 148
 
 
-def test_cli_conversion_retains_each_invocation_and_latest_success(root, tmp_path, monkeypatch):
-    import json
+def test_legacy_data_handler_cannot_create_non_atomic_processed_cache(tmp_path):
     from psychsandbox import cli
-    from psychsandbox.artifacts import latest_data_dir
 
-    base = tmp_path / "artifacts"
-    monkeypatch.setenv("PSYCHSANDBOX_RUNTIME_DIR", str(base))
     args = cli.build_parser().parse_args(["data", "convert", "--therapy", "bt"])
-    cli._data(args, root)
-    first = latest_data_dir(root, "processed")
-    first_manifest = (first / "manifest.json").read_bytes()
-    cli._data(args, root)
-    second = latest_data_dir(root, "processed")
-    assert second != first
-    assert (first / "manifest.json").read_bytes() == first_manifest
-    assert (second / "all.jsonl").exists()
-
-    def fail(*args, **kwargs):
-        raise RuntimeError("conversion failed")
-
-    monkeypatch.setattr(cli, "convert_psycheval", fail)
-    with pytest.raises(RuntimeError, match="conversion failed"):
-        cli._data(args, root)
-    assert latest_data_dir(root, "processed") == second
-    statuses = [json.loads(path.read_text(encoding="utf-8"))["status"] for path in base.glob("*/run.json")]
-    assert sorted(statuses) == ["completed", "completed", "failed"]
+    with pytest.raises(RuntimeError, match="atomic staging pipeline"):
+        cli._data(args, tmp_path)
+    assert not (tmp_path / "data" / "processed").exists()
 
 
 @pytest.mark.parametrize(
@@ -106,16 +153,22 @@ def test_raw_case_ids_are_scoped_by_therapy(repository):
         ("pmt", "pmt_force_field"),
     ],
 )
-def test_each_therapy_builds_source_grounded_hidden_facts(
+def test_each_therapy_builds_source_grounded_disclosure_items(
     repository, therapy_code, expected_category
 ):
     case = repository.get(f"psycheval-{therapy_code}-001")
-    assert any(fact.category == expected_category for fact in case.profile.hidden_facts)
-    assert all(fact.source_field for fact in case.profile.hidden_facts)
-    assert all(fact.disclosure_layers for fact in case.profile.hidden_facts)
+    assert any(
+        fact.category == expected_category for fact in case.profile.disclosure_items
+    )
+    evidence_ids = {item.evidence_id for item in case.profile.evidence_nodes}
+    assert all(item.evidence_ids for item in case.profile.disclosure_items)
+    assert all(
+        set(item.evidence_ids).issubset(evidence_ids)
+        for item in case.profile.disclosure_items
+    )
 
 
-def test_adapter_builds_source_grounded_layered_memories():
+def test_adapter_builds_source_grounded_atomic_memories():
     raw = {
         "client_id": 999,
         "client_info": {
@@ -140,18 +193,56 @@ def test_adapter_builds_source_grounded_layered_memories():
     }
 
     case = PsychEvalAdapter().convert_case(raw, "data/cbt/999.json")
-    growth, situation = case.profile.hidden_facts
+    growth = next(
+        item for item in case.profile.disclosure_items
+        if item.category == "growth_experience"
+    )
+    situation = [
+        item for item in case.profile.disclosure_items
+        if item.category == "cbt_special_situation"
+    ]
 
-    assert case.profile.theory["_personality_source"] == "unspecified_neutral_prior"
-    assert case.profile.personality.openness == 0.5
     assert "父母" in growth.activation_tags
-    assert len(growth.disclosure_layers) >= 2
-    assert situation.disclosure_layers[-1].endswith("应对方式：反复检查并回避汇报")
-    assert growth.source_field == "client_info.growth_experiences[0]"
+    assert growth.content == raw["client_info"]["growth_experiences"][0]
+    assert {item.content for item in situation} >= {
+        "实习任务没有完成",
+        "我肯定没有能力",
+        "只有成功才会被认可",
+        "反复检查并回避汇报",
+    }
+    growth_node = next(
+        node for node in case.profile.evidence_nodes
+        if node.evidence_id == growth.evidence_ids[0]
+    )
+    assert growth_node.source_path == "client_info.growth_experiences[0]"
     assert case.profile.initial_state.arousal == 0.7
-    assert case.profile.relational.core_belief_theme == "只有表现好才有价值"
-    assert case.profile.relational.attachment_pattern == "unspecified"
-    assert case.profile.personality.openness == 0.5
-    assert case.profile.relational.preferred_resistance_patterns
-    assert case.profile.relational.emotional_range
-    assert case.profile.relational.confidence == 0.6
+    assert case.profile.interaction_prior.therapist_pattern is None
+    assert case.profile.interaction_prior.coping_patterns
+    dumped = case.profile.model_dump(mode="json")
+    assert "hidden_facts" not in dumped
+    assert "personality" not in dumped
+    assert "relational" not in dumped
+
+
+def test_routine_intake_requires_an_explicit_question_at_initial_trust():
+    raw = {
+        "client_id": 999,
+        "client_info": {
+            "static_traits": {"name": "测试来访者", "age": "28"},
+            "main_problem": "最近总是担心",
+            "topic": "情绪管理",
+            "core_demands": "",
+            "growth_experiences": [],
+            "special_situations": [],
+        },
+        "sessions": [],
+    }
+    profile = PsychEvalAdapter().convert_case(raw).profile
+    gate = DisclosureGate()
+
+    assert gate.allowed(profile, profile.initial_state, "欢迎你来", set()) == []
+    asked = gate.allowed(profile, profile.initial_state, "我可以怎么称呼你？", set())
+
+    assert len(asked) == 1
+    assert asked[0].category == "name"
+    assert asked[0].trust_tier.value == "routine"

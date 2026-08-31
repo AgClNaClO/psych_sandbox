@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import random
 import re
 import subprocess
 from pathlib import Path
@@ -24,6 +25,12 @@ from ..domain import (
 )
 from ..skills import SkillRegistry
 from ..therapies import normalize_therapy_id
+from .profile_compiler import (
+    ATOMIZER_PROMPT_VERSION,
+    PROFILE_SCHEMA_VERSION,
+    AtomicSpan,
+    PsychEvalProfileCompiler,
+)
 
 
 PSYCHEVAL_REPOSITORY = "https://github.com/ECNU-ICALK/PsychEval.git"
@@ -210,15 +217,26 @@ class PsychEvalAdapter:
         self.therapy_id = _RAW_THERAPY_MAP[therapy_code]
         self.source_name = source_name
 
-    def convert_case(self, raw: dict[str, Any], source_path: str = "") -> CounselingCase:
+    def convert_case(
+        self,
+        raw: dict[str, Any],
+        source_path: str = "",
+        *,
+        free_text_spans: dict[str, list[AtomicSpan]] | None = None,
+    ) -> CounselingCase:
         client_id = str(raw["client_id"])
         case_id = f"psycheval-{self.therapy_code}-{client_id.zfill(3)}"
         info = raw["client_info"]
         static = info.get("static_traits", {})
-        hidden = self._hidden_facts(case_id, info, self.therapy_code)
-        personality = BigFive()
+        plans = self._session_plans(raw)
+        compiled = PsychEvalProfileCompiler().compile(
+            case_id=case_id,
+            info=info,
+            therapy_code=self.therapy_code,
+            plans=plans,
+            free_text_spans=free_text_spans,
+        )
         reference_sessions = raw.get("sessions", [])
-        opening = self._opening(reference_sessions, info.get("main_problem", ""))
         profile = ClientProfile(
             client_id=client_id,
             static_traits=StaticTraits(
@@ -237,7 +255,7 @@ class PsychEvalAdapter:
             topic=str(info.get("topic", "")),
             core_demands=str(info.get("core_demands", "")),
             growth_experiences=[str(item) for item in info.get("growth_experiences", [])],
-            formulation_5ps=self._five_ps(info, self.therapy_code),
+            formulation_5ps=compiled.formulation_5ps,
             theory={
                 self.therapy_code: {
                     key: value
@@ -251,17 +269,15 @@ class PsychEvalAdapter:
                         "growth_experiences",
                     }
                 },
-                "_personality_source": "unspecified_neutral_prior",
                 "_source_path": source_path,
+                "_profile_schema_version": PROFILE_SCHEMA_VERSION,
             },
-            personality=personality,
-            relational=self._relational_profile(info, hidden, self.therapy_code),
+            evidence_nodes=compiled.evidence_nodes,
+            disclosure_items=compiled.disclosure_items,
+            interaction_prior=compiled.interaction_prior,
+            expression_style=compiled.expression_style,
             initial_state=self._initial_state(info),
-            language_style=str(static.get("language_features", "")),
-            opening=opening,
-            hidden_facts=hidden,
         )
-        plans = self._session_plans(raw)
         return CounselingCase(
             case_id=case_id,
             therapy=self.therapy_id,
@@ -897,6 +913,10 @@ def convert_psycheval(
     *,
     therapy: str = "cbt",
     revision: str = PSYCHEVAL_REVISION,
+    free_text_spans_by_case: dict[str, dict[str, list[AtomicSpan]]] | None = None,
+    atomizer: str = "rules",
+    atomization_audit: dict[str, int] | None = None,
+    atomizer_model: str | None = None,
 ) -> dict[str, Any]:
     if therapy not in _RAW_THERAPY_MAP:
         supported = ", ".join(sorted(_RAW_THERAPY_MAP))
@@ -911,7 +931,11 @@ def convert_psycheval(
         for path in files
     ]
     cases = [
-        adapter.convert_case(raw, str(path.relative_to(source_dir)))
+        adapter.convert_case(
+            raw,
+            str(path.relative_to(source_dir)),
+            free_text_spans=(free_text_spans_by_case or {}).get(str(raw["client_id"])),
+        )
         for raw, path in zip(raw_cases, files, strict=True)
     ]
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -944,6 +968,17 @@ def convert_psycheval(
         "atomic_skill_count": len(registry.atomic_skills),
         "split_counts": split_counts,
         "source_digest": _files_digest(files),
+        "profile_schema_version": PROFILE_SCHEMA_VERSION,
+        "atomizer": atomizer,
+        "atomizer_prompt_version": (
+            ATOMIZER_PROMPT_VERSION if atomizer == "extractive" else None
+        ),
+        "atomizer_model": atomizer_model,
+        "atomization_audit": atomization_audit or {
+            "cache_hits": 0,
+            "fallbacks": 0,
+            "validation_failures": 0,
+        },
     }
     (output_dir / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -951,15 +986,239 @@ def convert_psycheval(
     return manifest
 
 
+async def convert_psycheval_extractive(
+    source_dir: Path,
+    output_dir: Path,
+    *,
+    therapy: str,
+    gateway,
+    revision: str = PSYCHEVAL_REVISION,
+    cache_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Atomize growth, language features and core demands before conversion."""
+
+    from .atomizer import ExtractiveAtomizer
+
+    source = source_dir / "data" / therapy
+    files = sorted(source.glob("*.json"), key=lambda path: int(path.stem))
+    atomizer = ExtractiveAtomizer(gateway, cache_dir or output_dir / ".profile-cache")
+    raw_by_path = {
+        path: json.loads(path.read_text(encoding="utf-8")) for path in files
+    }
+
+    def sources_for(raw: dict[str, Any]) -> list[tuple[str, str, str]]:
+        info = raw.get("client_info", {})
+        values = [
+            (f"client_info.growth_experiences[{index}]", str(value).strip(), "growth")
+            for index, value in enumerate(info.get("growth_experiences", []) or [])
+        ]
+        values.extend([
+            ("client_info.static_traits.language_features", str(info.get("static_traits", {}).get("language_features", "")).strip(), "language"),
+            ("client_info.core_demands", str(info.get("core_demands", "")).strip(), "core_demands"),
+        ])
+        for field in ("family_status", "social_status", "medical_history"):
+            values.append((
+                f"client_info.static_traits.{field}",
+                str(info.get("static_traits", {}).get(field, "")).strip(),
+                "five_ps",
+            ))
+        return [item for item in values if item[1]]
+
+    lengths = sorted(
+        (
+            sum(len(text) for _, text, purpose in sources_for(raw) if purpose == "growth"),
+            path,
+        )
+        for path, raw in raw_by_path.items()
+    )
+    pilot_paths = [lengths[0][1], lengths[len(lengths) // 2][1], lengths[-1][1]]
+    remaining = [path for _, path in lengths if path not in pilot_paths]
+    pilot_paths.extend(random.Random(42).sample(remaining, k=min(2, len(remaining))))
+    pilot_total = 0
+    pilot_fallbacks = 0
+    for path in pilot_paths:
+        for source_path, text, purpose in sources_for(raw_by_path[path]):
+            _, item_audit = await atomizer.atomize(
+                source_path=source_path, source_text=text, purpose=purpose
+            )
+            pilot_total += 1
+            pilot_fallbacks += int(item_audit.fallback)
+    if pilot_total and pilot_fallbacks / pilot_total > 0.05:
+        raise RuntimeError(
+            f"{therapy} pilot fallback ratio {pilot_fallbacks}/{pilot_total} exceeds 5%"
+        )
+
+    spans_by_case: dict[str, dict[str, list[AtomicSpan]]] = {}
+    audit = {
+        "pilot_cases": [str(raw_by_path[path]["client_id"]) for path in pilot_paths],
+        "pilot_items": pilot_total,
+        "pilot_fallbacks": pilot_fallbacks,
+        "cache_hits": 0,
+        "fallbacks": 0,
+        "validation_failures": 0,
+        "needs_review": 0,
+    }
+    audit_records: list[dict[str, Any]] = []
+    for path in files:
+        raw = raw_by_path[path]
+        case_spans: dict[str, list[AtomicSpan]] = {}
+        for source_path, text, purpose in sources_for(raw):
+            spans, item_audit = await atomizer.atomize(
+                source_path=source_path, source_text=text, purpose=purpose
+            )
+            case_spans[source_path] = spans
+            audit["cache_hits"] += int(item_audit.cache_hit)
+            audit["fallbacks"] += int(item_audit.fallback)
+            audit["validation_failures"] += int(item_audit.validation_failed)
+            audit["needs_review"] += int(item_audit.needs_review)
+            audit_records.append(
+                {
+                    "client_id": str(raw["client_id"]),
+                    "source_path": source_path,
+                    "purpose": purpose,
+                    "spans": [
+                        {
+                            "start": span.start,
+                            "end": span.end,
+                            "text": span.text,
+                            "kind": span.kind,
+                            "trust_tier": span.trust_tier.value,
+                            "five_ps_roles": list(span.five_ps_roles),
+                            "needs_review": span.needs_review,
+                        }
+                        for span in spans
+                    ],
+                    **item_audit.model_dump(mode="json"),
+                }
+            )
+        spans_by_case[str(raw["client_id"])] = case_spans
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "atomization_audit.jsonl").write_text(
+        "".join(
+            json.dumps(item, ensure_ascii=False) + "\n" for item in audit_records
+        ),
+        encoding="utf-8",
+    )
+    models = getattr(gateway, "models", {})
+    return convert_psycheval(
+        source_dir,
+        output_dir,
+        therapy=therapy,
+        revision=revision,
+        free_text_spans_by_case=spans_by_case,
+        atomizer="extractive",
+        atomization_audit=audit,
+        atomizer_model=models.get(
+            "profile", getattr(gateway, "provider_name", "unknown")
+        ),
+    )
+
+
+def merge_therapy_conversions(
+    output_dir: Path, manifests: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Merge isolated therapy outputs without merging their skill namespaces."""
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    split_counts = {"train": 0, "validation": 0, "test": 0}
+    for split in (*split_counts, "all"):
+        target = output_dir / f"{split}.jsonl"
+        with target.open("w", encoding="utf-8") as writer:
+            for manifest in manifests:
+                source = (
+                    output_dir / "by_therapy" / manifest["therapy"] / f"{split}.jsonl"
+                )
+                if source.exists():
+                    writer.write(source.read_text(encoding="utf-8"))
+    for manifest in manifests:
+        for split, count in manifest["split_counts"].items():
+            split_counts[split] += count
+    therapy_counts = {item["therapy"]: item["case_count"] for item in manifests}
+    expected_counts = {"bt": 43, "cbt": 148, "het": 50, "pdt": 50, "pmt": 50}
+    if therapy_counts != expected_counts:
+        raise RuntimeError(f"Unexpected PsychEval therapy counts: {therapy_counts}")
+    coverage_counts = {status: 0 for status in ("supported", "source_absent", "uncertain")}
+    case_rows = [
+        CounselingCase.model_validate_json(line)
+        for line in (output_dir / "all.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    for case in case_rows:
+        evidence_ids = {node.evidence_id for node in case.profile.evidence_nodes}
+        for item in (
+            case.profile.formulation_5ps.presenting_problem
+            + case.profile.formulation_5ps.predisposing_factors
+            + case.profile.formulation_5ps.precipitating_factors
+            + case.profile.formulation_5ps.perpetuating_factors
+            + case.profile.formulation_5ps.protective_factors
+        ):
+            if not item.source_ids or not set(item.source_ids).issubset(evidence_ids):
+                raise RuntimeError(f"Illegal 5Ps source ID in {case.case_id}")
+            if item.derivation.value == "model_hypothesis":
+                raise RuntimeError(f"Model hypothesis entered 5Ps facts in {case.case_id}")
+        for coverage in case.profile.formulation_5ps.coverage.values():
+            coverage_counts[coverage.status.value] += 1
+            if not set(coverage.source_ids).issubset(evidence_ids):
+                raise RuntimeError(f"Illegal 5Ps coverage source ID in {case.case_id}")
+    atomization_totals = {
+        key: sum(int(item.get("atomization_audit", {}).get(key, 0)) for item in manifests)
+        for key in ("pilot_items", "pilot_fallbacks", "cache_hits", "fallbacks", "validation_failures", "needs_review")
+    }
+    combined = {
+        "source": PSYCHEVAL_REPOSITORY,
+        "revision": PSYCHEVAL_REVISION,
+        "license": "CC BY-NC 4.0",
+        "therapy": "all",
+        "therapies": {item["therapy"]: item for item in manifests},
+        "case_count": sum(item["case_count"] for item in manifests),
+        "therapy_counts": therapy_counts,
+        "split_counts": split_counts,
+        "profile_schema_version": PROFILE_SCHEMA_VERSION,
+        "source_digest": hashlib.sha256(
+            "\0".join(item["source_digest"] for item in manifests).encode("utf-8")
+        ).hexdigest(),
+        "atomizer": (
+            "extractive" if all(item.get("atomizer") == "extractive" for item in manifests)
+            else "mixed"
+        ),
+        "atomizer_prompt_version": (
+            ATOMIZER_PROMPT_VERSION
+            if all(item.get("atomizer_prompt_version") == ATOMIZER_PROMPT_VERSION for item in manifests)
+            else None
+        ),
+        "atomizer_model": next((item.get("atomizer_model") for item in manifests if item.get("atomizer_model")), None),
+        "atomization_audit": atomization_totals,
+        "five_ps_coverage": coverage_counts,
+    }
+    (output_dir / "manifest.json").write_text(
+        json.dumps(combined, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    (output_dir / "compilation_audit.json").write_text(
+        json.dumps(
+            {
+                "case_count": len(case_rows),
+                "therapy_counts": therapy_counts,
+                "profile_schema_version": PROFILE_SCHEMA_VERSION,
+                "atomization": atomization_totals,
+                "five_ps_coverage": coverage_counts,
+                "accepted_model_hypotheses": 0,
+                "invalid_source_ids": 0,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return combined
+
+
 class CaseRepository:
     def __init__(
         self,
         processed_dir: Path,
-        legacy_profile_dir: Path | None = None,
         raw_data_dir: Path | None = None,
     ):
         self.processed_dir = processed_dir
-        self.legacy_profile_dir = legacy_profile_dir
         if raw_data_dir is None and processed_dir.parent.name == "processed":
             candidate = processed_dir.parent.parent
             if any((candidate / code).is_dir() for code in _RAW_THERAPY_MAP):
@@ -970,11 +1229,9 @@ class CaseRepository:
     @classmethod
     def from_project(cls, project_root: Path) -> "CaseRepository":
         """Create a repository using the checkout's canonical resource layout."""
-        from ..artifacts import latest_data_dir
         return cls(
-            latest_data_dir(project_root, "processed"),
-            project_root / "assets" / "profiles",
-            project_root / "data",
+            project_root / "data" / "processed" / "psycheval",
+            raw_data_dir=project_root / "data",
         )
 
     def list(self, therapy: str | None = None) -> list[CounselingCase]:
@@ -995,201 +1252,80 @@ class CaseRepository:
         assert self._index is not None
         if case_id in self._index:
             return self._index[case_id]
-        if self.legacy_profile_dir:
-            path = self.legacy_profile_dir / f"{case_id}.json"
-            if path.exists():
-                return _legacy_case(path)
         available = ", ".join(sorted(self._index)[:10])
         raise FileNotFoundError(f"Unknown case {case_id!r}; examples: {available}")
 
     def _ensure_index(self) -> None:
         if self._index is not None:
             return
-        self._index = {}
+        manifest_path = self.processed_dir / "manifest.json"
         path = self.processed_dir / "all.jsonl"
-        if path.exists():
-            with path.open("r", encoding="utf-8") as handle:
-                for line in handle:
-                    if line.strip():
-                        case = _upgrade_case_for_simulation(
-                            CounselingCase.model_validate_json(line)
-                        )
-                        self._index[case.case_id] = case
-        if self.raw_data_dir:
-            for therapy_code in _RAW_THERAPY_MAP:
-                therapy_dir = self.raw_data_dir / therapy_code
-                if not therapy_dir.is_dir():
-                    continue
-                adapter = PsychEvalAdapter(
-                    revision="",
-                    therapy_code=therapy_code,
-                    source_name="PsychAgent bundled data",
-                )
+        if not manifest_path.exists() or not path.exists():
+            raise RuntimeError(
+                "PsychEval schema-v4 processed data is required; run "
+                "`psych-sandbox data convert --therapy all --atomizer extractive`."
+            )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if (
+            str(manifest.get("profile_schema_version")) != PROFILE_SCHEMA_VERSION
+            or int(manifest.get("case_count", 0)) != 341
+            or manifest.get("atomizer") != "extractive"
+            or manifest.get("atomizer_prompt_version") != ATOMIZER_PROMPT_VERSION
+            or not manifest.get("atomizer_model")
+        ):
+            raise RuntimeError(
+                "PsychEval schema-v4 processed data is required; stale processed "
+                "data is never upgraded or combined with raw cases at runtime."
+            )
+        therapies = manifest.get("therapies")
+        if not isinstance(therapies, dict) or set(therapies) != set(_RAW_THERAPY_MAP):
+            raise RuntimeError("Processed PsychEval manifest must describe all five therapies.")
+        expected_counts = {"bt": 43, "cbt": 148, "het": 50, "pdt": 50, "pmt": 50}
+        if manifest.get("therapy_counts") != expected_counts:
+            raise RuntimeError("Processed PsychEval manifest has invalid therapy counts.")
+        if self.raw_data_dir is not None:
+            for therapy, item in therapies.items():
                 files = sorted(
-                    therapy_dir.glob("*.json"),
-                    key=lambda item: int(item.stem),
+                    (self.raw_data_dir / "data" / therapy).glob("*.json"),
+                    key=lambda candidate: int(candidate.stem),
                 )
-                for raw_path in files:
-                    raw = json.loads(raw_path.read_text(encoding="utf-8"))
-                    case = adapter.convert_case(
-                        raw,
-                        str(raw_path.relative_to(self.raw_data_dir.parent)),
+                if not files:
+                    files = sorted(
+                        (self.raw_data_dir / therapy).glob("*.json"),
+                        key=lambda candidate: int(candidate.stem),
                     )
-                    self._index.setdefault(case.case_id, case)
-
-
-def _upgrade_case_for_simulation(case: CounselingCase) -> CounselingCase:
-    """Apply schema-v2 defaults to previously converted PsychEval records."""
-
-    if case.therapy != "cbt":
-        return case
-
-    profile = case.profile
-    cbt = profile.theory.get("cbt", {})
-    situations = cbt.get("special_situations", [])
-    upgraded: list[HiddenFact] = []
-    for fact in profile.hidden_facts:
-        try:
-            index = int(fact.fact_id.rsplit(":", 1)[-1]) - 1
-        except ValueError:
-            index = -1
-        if fact.category == "cbt_special_situation" and 0 <= index < len(situations):
-            situation = situations[index]
-            layers = _situation_layers(situation)
-            activation_source = str(situation.get("event", fact.content))
-            source_field = f"client_info.special_situations[{index}]"
-            fallback = ["情境", "发生", "当时"]
-            topic_key = f"cbt_situation_{index + 1}"
-            readiness = 0.25
-        else:
-            layers = _disclosure_layers(fact.content)
-            activation_source = fact.content
-            source_field = (
-                f"client_info.growth_experiences[{index}]"
-                if index >= 0
-                else fact.source_field
+                if not files or item.get("source_digest") != _files_digest(files):
+                    raise RuntimeError(
+                        f"Processed PsychEval source digest mismatch for {therapy}; "
+                        "run explicit data convert."
+                    )
+        loaded: dict[str, CounselingCase] = {}
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.strip():
+                    payload = json.loads(line)
+                    raw_profile = payload.get("profile", {})
+                    if (
+                        raw_profile.get("schema_version") != PROFILE_SCHEMA_VERSION
+                        or "hidden_facts" in raw_profile
+                    ):
+                        raise RuntimeError(
+                            "Processed case is not a strict schema-v4 profile."
+                        )
+                    case = CounselingCase.model_validate(payload)
+                    loaded[case.case_id] = case
+        if len(loaded) != 341:
+            raise RuntimeError(
+                f"PsychEval schema-v4 processed data expected 341 cases; "
+                f"found {len(loaded)}."
             )
-            fallback = ["经历", "成长", "过去"]
-            topic_key = f"growth_{index + 1}" if index >= 0 else fact.topic_key
-            readiness = 0.35
-        upgraded.append(
-            fact.model_copy(
-                update={
-                    "content": layers[-1],
-                    "activation_tags": _fact_activation_tags(
-                        activation_source, fallback
-                    ),
-                    "topic_key": topic_key,
-                    "disclosure_layers": layers,
-                    "minimum_topic_readiness": (
-                        fact.minimum_topic_readiness or readiness
-                    ),
-                    "source_field": fact.source_field or source_field,
-                }
-            )
-        )
-    source_info = {
-        "main_problem": profile.main_problem,
-        "core_demands": profile.core_demands,
-        "static_traits": profile.static_traits.model_dump(mode="json"),
-        "core_beliefs": cbt.get("core_beliefs", []),
-        "special_situations": situations,
-    }
-    legacy_prior = profile.theory.get("_personality_source") == "deterministic_simulation_prior"
-    theory = dict(profile.theory)
-    if legacy_prior:
-        theory["_personality_source"] = "unspecified_neutral_prior"
-    migrated_profile = profile.model_copy(
-        update={
-            "hidden_facts": upgraded,
-            "theory": theory,
-            "personality": BigFive() if legacy_prior else profile.personality,
-            "relational": (
-                PsychEvalAdapter._relational_profile(source_info, upgraded)
-                if profile.relational.confidence <= 0.45
-                and not profile.relational.preferred_resistance_patterns
-                and not profile.relational.therapy_triggers
-                else profile.relational
-            ),
-            "initial_state": (
-                PsychEvalAdapter._initial_state(source_info)
-                if legacy_prior
-                else profile.initial_state
-            ),
+        actual_counts = {
+            therapy: sum(case_id.startswith(f"psycheval-{therapy}-") for case_id in loaded)
+            for therapy in _RAW_THERAPY_MAP
         }
-    )
-    return case.model_copy(update={"profile": migrated_profile})
-
-
-def _legacy_case(path: Path) -> CounselingCase:
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    traits = raw["static_traits"]
-    therapy = str(raw.get("therapy", "cbt"))
-    formulation = raw.get("formulation_5ps") or {
-        "presenting_problem": raw["main_problem"],
-        "predisposing_factors": raw.get("growth_experiences", []),
-        "precipitating_factors": raw.get("precipitating_factors", []),
-        "perpetuating_factors": raw.get("perpetuating_factors", []),
-        "protective_factors": (
-            raw.get("protective_factors", [])
-            or ["能够表达求助目标并主动参与咨询"]
-        ),
-        "source_fields": ["local_profile"],
-    }
-    profile = ClientProfile(
-        client_id=raw["case_id"],
-        static_traits=StaticTraits(
-            name=traits.get("name", ""),
-            age=traits.get("age", ""),
-            gender=traits.get("gender", ""),
-            occupation=traits.get("occupation", ""),
-            educational_background=traits.get("education", ""),
-            family_status=traits.get("family_status", ""),
-            medical_history=traits.get("medical_history", ""),
-            language_features=traits.get("language_style", ""),
-        ),
-        main_problem=raw["main_problem"],
-        topic=raw["topic"],
-        core_demands=raw["core_demands"],
-        growth_experiences=raw.get("growth_experiences", []),
-        formulation_5ps=FivePsFormulation.model_validate(formulation),
-        theory={therapy: raw.get("therapy_parameters", {})},
-        personality=BigFive.model_validate(raw["personality"]),
-        initial_state=ClientState.model_validate(raw["initial_state"]),
-        language_style=traits.get("language_style", ""),
-        opening=raw["opening"],
-        hidden_facts=[HiddenFact.model_validate(item) for item in raw["hidden_facts"]],
-    )
-    session_count = int(raw.get("session_count", 3))
-    stage_objectives = raw.get("stage_objectives", {})
-
-    def stage_for(index: int) -> SessionStage:
-        if index <= min(2, session_count):
-            return SessionStage.CONCEPTUALIZATION
-        if index >= max(3, session_count - 1):
-            return SessionStage.CONSOLIDATION
-        return SessionStage.INTERVENTION
-
-    plans = [
-        SessionPlan(
-            session_index=index,
-            therapy=therapy,
-            stage=stage_for(index),
-            objectives=stage_objectives.get(
-                stage_for(index).value,
-                ["建立合作关系", "澄清困扰", "共同确定一个可观察的下一步"],
-            ),
-            forbidden_actions=["医学诊断", "使用未披露档案", "过早挑战"],
-        )
-        for index in range(1, session_count + 1)
-    ]
-    return CounselingCase(
-        case_id=raw["case_id"],
-        therapy=therapy,
-        profile=profile,
-        global_plan=plans,
-        source="local_demo",
-    )
+        if actual_counts != expected_counts:
+            raise RuntimeError(f"Processed PsychEval case distribution is invalid: {actual_counts}")
+        self._index = loaded
 
 
 def _map_stage(text: str) -> SessionStage:
