@@ -8,7 +8,7 @@ from psychsandbox.domain import (
     RiskLevel,
     SandboxConfig,
     SessionMemory,
-    UnlockedClientProfile,
+    UnlockedClientInfo,
 )
 from psychsandbox.runtime import CounselingSandbox, DialogueLoopGuard, DisclosureGate
 from tests.deterministic_gateway import DeterministicGateway
@@ -17,7 +17,7 @@ from tests.deterministic_gateway import DeterministicGateway
 def _memory_for(sample_case) -> SessionMemory:
     return SessionMemory(
         case_id=sample_case.case_id,
-        unlocked_profile=UnlockedClientProfile(
+        unlocked_client_info=UnlockedClientInfo(
             client_id=sample_case.profile.client_id
         ),
     )
@@ -32,8 +32,8 @@ def test_single_generic_tag_does_not_activate_hidden_memory(sample_case):
         set(),
     )
     growth_ids = {
-        fact.fact_id
-        for fact in sample_case.profile.hidden_facts
+        fact.item_id
+        for fact in sample_case.profile.disclosure_items
         if fact.category == "growth_experience"
     }
     assert growth_ids
@@ -49,8 +49,8 @@ def test_shared_activation_tags_are_reported_as_ambiguous(sample_case):
         set(),
     )
     growth_ids = {
-        fact.fact_id
-        for fact in sample_case.profile.hidden_facts
+        fact.item_id
+        for fact in sample_case.profile.disclosure_items
         if fact.category == "growth_experience"
     }
     assert growth_ids
@@ -107,7 +107,7 @@ def test_exact_counselor_reply_is_detected_as_repetition():
     )
 
 
-def test_original_case_does_not_enter_refusal_loop(root, tmp_path):
+def test_original_case_does_not_enter_refusal_loop(root, tmp_path, repository):
     sandbox = CounselingSandbox(
         SandboxConfig(
             project_root=root,
@@ -115,7 +115,8 @@ def test_original_case_does_not_enter_refusal_loop(root, tmp_path):
             database_path=tmp_path / "dialogue-loop.sqlite3",
             trace_dir=tmp_path / "dialogue-loop-traces",
         ),
-        gateway=DeterministicGateway(),
+            gateway=DeterministicGateway(),
+            repository=repository,
     )
     result = asyncio.run(
         sandbox.run_case("psycheval-cbt-001", session_count=1)

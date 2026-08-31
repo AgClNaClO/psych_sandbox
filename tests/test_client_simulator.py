@@ -9,7 +9,9 @@ from psychsandbox.domain import (
     CounselorDecision,
     CounselorTurn,
     SessionMemory,
-    UnlockedClientProfile,
+    UnlockedClientInfo,
+    DisclosureItem,
+    TrustTier,
 )
 from tests.deterministic_gateway import DeterministicGateway
 
@@ -25,39 +27,44 @@ def _counselor(response: str) -> CounselorTurn:
     )
 
 
-def test_session_boundary_recovers_fatigue_without_resetting_longitudinal_state():
+def test_session_boundary_recovers_fatigue_and_decays_trust_to_baseline():
     previous = ClientState(
         trust=0.63,
         distress=0.71,
         hope=0.44,
         fatigue=0.82,
-        topic_readiness={"work": 0.55},
+        resistance=0.7,
     )
+    baseline = ClientState(trust=0.25, resistance=0.4)
 
-    recovered = ClientSimulator.prepare_session_state(previous)
+    recovered = ClientSimulator.prepare_session_state(previous, baseline, 0.5)
 
     assert recovered.fatigue == 0.57
-    assert recovered.model_dump(exclude={"fatigue"}) == previous.model_dump(
-        exclude={"fatigue"}
-    )
+    assert recovered.trust == 0.44
+    assert recovered.resistance == 0.4
+    assert recovered.distress == previous.distress
 
 
-def test_simulator_owns_progressive_disclosure_pipeline(sample_case):
-    original = sample_case.profile.hidden_facts[0]
-    fact = original.model_copy(
-        update={
-            "content": "表层经历；更私密的意义",
-            "disclosure_layers": ["表层经历", "表层经历；更私密的意义"],
-            "activation_tags": ["独特经历"],
-            "topic_key": "unique_experience",
-            "minimum_trust": 0.2,
-            "minimum_topic_readiness": 0.2,
-        }
+def test_simulator_owns_atomic_disclosure_pipeline(sample_case):
+    event = DisclosureItem(
+        item_id="unique:event",
+        evidence_ids=["unique:event"],
+        content="表层经历",
+        activation_tags=["独特经历"],
+        trust_tier=TrustTier.BASIC,
     )
-    profile = sample_case.profile.model_copy(update={"hidden_facts": [fact]})
-    state = profile.initial_state.model_copy(
-        update={"trust": 0.8, "topic_readiness": {"unique_experience": 0.8}}
+    meaning = DisclosureItem(
+        item_id="unique:meaning",
+        evidence_ids=["unique:meaning"],
+        content="更私密的意义",
+        activation_tags=["独特经历"],
+        trust_tier=TrustTier.SENSITIVE,
+        depends_on=[event.item_id],
     )
+    profile = sample_case.profile.model_copy(
+        update={"disclosure_items": [event, meaning]}
+    )
+    state = profile.initial_state.model_copy(update={"trust": 0.8})
     simulator = ClientSimulator(ClientAgent(DeterministicGateway()))
 
     first = asyncio.run(
@@ -89,12 +96,10 @@ def test_simulator_owns_progressive_disclosure_pipeline(sample_case):
         )
     )
 
-    assert first.newly_unlocked[0].disclosure_level == 1
     assert first.newly_unlocked[0].content == "表层经历"
-    assert second.newly_unlocked[0].disclosure_level == 2
+    assert second.newly_unlocked[0].content == "更私密的意义"
     merged = simulator.merge_unlocked(first.newly_unlocked, second.newly_unlocked)
-    assert len(merged) == 1
-    assert merged[0].content == "表层经历；更私密的意义"
+    assert len(merged) == 2
 
 
 def test_merge_unlocked_preserves_separate_spoken_evidence_fragments():
@@ -105,14 +110,12 @@ def test_merge_unlocked_preserves_separate_spoken_evidence_fragments():
         content="我上次只说了表层经历",
         evidence_session=1,
         evidence_turn=2,
-        disclosure_level=1,
     )
     second = first.model_copy(
         update={
             "content": "这次补充了它对我的意义",
             "evidence_session": 2,
             "evidence_turn": 3,
-            "disclosure_level": 2,
         }
     )
 
@@ -121,14 +124,26 @@ def test_merge_unlocked_preserves_separate_spoken_evidence_fragments():
     assert merged[0].content == "我上次只说了表层经历；这次补充了它对我的意义"
 
 
-def test_session_opening_does_not_reuse_context_dependent_name_answer(sample_case):
-    profile = sample_case.profile.model_copy(update={"opening": "叫我明山就可以。"})
-    memory = SessionMemory(
-        case_id=sample_case.case_id,
-        unlocked_profile=UnlockedClientProfile(client_id=profile.client_id),
+def test_legacy_spoken_fact_maps_only_to_one_substantiated_atomic_item(sample_case):
+    from psychsandbox.domain import UnlockedFact
+
+    item = next(
+        candidate for candidate in sample_case.profile.disclosure_items
+        if len(candidate.content) >= 4
+        and sum(
+            candidate.content in other.content
+            for other in sample_case.profile.disclosure_items
+        ) == 1
+    )
+    legacy = UnlockedFact(
+        fact_id="legacy:fact:1",
+        content=item.content,
+        evidence_session=1,
+        evidence_turn=2,
+    )
+    migrated, warnings = ClientSimulator.migrate_legacy_unlocked(
+        sample_case.profile, [legacy]
     )
 
-    opening = ClientSimulator.start_session(profile, memory, 1)
-
-    assert opening != "叫我明山就可以。"
-    assert profile.main_problem[:10] in opening
+    assert migrated[0].fact_id == item.item_id
+    assert warnings and warnings[0].startswith("mapped legacy spoken fact")

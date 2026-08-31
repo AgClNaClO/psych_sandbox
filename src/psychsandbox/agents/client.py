@@ -16,8 +16,8 @@ from ..domain import (
     ClientState,
     ClientTurnSignal,
     ClientUtterance,
+    DisclosureItem,
     DisclosureDecision,
-    HiddenFact,
     Message,
     ResistancePatternType,
     UnlockedFact,
@@ -88,12 +88,12 @@ class ClientAgent:
         signal.retrieved_fact_ids = [
             item
             for item in signal.retrieved_fact_ids
-            if item in {fact.fact_id for fact in disclosure.retrieved}
+            if item in {fact.item_id for fact in disclosure.retrieved}
         ]
         signal.blocked_fact_ids = [
             item
             for item in signal.blocked_fact_ids
-            if item in {fact.fact_id for fact in disclosure.blocked}
+            if item in {fact.item_id for fact in disclosure.blocked}
         ]
         if disclosure.ambiguous_fact_ids:
             signal.retrieved_fact_ids = []
@@ -113,29 +113,18 @@ class ClientAgent:
         disclosed_levels: dict[str, int] | None = None,
         known_memories: list[UnlockedFact] | None = None,
     ) -> tuple[ClientGeneration, dict[str, Any]]:
-        known_levels = dict(disclosed_levels or {})
-        for item in already_disclosed_ids:
-            fact = next((fact for fact in profile.hidden_facts if fact.fact_id == item), None)
-            if fact is not None:
-                known_levels.setdefault(item, len(fact.disclosure_layers))
+        del disclosed_levels
         selected_ids = set(signal.retrieved_fact_ids)
         if disclosure.ambiguous_fact_ids:
             selected_ids.clear()
         allowed_facts = [
-            item for item in disclosure.retrieved if item.fact_id in selected_ids
+            item for item in disclosure.retrieved if item.item_id in selected_ids
         ]
-        allowed_levels = {
-            item.fact_id: max(known_levels.get(item.fact_id, 0), item.disclosure_level)
-            for item in allowed_facts
-        }
-        allowed_ids = set(allowed_levels)
+        allowed_ids = {item.item_id for item in allowed_facts}
         public_texts = self._public_authorized_texts(profile, known_memories or [])
         unauthorized = self._unauthorized_remainders(
-            profile.hidden_facts,
-            # Current authorized layers may be spoken now.  Earlier sessions
-            # authorize only their stored evidence text, not the rest of the
-            # canonical layer that was never actually verbalized.
-            allowed_levels,
+            profile.disclosure_items,
+            allowed_ids | set(already_disclosed_ids),
             public_texts,
         )
         attempts: list[dict[str, Any]] = []
@@ -223,19 +212,9 @@ class ClientAgent:
         repair_instruction: str = "",
         known_memories: list[UnlockedFact] | None = None,
     ) -> dict[str, Any]:
-        traits = profile.static_traits
         payload: dict[str, Any] = {
-            "static_profile": {
-                "name": traits.name,
-                "age": traits.age,
-                "gender": traits.gender,
-                "occupation": traits.occupation,
-                "language_features": traits.language_features,
-                "main_problem": profile.main_problem,
-                "topic": profile.topic,
-                "language_style": profile.language_style,
-                "personality": profile.personality.model_dump(mode="json"),
-            },
+            "client_identity": {"client_id": profile.client_id},
+            "expression_style": profile.expression_style.model_dump(mode="json"),
             "simulation_state": state.model_dump(mode="json"),
             "counselor_message": counselor_message,
             "recent_messages": [
@@ -248,7 +227,7 @@ class ClientAgent:
             "available_memories": [
                 item.model_dump(mode="json")
                 for item in disclosure.retrieved
-                if item.fact_id in set(signal.retrieved_fact_ids)
+                if item.item_id in set(signal.retrieved_fact_ids)
                 and not disclosure.ambiguous_fact_ids
             ],
             "blocked_topics": [
@@ -264,22 +243,18 @@ class ClientAgent:
 
     @staticmethod
     def _unauthorized_remainders(
-        facts: list[HiddenFact],
-        authorized_levels: dict[str, int],
+        facts: list[DisclosureItem],
+        authorized_ids: set[str],
         public_texts: list[str] | None = None,
-    ) -> list[HiddenFact]:
+    ) -> list[DisclosureItem]:
         public = normalize_disclosure_text(" ".join(public_texts or []))
-        remaining: list[HiddenFact] = []
+        remaining: list[DisclosureItem] = []
         for fact in facts:
-            level = authorized_levels.get(fact.fact_id, 0)
-            if level >= len(fact.disclosure_layers):
+            if fact.item_id in authorized_ids:
                 continue
-            final = fact.disclosure_layers[-1]
-            authorized = fact.disclosure_layers[level - 1] if level else ""
-            hidden_text = final[len(authorized):].lstrip(" ，。！？；,!?;")
             clauses = [
                 item.strip()
-                for item in re.split(r"(?<=[，。！？；,.!?;])", hidden_text)
+                for item in re.split(r"(?<=[，。！？；,.!?;])", fact.content)
                 if item.strip()
                 and normalize_disclosure_text(item) not in public
             ]
@@ -294,16 +269,7 @@ class ClientAgent:
         profile: ClientProfile,
         known_memories: list[UnlockedFact],
     ) -> list[str]:
-        traits = profile.static_traits
         return [
-            str(traits.name),
-            str(traits.age),
-            str(traits.gender),
-            str(traits.occupation),
-            traits.language_features,
-            profile.main_problem,
-            profile.topic,
-            profile.language_style,
             *(item.content for item in known_memories),
         ]
 
@@ -315,7 +281,7 @@ class ClientAgent:
         plan,
         counselor_message: str,
         recent_messages: list[Message],
-        allowed_facts: list[HiddenFact],
+        allowed_facts: list[DisclosureItem],
         turn_index: int,
     ) -> ClientGeneration:
         """Compatibility entry point for callers that have not adopted two-stage planning."""

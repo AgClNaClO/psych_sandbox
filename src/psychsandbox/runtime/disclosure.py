@@ -8,8 +8,8 @@ from ..domain import (
     BlockedMemorySignal,
     ClientProfile,
     ClientState,
+    DisclosureItem,
     DisclosureDecision,
-    HiddenFact,
     UnlockedFact,
 )
 
@@ -19,7 +19,7 @@ def normalize_activation_text(value: str) -> str:
 
 
 class ActivationMatcher(Protocol):
-    def match(self, text: str, fact: HiddenFact) -> list[str]: ...
+    def match(self, text: str, item: DisclosureItem) -> list[str]: ...
 
 
 class TagActivationMatcher:
@@ -29,11 +29,11 @@ class TagActivationMatcher:
         {"影响", "关系", "事情", "感觉", "问题"}
     )
 
-    def match(self, text: str, fact: HiddenFact) -> list[str]:
+    def match(self, text: str, item: DisclosureItem) -> list[str]:
         normalized = normalize_activation_text(text)
         matched = [
             tag
-            for tag in fact.activation_tags
+            for tag in item.activation_tags
             if normalize_activation_text(tag)
             and normalize_activation_text(tag) in normalized
         ]
@@ -58,51 +58,48 @@ class DisclosureGate:
         state: ClientState,
         text: str,
         disclosed: set[str] | Mapping[str, int],
+        *,
+        session_index: int | None = None,
     ) -> DisclosureDecision:
-        disclosed_levels = disclosed if isinstance(disclosed, Mapping) else {}
-        retrieved: list[HiddenFact] = []
+        disclosed_ids = set(disclosed)
+        retrieved: list[DisclosureItem] = []
         blocked: list[BlockedMemorySignal] = []
         activated: list[str] = []
         evidence: dict[str, list[str]] = {}
-        candidates: list[tuple[HiddenFact, list[str], int]] = []
-        for fact in profile.hidden_facts:
-            if isinstance(disclosed, set) and fact.fact_id in disclosed:
+        candidates: list[tuple[DisclosureItem, list[str]]] = []
+        for item in profile.disclosure_items:
+            if item.item_id in disclosed_ids:
                 continue
-            current_level = int(disclosed_levels.get(fact.fact_id, 0))
-            if current_level >= len(fact.disclosure_layers):
+            if (
+                item.session_scope
+                and session_index is not None
+                and session_index not in item.session_scope
+            ):
                 continue
-            matched = self.matcher.match(text, fact)
-            if fact.activation_tags and not matched:
+            matched = self.matcher.match(text, item)
+            if item.activation_tags and not matched:
                 continue
-            candidates.append((fact, matched, current_level + 1))
+            if not set(item.depends_on).issubset(disclosed_ids):
+                continue
+            candidates.append((item, matched))
 
         candidates, ambiguous = self._resolve_ambiguity(candidates, text)
-        for fact, matched, next_level in candidates:
-            activated.append(fact.fact_id)
-            evidence[fact.fact_id] = matched
-            topic_readiness = state.topic_readiness.get(fact.topic_key, state.trust)
-            trust_ready = state.trust >= fact.minimum_trust
-            topic_ready = topic_readiness >= fact.minimum_topic_readiness
-            if trust_ready and topic_ready:
-                retrieved.append(
-                    fact.model_copy(
-                        update={
-                            "content": fact.disclosure_layers[next_level - 1],
-                            "disclosure_level": next_level,
-                        }
-                    )
-                )
-            elif fact.generates_discomfort:
+        for item, matched in candidates:
+            activated.append(item.item_id)
+            evidence[item.item_id] = matched
+            trust_ready = state.trust >= item.trust_tier.threshold
+            if trust_ready:
+                retrieved.append(item)
+            elif item.generates_discomfort:
                 blocked.append(
                     BlockedMemorySignal(
-                        fact_id=fact.fact_id,
-                        category=fact.category,
-                        sensitivity=fact.sensitivity,
+                        item_id=item.item_id,
+                        category=item.category,
+                        trust_tier=item.trust_tier,
                         activation_evidence=matched,
                         reason=(
                             "insufficient_trust"
-                            if not trust_ready
-                            else "insufficient_topic_readiness"
+                            if not trust_ready else "unmet_dependency"
                         ),
                     )
                 )
@@ -116,9 +113,9 @@ class DisclosureGate:
 
     @staticmethod
     def _resolve_ambiguity(
-        candidates: list[tuple[HiddenFact, list[str], int]],
+        candidates: list[tuple[DisclosureItem, list[str]]],
         text: str = "",
-    ) -> tuple[list[tuple[HiddenFact, list[str], int]], list[str]]:
+    ) -> tuple[list[tuple[DisclosureItem, list[str]]], list[str]]:
         """Select one fact globally; tied best candidates require clarification."""
 
         if len(candidates) <= 1:
@@ -140,8 +137,8 @@ class DisclosureGate:
             "pmt_force_field": ("资源", "力量", "阻碍", "改变"),
         }
 
-        def score(candidate: tuple[HiddenFact, list[str], int]) -> int:
-            fact, matched, _ = candidate
+        def score(candidate: tuple[DisclosureItem, list[str]]) -> int:
+            fact, matched = candidate
             unique = set(matched)
             specific_count = sum(tag not in generic for tag in unique)
             generic_count = len(unique) - specific_count
@@ -169,7 +166,7 @@ class DisclosureGate:
         ]
         if len(best) == 1:
             return best, []
-        return [], [candidate[0].fact_id for candidate in best]
+        return [], [candidate[0].item_id for candidate in best]
 
     def allowed(
         self,
@@ -177,8 +174,12 @@ class DisclosureGate:
         state: ClientState,
         text: str,
         disclosed: set[str] | Mapping[str, int],
-    ) -> list[HiddenFact]:
-        return self.evaluate(profile, state, text, disclosed).retrieved
+        *,
+        session_index: int | None = None,
+    ) -> list[DisclosureItem]:
+        return self.evaluate(
+            profile, state, text, disclosed, session_index=session_index
+        ).retrieved
 
     def unlock(
         self,
@@ -187,11 +188,11 @@ class DisclosureGate:
         *,
         session_index: int,
         turn_index: int,
-        retrieved_facts: list[HiddenFact] | None = None,
+        retrieved_facts: list[DisclosureItem] | None = None,
         evidence_by_fact_id: Mapping[str, str] | None = None,
     ) -> list[UnlockedFact]:
-        index = {fact.fact_id: fact for fact in profile.hidden_facts}
-        active = {fact.fact_id: fact for fact in retrieved_facts or []}
+        index = {item.item_id: item for item in profile.disclosure_items}
+        active = {item.item_id: item for item in retrieved_facts or []}
         evidence = evidence_by_fact_id or {}
         return [
             UnlockedFact(
@@ -202,7 +203,6 @@ class DisclosureGate:
                 ),
                 evidence_session=session_index,
                 evidence_turn=turn_index,
-                disclosure_level=active.get(fact_id, index[fact_id]).disclosure_level,
             )
             for fact_id in dict.fromkeys(fact_ids)
             if fact_id in index

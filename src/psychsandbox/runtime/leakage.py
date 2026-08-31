@@ -7,6 +7,7 @@ from difflib import SequenceMatcher
 from ..domain import (
     ClientBehaviorType,
     ClientTurnSignal,
+    DisclosureItem,
     HiddenFact,
     ResistancePatternType,
 )
@@ -40,11 +41,15 @@ class PrematureDisclosureGuard:
         self,
         utterance: str,
         declared_fact_ids: list[str],
-        allowed_facts: list[HiddenFact],
+        allowed_facts: list[DisclosureItem | HiddenFact],
     ) -> tuple[list[str], list[str], dict[str, str]]:
         """Keep only declarations supported by something the client actually said."""
 
-        allowed = {fact.fact_id: fact for fact in allowed_facts}
+        normalized = [
+            fact.to_disclosure_item() if isinstance(fact, HiddenFact) else fact
+            for fact in allowed_facts
+        ]
+        allowed = {fact.item_id: fact for fact in normalized}
         confirmed: list[str] = []
         rejected: list[str] = []
         evidence: dict[str, str] = {}
@@ -65,17 +70,21 @@ class PrematureDisclosureGuard:
         self,
         utterance: str,
         declared_fact_ids: list[str],
-        unauthorized_facts: list[HiddenFact],
+        unauthorized_facts: list[DisclosureItem | HiddenFact],
         allowed_fact_ids: set[str] | None = None,
     ) -> LeakageResult:
         normalized_utterance = normalize_disclosure_text(utterance)
         declared = set(declared_fact_ids)
         allowed = allowed_fact_ids or set()
         matches: dict[str, list[str]] = {}
-        for fact in unauthorized_facts:
+        for raw_fact in unauthorized_facts:
+            fact = (
+                raw_fact.to_disclosure_item()
+                if isinstance(raw_fact, HiddenFact) else raw_fact
+            )
             reasons: list[str] = []
             normalized_fact = normalize_disclosure_text(fact.content)
-            if fact.fact_id in declared and fact.fact_id not in allowed:
+            if fact.item_id in declared and fact.item_id not in allowed:
                 reasons.append("unauthorized_fact_id")
             if len(normalized_fact) >= 8 and normalized_fact in normalized_utterance:
                 reasons.append("normalized_full_text")
@@ -88,7 +97,7 @@ class PrematureDisclosureGuard:
                     reasons.append(f"fuzzy_clause:{clause[:24]}")
                     break
             if reasons:
-                matches[fact.fact_id] = reasons
+                matches[fact.item_id] = reasons
         return LeakageResult(
             leaked_fact_ids=list(matches),
             matches=matches,

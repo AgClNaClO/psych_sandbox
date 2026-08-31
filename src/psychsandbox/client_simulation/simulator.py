@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import perf_counter
 from typing import TYPE_CHECKING, Any
 
 from ..domain import (
@@ -12,11 +13,17 @@ from ..domain import (
     CounselorTurn,
     DisclosureDecision,
     Message,
-    SessionMemory,
     UnlockedFact,
 )
 from ..runtime.disclosure import DisclosureGate
+from ..runtime.leakage import normalize_disclosure_text
 from ..runtime.state import StateUpdater
+from .policies import (
+    ClientPolicy,
+    ClientPolicyInput,
+    CompactPatientActPolicy,
+    SimpleClientPolicy,
+)
 
 if TYPE_CHECKING:
     from ..agents.client import ClientAgent
@@ -61,21 +68,26 @@ class ClientSimulator:
         agent: ClientAgent,
         disclosure: DisclosureGate | None = None,
         state_updater: StateUpdater | None = None,
+        policy: ClientPolicy | None = None,
     ):
         self.agent = agent
         self.disclosure = disclosure or DisclosureGate()
         self.state_updater = state_updater or StateUpdater()
+        self.policy = policy or CompactPatientActPolicy(agent)
 
     async def respond(self, turn: ClientTurnInput) -> ClientTurnResult:
-        disclosed_levels = self.disclosed_levels(turn.unlocked_facts)
+        started = perf_counter()
+        disclosed_ids = self.disclosed_ids(turn.unlocked_facts)
         disclosure = self.disclosure.evaluate(
             turn.profile,
             turn.state,
             turn.counselor_turn.response,
-            disclosed_levels,
+            disclosed_ids,
+            session_index=turn.session_index,
         )
-        if turn.patientact_enabled:
-            signal = await self.agent.plan_turn(
+        policy = self.policy if turn.patientact_enabled else SimpleClientPolicy()
+        signal = await policy.plan_turn(
+            ClientPolicyInput(
                 profile=turn.profile,
                 state=turn.state,
                 counselor_message=turn.counselor_turn.response,
@@ -84,13 +96,7 @@ class ClientSimulator:
                 recent_signals=turn.recent_signals,
                 turn_index=turn.turn_index,
             )
-        else:
-            signal = ClientTurnSignal(
-                behavior=ClientBehaviorType.RECOUNTING,
-                retrieved_fact_ids=[item.fact_id for item in disclosure.retrieved],
-                blocked_fact_ids=[item.fact_id for item in disclosure.blocked],
-                rationale="PATIENTACT internal planning disabled by configuration.",
-            )
+        )
         generation, leakage = await self.agent.generate_utterance(
             profile=turn.profile,
             state=turn.state,
@@ -99,10 +105,17 @@ class ClientSimulator:
             disclosure=disclosure,
             signal=signal,
             already_disclosed_ids=set(),
-            disclosed_levels=disclosed_levels,
+            disclosed_levels=None,
             known_memories=turn.unlocked_facts,
             turn_index=turn.turn_index,
         )
+        leakage["policy"] = signal.policy or getattr(policy, "name", "unknown")
+        leakage["client_model_calls"] = (
+            signal.planning_model_calls + 1 + int(leakage.get("retry_count", 0))
+        )
+        leakage["client_latency_ms"] = round((perf_counter() - started) * 1000, 3)
+        leakage["estimated_cost"] = None
+        leakage["cost_note"] = "provider token pricing is not configured"
         unlocked = self.disclosure.unlock(
             turn.profile,
             generation.disclosed_fact_ids,
@@ -129,13 +142,8 @@ class ClientSimulator:
         )
 
     @staticmethod
-    def disclosed_levels(facts: list[UnlockedFact]) -> dict[str, int]:
-        levels: dict[str, int] = {}
-        for fact in facts:
-            levels[fact.fact_id] = max(
-                levels.get(fact.fact_id, 0), fact.disclosure_level
-            )
-        return levels
+    def disclosed_ids(facts: list[UnlockedFact]) -> set[str]:
+        return {fact.fact_id for fact in facts}
 
     @staticmethod
     def merge_unlocked(
@@ -144,58 +152,66 @@ class ClientSimulator:
         merged = {fact.fact_id: fact for fact in existing}
         for fact in new:
             previous = merged.get(fact.fact_id)
-            if previous is None or fact.disclosure_level > previous.disclosure_level:
-                if previous is None or previous.content in fact.content:
-                    merged[fact.fact_id] = fact
-                elif fact.content in previous.content:
-                    merged[fact.fact_id] = fact.model_copy(
-                        update={"content": previous.content}
-                    )
-                else:
-                    merged[fact.fact_id] = fact.model_copy(
-                        update={"content": f"{previous.content}；{fact.content}"}
-                    )
+            if previous is None or previous.content in fact.content:
+                merged[fact.fact_id] = fact
+            elif fact.content not in previous.content:
+                merged[fact.fact_id] = fact.model_copy(
+                    update={"content": f"{previous.content}；{fact.content}"}
+                )
         return list(merged.values())
 
     @staticmethod
-    def prepare_session_state(state: ClientState) -> ClientState:
-        """Carry longitudinal state while allowing short-term fatigue to recover."""
+    def migrate_legacy_unlocked(
+        profile: ClientProfile, facts: list[UnlockedFact]
+    ) -> tuple[list[UnlockedFact], list[str]]:
+        """Map legacy fact IDs only when spoken text identifies one atomic item."""
 
+        current_ids = {item.item_id for item in profile.disclosure_items}
+        migrated: list[UnlockedFact] = []
+        warnings: list[str] = []
+        for fact in facts:
+            if fact.fact_id in current_ids:
+                migrated.append(fact)
+                continue
+            spoken = normalize_disclosure_text(fact.content)
+            matches = [
+                item for item in profile.disclosure_items
+                if len(spoken) >= 4
+                and spoken in normalize_disclosure_text(item.content)
+            ]
+            if len(matches) == 1:
+                migrated.append(
+                    fact.model_copy(update={"fact_id": matches[0].item_id})
+                )
+                warnings.append(
+                    f"mapped legacy spoken fact {fact.fact_id} to {matches[0].item_id}"
+                )
+            else:
+                migrated.append(fact)
+                warnings.append(
+                    f"kept unmatched legacy spoken fact {fact.fact_id}; matches={len(matches)}"
+                )
+        return migrated, warnings
+
+    @staticmethod
+    def prepare_session_state(
+        state: ClientState,
+        initial_state: ClientState | None = None,
+        trust_retention: float = 0.5,
+    ) -> ClientState:
+        """Carry longitudinal state while allowing short-term fatigue to recover."""
+        baseline = initial_state or state
+        retained_trust = baseline.trust + trust_retention * (
+            state.trust - baseline.trust
+        )
         return state.model_copy(
             update={
+                "trust": round(max(0.0, min(1.0, retained_trust)), 4),
+                "resistance": baseline.resistance,
+                "rupture_state": baseline.rupture_state,
                 "fatigue": round(
                     max(0.1, state.fatigue - ClientSimulator.SESSION_FATIGUE_RECOVERY),
                     4,
                 )
             }
         )
-
-    @staticmethod
-    def start_session(
-        profile: ClientProfile,
-        memory: SessionMemory,
-        session_index: int,
-    ) -> str:
-        if session_index == 1:
-            opening = profile.opening.strip()
-            name_only = any(term in opening for term in ("叫我", "称呼我", "名字是"))
-            if len(opening) >= 8 and not name_only:
-                return opening
-            problem = profile.main_problem.strip().split("。", 1)[0][:90]
-            lead = (
-                problem
-                if problem.startswith(("最近", "近来", "近一个", "这段时间"))
-                else f"最近{problem}"
-            )
-            return (
-                f"{lead}，我想先说说这件事。"
-                if problem
-                else "最近有些事情让我很困扰，我想找个人谈一谈。"
-            )
-        if memory.last_client_closing:
-            return f"上次谈完以后，我还一直在想：{memory.last_client_closing[:90]}"
-        if memory.unresolved_topics:
-            return f"我想接着谈谈上次还没说完的{memory.unresolved_topics[0]}。"
-        if memory.summaries:
-            return "上次谈完以后我又想了一些，今天想从那部分继续。"
-        return "今天我想接着上次的内容慢慢谈。"

@@ -44,7 +44,6 @@ class StateUpdater:
         # Marker detection remains an auditable feature and rupture/readiness cue,
         # but must not count the same counselor behavior a second time.
         trust_delta = self.TRUST_DELTAS[signal.trust_change]
-        trust_delta *= self._attachment_multiplier(profile, trust_delta)
         rule = {
             "trust": trust_delta,
             "distress": 0.0,
@@ -59,24 +58,6 @@ class StateUpdater:
             "hope": 0.05 * client.goal_progress_signal,
             "distress": -0.04 * client.goal_progress_signal,
         }
-        topic_readiness = dict(state.topic_readiness)
-        if profile is not None:
-            fact_topics = {
-                fact.fact_id: fact.topic_key for fact in profile.hidden_facts
-            }
-            for fact_id in signal.blocked_fact_ids:
-                topic = fact_topics.get(fact_id)
-                if not topic:
-                    continue
-                current = topic_readiness.get(topic, state.trust)
-                topic_readiness[topic] = _clamp(
-                    current + (-0.08 if pressured else -0.02)
-                )
-            for fact_id in signal.retrieved_fact_ids:
-                topic = fact_topics.get(fact_id)
-                if topic:
-                    current = topic_readiness.get(topic, state.trust)
-                    topic_readiness[topic] = _clamp(current + 0.02)
         rupture_state = self._rupture_state(
             state.rupture_state, pressured, respected, trust_delta
         )
@@ -93,7 +74,6 @@ class StateUpdater:
                     + 0.025
                     + (0.025 if signal.behavior is ClientBehaviorType.RESISTANCE else 0)
                 ),
-                "topic_readiness": topic_readiness,
                 "rupture_state": rupture_state,
             }
         )
@@ -105,21 +85,6 @@ class StateUpdater:
                 "pressured_disclosure": float(pressured),
             },
         }
-
-    @staticmethod
-    def _attachment_multiplier(
-        profile: ClientProfile | None, delta: float
-    ) -> float:
-        if profile is None:
-            return 1.0
-        pattern = profile.relational.attachment_pattern
-        if pattern == "anxious" and delta < 0:
-            return 1.25
-        if pattern == "avoidant":
-            return 0.65 if delta > 0 else 1.15
-        if pattern == "disorganized":
-            return 0.7 if delta > 0 else 1.2
-        return 1.0
 
     @staticmethod
     def _rupture_state(
