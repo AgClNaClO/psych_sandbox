@@ -178,6 +178,77 @@ def test_extractive_atomizer_retries_semantic_validation_failure(tmp_path, failu
     assert gateway.calls == 2
 
 
+def test_extractive_atomizer_allows_two_semantic_repairs(tmp_path):
+    class TwiceEmptyGateway(AtomizerGateway):
+        async def complete_structured(self, **kwargs):
+            self.calls += 1
+            schema = kwargs["output_schema"]
+            if self.calls <= 2:
+                return schema.model_validate({"spans": []})
+            return schema.model_validate({
+                "spans": [{
+                    "start": 0,
+                    "end": 10,
+                    "text": "家庭支持。实习失败。",
+                    "kind": "event",
+                    "activation_tags": ["家庭"],
+                    "trust_tier": "moderate",
+                }]
+            })
+
+    gateway = TwiceEmptyGateway()
+    spans, audit = asyncio.run(
+        ExtractiveAtomizer(gateway, tmp_path).atomize(
+            source_path="client_info.growth_experiences[0]",
+            source_text="家庭支持。实习失败。",
+        )
+    )
+
+    assert [item.text for item in spans] == ["家庭支持。实习失败。"]
+    assert audit.fallback is False
+    assert gateway.calls == 3
+
+
+def test_extractive_atomizer_repairs_invalid_core_demands_kind(tmp_path):
+    class InvalidKindTwiceGateway(AtomizerGateway):
+        def __init__(self):
+            super().__init__()
+            self.requests = []
+
+        async def complete_structured(self, **kwargs):
+            self.calls += 1
+            self.requests.append(kwargs)
+            schema = kwargs["output_schema"]
+            kind = "case_fact" if self.calls <= 2 else "client_goal"
+            return schema.model_validate({
+                "spans": [{
+                    "start": 0,
+                    "end": 7,
+                    "text": "希望减少焦虑。",
+                    "kind": kind,
+                    "activation_tags": [],
+                    "trust_tier": "routine",
+                }]
+            })
+
+    gateway = InvalidKindTwiceGateway()
+    spans, audit = asyncio.run(
+        ExtractiveAtomizer(gateway, tmp_path).atomize(
+            source_path="client_info.core_demands",
+            source_text="希望减少焦虑。",
+            purpose="core_demands",
+        )
+    )
+
+    assert [item.kind for item in spans] == ["client_goal"]
+    assert audit.fallback is False
+    assert gateway.calls == 3
+    assert [request["temperature"] for request in gateway.requests] == [0.0, 0.1, 0.2]
+    assert "client_goal/treatment_instruction" in (
+        gateway.requests[1]["input_payload"]["atomizer_repair_instruction"]
+    )
+
+
 def test_extractive_atomizer_drops_ungrounded_activation_tag(tmp_path):
     class InvalidTagGateway(AtomizerGateway):
         async def complete_structured(self, **kwargs):

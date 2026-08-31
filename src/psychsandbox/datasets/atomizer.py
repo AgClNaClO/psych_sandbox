@@ -44,6 +44,7 @@ class AtomizationAudit(StrictModel):
 ATOMIZER_SYSTEM_PROMPT = """你是 PsychEval 来访者资料的有来源抽取器。你只能切分输入原文，不能改写、概括、解释或补充。
 每个 span 必须是原文中一个连续、完整、可单独披露的语义事实，并返回 Python 风格的 start（含）和 end（不含）。
 text 必须是 source_text 中逐字连续出现的原文。start/end 请尽量准确，但程序会依据 text 重新定位。
+只要 source_text 含有有意义文本，spans 就不得为空；所有 spans 合起来必须覆盖全部有意义文本。
 activation_tags 必须逐字出现在该 span 中；不确定时返回空列表，不要概括或改写标签。
 purpose=growth 时 kind 只能是 event/emotion/belief/meaning/coping/consequence/resource。
 purpose=language 时，把内容分为 verbal_style/interaction_style/affective_expression/conditional_observation/case_fact；只有前三类是纯表达风格。包含具体人物、事件、症状、经历、目标或关系事实的内容不能标成纯风格。
@@ -75,7 +76,17 @@ class ExtractiveAtomizer:
         try:
             validation_error = ""
             previous_output: dict | None = None
-            for semantic_attempt in range(2):
+            repair_temperatures = (0.0, 0.1, 0.2)
+            allowed_kinds = {
+                "growth": "event/emotion/belief/meaning/coping/consequence/resource",
+                "language": (
+                    "verbal_style/interaction_style/affective_expression/"
+                    "conditional_observation/case_fact"
+                ),
+                "core_demands": "client_goal/treatment_instruction",
+                "five_ps": "case_fact",
+            }
+            for semantic_attempt, temperature in enumerate(repair_temperatures):
                 payload = {
                     "source_path": source_path,
                     "source_text": source_text,
@@ -87,6 +98,9 @@ class ExtractiveAtomizer:
                         "atomizer_repair_instruction": (
                             "上次输出通过了 JSON schema，但没有通过逐字原文校验。"
                             "请根据 validation_error 重新切分完整原文；不得改写、遗漏或补写。"
+                            "spans 不得为空，且必须覆盖全部有意义原文。"
+                            f"当前 purpose={purpose}，kind 只能是 "
+                            f"{allowed_kinds[purpose]}；不得使用其他 kind。"
                         ),
                         "validation_error": validation_error,
                         "invalid_previous_spans": previous_output,
@@ -96,13 +110,13 @@ class ExtractiveAtomizer:
                     system_prompt=ATOMIZER_SYSTEM_PROMPT,
                     input_payload=payload,
                     output_schema=ExtractedSpans,
-                    temperature=0.0,
+                    temperature=temperature,
                 )
                 parsed = ExtractedSpans.model_validate(result)
                 try:
                     spans = self._validate(source_text, parsed, purpose)
                 except ValueError as exc:
-                    if semantic_attempt == 0:
+                    if semantic_attempt < len(repair_temperatures) - 1:
                         validation_error = str(exc)
                         previous_output = parsed.model_dump(mode="json")
                         continue

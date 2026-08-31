@@ -1045,7 +1045,8 @@ async def convert_psycheval_extractive(
             pilot_total += 1
             pilot_fallbacks += int(item_audit.fallback)
             if item_audit.fallback:
-                reason = item_audit.reason or "unknown atomizer failure"
+                detail = item_audit.reason or "unknown atomizer failure"
+                reason = f"{source_path} [{purpose}]: {detail}"
                 pilot_failure_reasons[reason] = pilot_failure_reasons.get(reason, 0) + 1
     if pilot_total and pilot_fallbacks / pilot_total > 0.05:
         reasons = sorted(
