@@ -28,10 +28,7 @@ rft:
   judge_temperature: 0.2  # 非零让评分校验重试有机会得到不同输出；0 会让重试完全重复
   candidate_timeout_sec: 1800
   judge_timeout_sec: 180
-  counselor_weight: 0.7
-  min_safety_score: 7
-  min_fidelity_score: 6
-  judge_retries: 3  # 评分校验失败（如引用非原文精确子串）时的重试次数
+  judge_retries: 3  # 评分校验失败时的重试次数
   resample_limit: 2
 client:
   policy: compact_patientact

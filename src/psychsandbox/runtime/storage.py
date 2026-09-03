@@ -45,10 +45,6 @@ CREATE TABLE IF NOT EXISTS llm_evaluations (
   run_id TEXT NOT NULL, session_index INTEGER NOT NULL, report_json TEXT NOT NULL,
   PRIMARY KEY(run_id, session_index)
 );
-CREATE TABLE IF NOT EXISTS client_evaluations (
-  run_id TEXT NOT NULL, session_index INTEGER NOT NULL, report_json TEXT NOT NULL,
-  PRIMARY KEY(run_id, session_index)
-);
 CREATE TABLE IF NOT EXISTS trajectories (
   trajectory_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, session_index INTEGER NOT NULL,
   trajectory_json TEXT NOT NULL
@@ -158,29 +154,6 @@ class SQLiteStore:
                 "INSERT OR REPLACE INTO memories VALUES (?,?,?)",
                 (run_id, session.session_index, memory.model_dump_json()),
             )
-            if session.supervisor_report:
-                self.connection.execute(
-                    "INSERT OR REPLACE INTO evaluations VALUES (?,?,?)",
-                    (run_id, session.session_index, session.supervisor_report.model_dump_json()),
-                )
-            if session.llm_supervisor_report:
-                self.connection.execute(
-                    "INSERT OR REPLACE INTO llm_evaluations VALUES (?,?,?)",
-                    (
-                        run_id,
-                        session.session_index,
-                        session.llm_supervisor_report.model_dump_json(),
-                    ),
-                )
-            if session.client_simulation_report:
-                self.connection.execute(
-                    "INSERT OR REPLACE INTO client_evaluations VALUES (?,?,?)",
-                    (
-                        run_id,
-                        session.session_index,
-                        session.client_simulation_report.model_dump_json(),
-                    ),
-                )
             self.connection.execute(
                 "INSERT OR REPLACE INTO trajectories VALUES (?,?,?,?)",
                 (
@@ -269,36 +242,6 @@ class SQLiteStore:
             (run_id,),
         ).fetchone()
         return HolisticEvaluationReport.model_validate_json(row[0]) if row else None
-
-    def evaluation_rows(self, run_id: str) -> list[dict]:
-        rows = self.connection.execute(
-            "SELECT session_index, report_json FROM evaluations WHERE run_id=? ORDER BY session_index",
-            (run_id,),
-        ).fetchall()
-        llm = {
-            row[0]: json.loads(row[1])
-            for row in self.connection.execute(
-                "SELECT session_index, report_json FROM llm_evaluations WHERE run_id=?",
-                (run_id,),
-            ).fetchall()
-        }
-        client = {
-            row[0]: json.loads(row[1])
-            for row in self.connection.execute(
-                "SELECT session_index, report_json FROM client_evaluations WHERE run_id=?",
-                (run_id,),
-            ).fetchall()
-        }
-        return [
-            {
-                "session_index": row[0],
-                "rule_report": json.loads(row[1]),
-                "llm_report": llm.get(row[0]),
-                "client_report": client.get(row[0]),
-            }
-            for row in rows
-        ]
-
 
 def _json(value: dict) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)

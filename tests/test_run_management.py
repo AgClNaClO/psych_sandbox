@@ -29,7 +29,7 @@ def add_run(store, base, run_id, *, directory=True, status="completed"):
         db.execute("INSERT INTO turns VALUES (?,1,1,'client','test','{}')", (run_id,))
         for table, fields in (
             ("memories", "?,1,'{}'"), ("evaluations", "?,1,'{}'"),
-            ("llm_evaluations", "?,1,'{}'"), ("client_evaluations", "?,1,'{}'"),
+            ("llm_evaluations", "?,1,'{}'"),
             ("holistic_evaluations", "?,'{}'"),
         ):
             db.execute(f"INSERT INTO {table} VALUES ({fields})", (run_id,))
@@ -105,6 +105,35 @@ def test_directory_only_cleanup_does_not_create_database(tmp_path):
     assert manager.delete(TARGET)["status"] == "completed"
     assert not manager.database.exists()
     assert not directory.exists()
+
+
+def test_clean_tests_previews_then_deletes_only_test_directories(tmp_path):
+    from types import SimpleNamespace
+
+    root = tmp_path
+    tests_root = root / "runs" / "tests"
+    invocation = tests_root / "20260101-000000-000000__pytest__deadbeef"
+    invocation.mkdir(parents=True)
+    (invocation / "run.json").write_text("{}", encoding="utf-8")
+    readme = tests_root / "README.md"
+    readme.write_text("keep", encoding="utf-8")
+
+    # Preview keeps everything and reports the pending directory.
+    assert cli._clean_tests(SimpleNamespace(yes=False), root) == 0
+    assert invocation.exists()
+    assert readme.exists()
+
+    # Confirmed deletion removes the invocation but never the README file.
+    assert cli._clean_tests(SimpleNamespace(yes=True), root) == 0
+    assert not invocation.exists()
+    assert readme.exists()
+
+
+def test_clean_tests_without_directory_is_a_noop(tmp_path):
+    from types import SimpleNamespace
+
+    assert cli._clean_tests(SimpleNamespace(yes=False), tmp_path) == 0
+    assert cli._clean_tests(SimpleNamespace(yes=True), tmp_path) == 0
 
 
 def test_unknown_run_is_never_created(tmp_path):

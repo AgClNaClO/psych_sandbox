@@ -837,6 +837,25 @@ def test_disclosure_memory_uses_spoken_evidence_not_full_atom(sample_case):
     assert "更私密" not in unlocked[0].content
 
 
+def test_short_routine_fact_is_substantiated():
+    fact = DisclosureItem(
+        item_id="name:evidence",
+        evidence_ids=["name:evidence"],
+        content="明山",
+        activation_tags=["名字"],
+        trust_tier=TrustTier.ROUTINE,
+    )
+    confirmed, rejected, evidence = PrematureDisclosureGuard().substantiate(
+        "我叫明山。",
+        [fact.item_id],
+        [fact],
+    )
+
+    assert confirmed == [fact.item_id]
+    assert rejected == []
+    assert evidence[fact.item_id] == "明山"
+
+
 def test_known_memories_are_available_without_being_new_disclosures(sample_case):
     fact = sample_case.profile.disclosure_items[0]
     known = UnlockedFact(

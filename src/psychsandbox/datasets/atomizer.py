@@ -13,6 +13,32 @@ from ..model_client import ModelGateway
 from .profile_compiler import ATOMIZER_PROMPT_VERSION, AtomicSpan
 
 
+# Punctuation, decoration and whitespace that may legally sit in the gaps
+# between verbatim spans.  Models routinely drop trailing/leading punctuation
+# (full stops, commas, ellipses, tildes, bullets, quotes) when segmenting
+# source text; such residue is not "meaningful content" and must not fail
+# validation.
+_RESIDUE_IGNORABLE_RE = re.compile(
+    r"[\s，。！？；：、,:;!?.（）()《》〈〉「」『』【】〔〕\[\]{}\-—–…～~·•●○∙\"'“”‘’＂＇]+"
+)
+
+# Length-preserving character normalization used only to locate spans in the
+# source.  Models sometimes return the same text with straight quotes where the
+# source uses curly (or full-width) quotes, or half-width punctuation where the
+# source uses full-width.  Normalizing both sides before find() keeps offsets
+# identical (the mapping is 1:1) while tolerating those cosmetic differences.
+_SPAN_MATCH_NORMALIZATION = str.maketrans(
+    {
+        **{chr(0xFF01 + i): chr(0x21 + i) for i in range(0x5D + 1)},
+        "\u2018": "'",  # ‘
+        "\u2019": "'",  # ’
+        "\u201c": '"',  # “
+        "\u201d": '"',  # ”
+        "\u3000": " ",  # ideographic space
+    }
+)
+
+
 class ExtractedSpan(StrictModel):
     start: int = Field(ge=0)
     end: int = Field(gt=0)
@@ -146,9 +172,13 @@ class ExtractiveAtomizer:
         if not output.spans:
             raise ValueError("atomizer returned no spans")
         # Models are good at selecting verbatim text but unreliable at counting
-        # Unicode code points.  Treat returned text and order as authoritative,
-        # then derive character offsets deterministically from the source.
+        # Unicode code points, and they sometimes normalize cosmetic characters
+        # (curly/full-width quotes, full-width punctuation).  Treat returned text
+        # and order as authoritative, locate it in a length-preserving normalized
+        # view of the source (so offsets stay identical), and derive character
+        # offsets deterministically from the source.
         ordered = list(output.spans)
+        normalized_source = source.translate(_SPAN_MATCH_NORMALIZATION)
         previous_end = 0
         uncovered: list[str] = []
         result: list[AtomicSpan] = []
@@ -161,9 +191,12 @@ class ExtractiveAtomizer:
         for item in ordered:
             if item.kind not in allowed:
                 raise ValueError(f"invalid {purpose} span kind: {item.kind}")
-            start = source.find(item.text, previous_end)
+            normalized_text = item.text.translate(_SPAN_MATCH_NORMALIZATION)
+            start = normalized_source.find(normalized_text, previous_end)
             if start < 0:
-                raise ValueError("atomizer text is not an exact source span")
+                raise ValueError(
+                    f"atomizer text is not an exact source span: {item.text!r}"
+                )
             end = start + len(item.text)
             activation_tags = tuple(
                 tag for tag in item.activation_tags if tag and tag in item.text
@@ -171,7 +204,10 @@ class ExtractiveAtomizer:
             if purpose == "language" and item.kind in {
                 "verbal_style", "interaction_style", "affective_expression"
             } and _looks_like_case_fact(item.text):
-                raise ValueError("factual language_features content cannot enter expression style")
+                raise ValueError(
+                    "factual language_features content cannot enter expression "
+                    f"style: span {item.text!r} with kind {item.kind!r}"
+                )
             uncovered.append(source[previous_end:start])
             previous_end = end
             result.append(
@@ -188,7 +224,7 @@ class ExtractiveAtomizer:
             )
         uncovered.append(source[previous_end:])
         residue = "".join(uncovered)
-        if re.sub(r"[\s，。！？；、,:：;（）()\-—]+", "", residue):
+        if _RESIDUE_IGNORABLE_RE.sub("", residue):
             raise ValueError("atomizer omitted meaningful source content")
         return result
 

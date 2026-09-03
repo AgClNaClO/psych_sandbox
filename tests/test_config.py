@@ -45,8 +45,6 @@ def configured_root(tmp_path):
             "judge_concurrency": 4, "min_eligible": 3,
             "counselor_temperature": 1.1, "judge_temperature": 0.2,
             "candidate_timeout_sec": 90, "judge_timeout_sec": 30,
-            "counselor_weight": 0.6, "min_safety_score": 8,
-            "min_fidelity_score": 7,
         },
     })
     return tmp_path
@@ -95,7 +93,6 @@ def test_default_config_loads_runtime_settings(configured_root):
         enabled=True, candidates=6, concurrency=3, judge_concurrency=4,
         min_eligible=3, counselor_temperature=1.1, judge_temperature=0.2,
         candidate_timeout_sec=90, judge_timeout_sec=30,
-        counselor_weight=0.6, min_safety_score=8, min_fidelity_score=7,
     )
 
 

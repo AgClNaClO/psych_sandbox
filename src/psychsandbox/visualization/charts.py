@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from html import escape
 
-from ..domain import EvaluationMetric, SessionRecord
+from ..domain import SessionRecord
 
 
 STATE_SERIES = {
@@ -71,23 +71,3 @@ def state_line_chart(sessions: list[SessionRecord]) -> str:
         legend_x += 90
     parts.append("</svg>")
     return "".join(parts)
-
-
-def metric_bars(metrics: list[EvaluationMetric]) -> str:
-    if not metrics:
-        return '<p class="muted">暂无督导指标</p>'
-    rows = []
-    for metric in metrics:
-        score = max(0, min(10, metric.score))
-        tone = "bad" if score < 6 else "warn" if score < 7 else "good"
-        rows.append(
-            '<div class="metric">'
-            f'<div class="metric-label"><span>{escape(metric.name)}</span>'
-            f'<strong>{score:.2f}</strong></div>'
-            '<div class="bar-track">'
-            f'<div class="bar {tone}" style="width:{score * 10:.1f}%"></div>'
-            "</div>"
-            f'<div class="metric-reason">{escape(metric.reason)}</div>'
-            "</div>"
-        )
-    return "".join(rows)

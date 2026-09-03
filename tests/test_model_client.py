@@ -477,26 +477,20 @@ class SingleStringField(BaseModel):
     content: str
 
 
-@pytest.mark.parametrize("invalid_field", ["safety_passed", "message_index"])
-def test_rollout_raw_json_is_strict_before_gateway_coercion(tmp_path, invalid_field):
-    from psychsandbox.domain import RolloutAssessment
+@pytest.mark.parametrize("payload", [
+    {"items": "not-a-list"},
+    {"items": [{"item": 1, "score": 4.0}]},
+    {"items": [{"item": "1", "score": "four"}]},
+])
+def test_scale_raw_json_is_validated_before_gateway_coercion(tmp_path, payload):
+    from psychsandbox.domain import ScaleItems
 
-    payload = {
-        name: {"score": 8, "reason": "test", "evidence": [{"message_index": 0, "quote": "test"}]}
-        for name in RolloutAssessment.model_fields
-        if name not in {"safety_passed", "safety_reason"}
-    }
-    payload.update(safety_passed=True, safety_reason="test")
-    if invalid_field == "safety_passed":
-        payload["safety_passed"] = 1
-    else:
-        payload["client_agency"]["evidence"][0]["message_index"] = False
     raw = json.dumps(payload)
     gateway, completions = _gateway(tmp_path, [raw, raw])
-    with pytest.raises(ValueError, match="failed RolloutAssessment"):
+    with pytest.raises(ValueError, match="failed ScaleItems"):
         asyncio.run(gateway.complete_structured(
             role="supervisor", system_prompt="JSON", input_payload={},
-            output_schema=RolloutAssessment, temperature=0,
+            output_schema=ScaleItems, temperature=0,
         ))
     assert len(completions.calls) == 2
 

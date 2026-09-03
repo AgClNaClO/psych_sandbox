@@ -28,27 +28,23 @@ psych-sandbox simulate --case psycheval-cbt-001 --sessions 3
 psych-sandbox visualize --run run-xxxxxxxxxxxx
 ```
 
-测试与实际运行分别保存在 `runs/tests/` 和 `runs/runtime/`，每次建立带时间和唯一编号的目录。测试结果及临时文件会保留，不再在结束后删除。目录结构、续跑与清理方式见 [运行文件说明](docs/RUN_ARTIFACTS.md)。
+测试与实际运行分别保存在 `runs/tests/` 和 `runs/runtime/`，每次建立带时间和唯一编号的目录。`pytest` 结束（无论成败）默认自动删除该次调用目录，如需保留失败现场可设置 `PSYCHSANDBOX_KEEP_TESTS=1`；也可用 `psych-sandbox runs clean-tests` 手动清理测试日志。目录结构、续跑与清理方式见 [运行文件说明](docs/RUN_ARTIFACTS.md)。
 
 ## v0.3.0 更新重点
 
 - 将运行时扩充为行为（BT）、认知行为（CBT）、人本—存在（HET）、心理动力（PDT）和后现代（PMT）五流派；每个流派使用独立病例字段、技能树、概念化重点和专属评估指标。
 - 新增 CBT 与人本—存在取向的独立 `TherapyProfile`，避免混用不同流派的数据与评估标准。
-- 将模拟来访者拆分为内部策略规划和自然语言表达两个阶段，增加语义原子门控、阻抗、
-  提前披露防护及对话循环修复。当前来访者提示词版本为 `psycheval_patientact_v5`。
-- 修复来访者披露链路：规划器选择的事实才会进入语言模型；本轮声称披露的事实必须能从
-  实际台词核验；跨会谈只复用已经说过的证据片段，不把完整隐藏层写入记忆。
-- 将同类/跨类别候选统一进行歧义消解，并将公开主诉从私密泄漏匹配中排除；保留确定性
-  近似匹配、重试和安全替代回答作为纵深防护。
-- PatientAct 互动先验只从 PsychEval 有明确来源的流派字段派生；新画像不再生成无来源的
-  Big Five 或依恋维度，PDT 之外也不会为凑齐结构而强制生成完整 CCRT。
+- 将模拟来访者拆分为内部策略规划和自然语言表达两个阶段，增加语义原子门控、阻抗、提前披露防护及对话循环修复。当前来访者提示词版本为 `psycheval_patientact_v5`。
+- 修复来访者披露链路：规划器选择的事实才会进入语言模型；本轮声称披露的事实必须能从实际台词核验；跨会谈只复用已经说过的证据片段，不把完整隐藏层写入记忆。
+- 将同类/跨类别候选统一进行歧义消解，并将公开主诉从私密泄漏匹配中排除；保留确定性近似匹配、重试和安全替代回答作为纵深防护。
+- PatientAct 互动先验只从 PsychEval 有明确来源的流派字段派生；新画像不再生成无来源的 Big Five 或依恋维度，PDT 之外也不会为凑齐结构而强制生成完整 CCRT。
 - 合入 `patientact-client-upgrade-v4` 的 E.7/E.8/E.9 会后记忆流水线、整体督导与存储更新。
 - 将咨询师升级为 API 驱动的 `evidence_vector_retry_v2`：先规划，再查询技能并观察结果，最后执行回复；技能选择要求公开适用依据；原子候选过多时才使用向量筛选，差查询最多纠错一次。
-- 新增独立的来访者真实性评估、规则会谈评估和跨 session 纵向趋势分析。
-- 每个 session 结束后由咨询师模型核对目标与对话证据；未达目标时重新选择策略、目标和元技能，纵向进度信号继续负责阶段推进与安全保持，规则督导评分不直接驱动计划。
-- 新增单文件 HTML 可视化报告，集中呈现运行流程、状态曲线、督导指标、信息披露、安全检查和完整对话。
+- 新增 RFT 候选的 PsychEval 量表评分（RFT 奖励）和跨 session 纵向趋势分析。
+- 每个 session 结束后由咨询师模型核对目标与对话证据；未达目标时重新选择策略、目标和元技能，纵向进度信号继续负责阶段推进与安全保持，RFT 候选评分不直接驱动计划。
+- 新增单文件 HTML 可视化报告，集中呈现运行流程、状态曲线、整体督导评估、摘要与纵向判断、信息披露、安全检查和完整对话。
 - 自动化测试覆盖多会话连续性、SQLite 恢复、信息隔离、安全分流、 API 结构化输出、失败状态持久化与 CLI 进度反馈。
-- 新增可选整场会谈多候选、独立 RFT 评分与选优；仅胜出会谈进入会后整理和正式轨迹。默认关闭，不包含权重训练，详见 [会谈 RFT](docs/SESSION_RFT.md)。
+- 新增可选整场会谈多候选、统一 PsychEval 量表评分与选优；仅胜出会谈进入会后整理和正式轨迹。默认关闭，不包含权重训练，详见 [会谈 RFT](docs/SESSION_RFT.md)。
 
 ## 1. 项目要解决什么问题
 
@@ -72,7 +68,7 @@ psych-sandbox visualize --run run-xxxxxxxxxxxx
         ↓
 会后摘要 + 跨 session 记忆 + 下一次计划
         ↓
-规则督导 + 多会话后整体督导（PsychEval 量表）
+RFT 候选评分（开启 RFT 时）+ 多会话后整体督导（PsychEval 量表）
         ↓
 SQLite、JSONL 轨迹和后续经验池
 ```
@@ -93,8 +89,8 @@ SQLite、JSONL 轨迹和后续经验池
 - 支持“反应—行为—阻抗—回答”的两阶段来访者生成、blocked 敏感话题信号和提前披露防护。
 - 支持来访者话题边界识别、咨询师重复回复检测和互动修复，避免固定追问形成对话循环。
 - 每轮记录 Reasoning 摘要、Planning 步骤、Action、Observation、实际技能、结构化决策、状态变化和安全结果。
-- 每个 session 生成咨询师目标自评、必要的策略再规划、摘要、六维规则督导、独立来访者仿真报告、纵向趋势和下一次计划。
-- 每次 CLI 仿真自动生成单文件 HTML 报告，展示流程、状态曲线、督导指标、披露/安全过程和完整对话。
+- 每个 session 生成咨询师目标自评、必要的策略再规划、摘要、纵向趋势和下一次计划；开启 RFT 时另做候选评分与选优。
+- 每次 CLI 仿真自动生成单文件 HTML 报告，展示流程、状态曲线、整体督导评估、摘要与纵向判断、披露/安全过程和完整对话。
 - 生产运行统一使用 OpenAI-compatible API，不提供离线或本地模型后端。
 - 自动化测试覆盖 API 契约和主要控制流程。
 - 2026-08-28 新目录的最终全量测试为 383 项通过（173.23 秒），覆盖统一删除与 ChatECNU 配置；未调用真实模型 API，不据此声称模型质量或真实接口联调通过。
@@ -116,17 +112,11 @@ SQLite、JSONL 轨迹和后续经验池
 - 咨询师上一轮回复和近期对话。
 
 生成器看不到未授权成长经历、特殊情境、完整 CBT 概念化材料或咨询师内部 session 目标。
-事实门控先找候选，再由内部规划器选择真正相关的事实；跨类别候选如果无法唯一定位，来访者会
-请求具体化而不是同时披露。生成器返回的 `disclosed_fact_ids` 还要与实际台词核验，只有找到
-文本证据的事实才会解锁，记忆中保存的也是本轮说出的片段而不是完整私密档案。
+事实门控先找候选，再由内部规划器选择真正相关的事实；跨类别候选如果无法唯一定位，来访者会请求具体化而不是同时披露。生成器返回的 `disclosed_fact_ids` 还要与实际台词核验，只有找到文本证据的事实才会解锁，记忆中保存的也是本轮说出的片段而不是完整私密档案。
 
 回答经过确定性提前披露检查；检查会排除公开主诉和已说过的旧记忆，并对相近改写做近似匹配。首次失败会重试，仍失败则使用符合当前行为信号的安全替代回答。该检查是纵深防护，不等同于完整语义理解；最终的多会话语义一致性仍由 PsychEval 整体督导和人工评审承担。
 
-PatientAct 参数采用“有证据才派生”的原则：PsychEval 原始字段先编译为可追溯的 `EvidenceNode`，
-再投影为原子 `DisclosureItem`、带来源的 5Ps 和按流派构建的 `InteractionPrior`。新画像不生成
-Big Five 或依恋类型；PDT 可从核心冲突、客体关系和反应模式形成 CCRT-like 结构，其他流派只保留
-其证据足以支持的互动倾向。状态在会谈内允许非线性波动，信任变化下一轮生效；跨会谈按配置系数
-保留信任并恢复短期状态，避免 6–10 次会谈中疲劳只能单向累积。
+PatientAct 参数采用“有证据才派生”的原则：PsychEval 原始字段先编译为可追溯的 `EvidenceNode`，再投影为原子 `DisclosureItem`、带来源的 5Ps 和按流派构建的 `InteractionPrior`。新画像不生成 Big Five 或依恋类型；PDT 可从核心冲突、客体关系和反应模式形成 CCRT-like 结构，其他流派只保留其证据足以支持的互动倾向。状态在会谈内允许非线性波动，信任变化下一轮生效；跨会谈按配置系数保留信任并恢复短期状态，避免 6–10 次会谈中疲劳只能单向累积。
 
 ### 3.2 多流派咨询师
 
@@ -142,16 +132,13 @@ Big Five 或依恋类型；PDT 可从核心冲突、客体关系和反应模式�
 
 ### 3.3 督导师
 
-督导师拥有审计视图，可以查看完整档案、会谈计划、对话和技能决策。第一阶段评估六个维度：
+督导师是**整体督导**（`PsychEvalSupervisor`）：在整条多 session 轨迹全部结束后运行一次，与 PsychEval §5 对齐，读取完整档案与可见对话，给出 Counselor-Level（临床胜任力）与 Client-Level（仿真保真度）评分，产出 `HolisticEvaluationReport`。它只评分、不规划下一 session。与之配套的评估组件包含以下三部分：
 
-- `wai_lite`：目标、任务和关系联盟。
-- `miti_lite`、`ctrs_lite`、`tes_lite`、`psc_lite`、`eft_tfs_lite`：检查五流派各自的可观察行为。
-- `stage_consistency`：干预是否符合当前咨询阶段。
-- `persona_consistency`：来访者人设和跨 session 一致性。
-- `hidden_information_leakage`：咨询师是否提前使用隐藏信息。
-- `ethics_and_safety`：高风险场景是否停止普通干预并进行安全分流。
+- **RFT 候选评分（LLM-as-Judge，奖励信号）**：`SessionSupervisorEvaluator` 仅在开启 RFT 时被 `SessionRolloutEvaluator` 调用，用同一套 `prompts/eval` PsychEval 量表给每个候选整场会谈打分，产出 `SessionEvaluationReport`（存放在候选的 `assessment`，不写入已提交 session）。Counselor-Level 使用 WAI、HTAIS、RRO、`custom_dim` 及流派专属量表（BT→MITI；CBT→CTRS；HET→TES；PDT→PSC；PMT→EFT-TFS），Client-Level 使用 SCL-90、PANAS、RRO、SRS 及流派专属量表（BT→STAI；CBT→BDI-II；HET→CCT；PDT→IPO；PMT→SFBT）。该报告只作为 RFT 候选排名信号与审计记录（对应 PsychAgent §3.3 的奖励模型），不是临床督导。
+- **规则安全/披露门控**：`SessionSafetyGate` 做确定性检查——咨询师是否在来访者披露前引用隐藏事实（`hidden_information_leakage`），以及高风险场景是否停止普通干预并连接现实支持（`ethics_and_safety`）。这两项只做 RFT 候选准入/拒绝与轨迹安全标记，不参与评分。
+- **量表对齐 PsychEval**：RRO 是单个 24 条目量表，按 4 因子（Client/Counselor × Realism/Genuineness）分解并对条目 {2,7,16,17,18,19,24} 反向计分，咨询师侧与来访者侧各取两个因子均值；`custom_dim` 是单个咨询师侧量表，聚合 Ethics、Interaction、Intervention、Perception 四个 criteria 为一个分数。各量表按其官方原始条目范围（WAI/HTAIS/`custom_dim`/EFT-TFS/MITI/IPO/PANAS 为 1–5，TES 为 1–7，PSC/CTRS 为 0–6，SCL-90/SRS/STAI/SFBT 为 0–4，BDI-II 为 0–3，CCT 为 0–2）归一化为 0–10 原始分（症状量表 SCL-90/BDI-II/IPO 越高越重，不取反；PANAS 按正/负情绪平衡公式计算）；原始范围记录在 `Instrument.scale`。
 
-每 session 结束后运行确定性规则督导，用于审计与安全门控，不参与下一 session 规划。整条多 session 轨迹全部结束后，再运行一次与 PsychEval 对齐的整体督导：直接使用 `prompts/eval` 中的量表提示词，给出 Counselor-Level（临床胜任力）与 Client-Level （仿真保真度）评分。规则督导与整体督导分开保存，不会用一个总分覆盖具体证据和违规项。
+RFT 候选评分与规则门控不参与下一 session 规划（规划由 `PlanBuilder` 结合咨询师会后自评与纵向进度信号完成）；整体督导只给一次、RFT 候选评分留在候选审计记录，不会用一个总分覆盖具体证据和违规项。
 
 ## 4. 核心架构
 
@@ -159,12 +146,12 @@ Big Five 或依恋类型；PDT 可从核心冲突、客体关系和反应模式�
 src/psychsandbox/
 ├── domain/          Pydantic 统一领域模型
 ├── datasets/        PsychEval/PsychAgent 原始数据适配与案例仓库
-├── agents/          来访者、规划/ReAct/会后自评咨询师与可选 LLM 督导
+├── agents/          来访者、规划/ReAct/会后自评咨询师与督导智能体
 ├── client_simulation/ 来访者激活、渐进披露、反应、语言和状态的统一接口
 ├── therapies/       治疗流派定义、概念化焦点与阶段目标
 ├── runtime/         编排、安全、披露、状态、记忆、反馈计划和 SQLite
 ├── skills/          技能注册、精确目录查询与按需向量筛选
-├── evaluation/      规则督导、来访者仿真、纵向评测与整体督导
+├── evaluation/      每 session 量表评分、安全门控、纵向评测与整体督导
 ├── visualization/   无外部依赖的 SVG/HTML 运行报告
 ├── experience/      通过安全门槛的经验池
 ├── evolution/       技能审核、晋升、弃用和回滚状态机
@@ -196,13 +183,12 @@ src/psychsandbox/
    - 内部规划器依次选择情绪反应、行为、可选阻抗形式和信任变化；blocked 不再强制等于防御。
    - 只有内部规划器从候选中选中的事实才进入语言生成器；语言生成器另可读取已披露证据记忆。
    - 回答通过事实 ID 授权、台词证据核验和提前泄漏检查后，才更新解锁档案。
-   - 更新联盟信任、话题准备度、疲劳和关系破裂状态并保存审计轨迹；下一 session 开始时仅恢复
-     部分短期疲劳，不重置联盟、困扰、希望或话题准备度。
+   - 更新联盟信任、话题准备度、疲劳和关系破裂状态并保存审计轨迹；下一 session 开始时仅恢复部分短期疲劳，不重置联盟、困扰、希望或话题准备度。
 3. `consolidate_session`
-    - 完成规则督导和来访者真实性评测（RFT 候选已有的规则报告直接复用）。
+    - 运行规则安全/披露门控（`SessionSafetyGate`），只做准入与安全标记、不评分。
     - 计算状态差值、相邻会谈趋势和阶段动作。
     - 咨询师模型评测本次目标是否达到；未达到时生成改进项、修订策略、下次目标和元技能方向。
-    - 将咨询师再规划与纵向阶段动作合并为下一次计划，不依赖规则督导评分。
+    - 将咨询师再规划与纵向阶段动作合并为下一次计划，不依赖督导评分。
     - 运行 E.7/E.8/E.9 记忆流水线：提取实际披露信息、门控合并演化档案并生成有证据的摘要。
     - 整理跨 session 记忆、目标进度和已使用技能。
     - 保存 SQLite 和 JSONL 轨迹。
@@ -288,11 +274,10 @@ data\pdt\                 心理动力取向原始案例
 data\pmt\                 后现代取向原始案例
 assets\profiles\          Psych-new sample/rft 画像副本（当前仅作来源对照）
 assets\skills\sect\       分流派、分阶段技能树
-prompts\eval\             整体督导量表提示词（46 个，由当前代码加载）
+prompts\eval\             督导量表提示词（46 个，由当前代码加载，用于每 session 与整体督导）
 prompts\counselor\        咨询师规划/执行/会后自评生成提示词（Jinja2 模板）
 prompts\simclient\        两阶段模拟来访者（规划、台词）生成提示词（Jinja2 模板）
 prompts\memory\           E.7 提取、E.8 合并、E.9 摘要生成提示词（Jinja2 模板）
-prompts\rft\              可选整场会谈独立评分模板
 prompts\client\           dialogue.jinja2 参考模板，未接入生产
 ```
 
@@ -324,10 +309,7 @@ e04df535749e5bca76fcc45d9a85f3f46a082d91
 psych-sandbox data convert --therapy all --atomizer extractive
 ```
 
-schema-v4 运行时缓存是五流派原子替换单元，因此生产转换要求 `--therapy all` 和
-`--atomizer extractive`，并要求显式配置 `PROFILE_MODEL`，不会回退 `CLIENT_MODEL`。转换先按每流派 5 个固定
-样本执行 pilot，再对成长经历、`language_features`、`core_demands` 和 5Ps 候选字段执行逐字 span
-抽取。失败项保留原文并标记 `needs_review`；pilot fallback 超过 5% 时整批中止。
+schema-v4 运行时缓存是五流派原子替换单元，因此生产转换要求 `--therapy all` 和 `--atomizer extractive`，并要求显式配置 `PROFILE_MODEL`，不会回退 `CLIENT_MODEL`。转换先按每流派 5 个固定样本执行 pilot，再对成长经历、`language_features`、`core_demands` 和 5Ps 候选字段执行逐字 span 抽取。失败项保留原文并标记 `needs_review`；pilot fallback 超过 5% 时整批中止。
 
 转换结果作为可重建缓存写入：
 
@@ -343,12 +325,9 @@ data\processed\psycheval\
 └── manifest.json
 ```
 
-转换先在 `data\processed` 下写入独立 staging 目录，只有 schema、341 案例、五流派计数、来源 ID
-和源摘要全部通过验证后，才原子替换上述目录。`manifest.json` 还保存抽取模型、prompt 版本、
-fallback/needs_review 与 5Ps coverage 统计。该目录是可重建且被 Git 忽略的缓存，不提交到仓库。
+转换先在 `data\processed` 下写入独立 staging 目录，只有 schema、341 案例、五流派计数、来源 ID 和源摘要全部通过验证后，才原子替换上述目录。`manifest.json` 还保存抽取模型、prompt 版本、fallback/needs_review 与 5Ps coverage 统计。该目录是可重建且被 Git 忽略的缓存，不提交到仓库。
 
-正常运行必须存在有效的 schema-v4 processed 数据。案例仓库不会升级旧 processed，也不会从原始
-JSON 即时编译或覆盖；缺失或不匹配时会提示显式执行转换命令。
+正常运行必须存在有效的 schema-v4 processed 数据。案例仓库不会升级旧 processed，也不会从原始 JSON 即时编译或覆盖；缺失或不匹配时会提示显式执行转换命令。
 
 ### 6.3 检查案例
 
@@ -395,11 +374,11 @@ psych-sandbox simulate ^
 psych-sandbox simulate --case psycheval-cbt-001 --sessions 3 --rollouts 3 --rollout-concurrency 2 --judge-concurrency 2
 ```
 
-每个 session 从相同会前状态生成完整候选会谈，经安全检查、去重和独立评分后，只将胜出会谈推进记忆与下一会谈。默认关闭，避免普通仿真自动增加调用成本；`--no-rft` 或 `--rollouts 1` 可关闭。启用后的默认候选数为 3，生成/评分并发仍为 2，至少 2 个不同合格候选才能选优。 CLI 现在会读取 `configs/runtime.yaml`，显式命令行参数再覆盖 YAML。评分规则、失败处理和目录结构见 [会谈 RFT](docs/SESSION_RFT.md)。这里只实现采样、评分与选优，没有权重训练。
+每个 session 从相同会前状态生成完整候选会谈，经安全检查、去重和 PsychEval 量表评分后，只将胜出会谈推进记忆与下一会谈。默认关闭，避免普通仿真自动增加调用成本；`--no-rft` 或 `--rollouts 1` 可关闭。启用后的默认候选数为 3，生成/评分并发仍为 2，至少 2 个不同合格候选才能选优。 CLI 现在会读取 `configs/runtime.yaml`，显式命令行参数再覆盖 YAML。评分规则、失败处理和目录结构见 [会谈 RFT](docs/SESSION_RFT.md)。这里只实现采样、评分与选优，没有权重训练。
 
 ## 8. 查看评测和完整报告
 
-查看每个 session 的六维评分：
+查看每个 session 的 PsychEval 量表评分：
 
 ```bat
 psych-sandbox evaluate --run run-xxxxxxxxxxxx
@@ -417,7 +396,7 @@ psych-sandbox report --run run-xxxxxxxxxxxx
 psych-sandbox visualize --run run-xxxxxxxxxxxx
 ```
 
-默认输出为 `runs\runtime\时间__案例ID__run-xxxxxxxxxxxx\report.html`。报告是可离线打开的单文件页面，不上传数据，包括六步运行流程、来访者状态曲线、逐 session 督导指标、纵向判断、逐轮技能/披露/安全记录和完整对话。`simulate` 默认自动生成该报告；如只需要 JSON/SQLite，可传 `--no-visualization`。
+默认输出为 `runs\runtime\时间__案例ID__run-xxxxxxxxxxxx\report.html`。报告是可离线打开的单文件页面，不上传数据，包括六步运行流程、来访者状态曲线、整体督导评估、逐 session 摘要与纵向判断、逐轮技能/披露/安全记录和完整对话。`simulate` 默认自动生成该报告；如只需要 JSON/SQLite，可传 `--no-visualization`。
 
 开启 RFT 时，报告另含候选状态、分数、引用依据与胜出者，并链接到各候选原始 JSON。
 
@@ -428,7 +407,7 @@ runs\runtime\psychsandbox.sqlite3
 runs\runtime\时间__案例ID__run-xxxxxxxxxxxx\trajectory.jsonl
 ```
 
-SQLite 保存案例、运行、session、turn、记忆、规则评测、整体督导和完整轨迹。 JSONL 适合后续统计分析、经验回放和训练数据转换。
+SQLite 保存案例、运行、session、turn、记忆、整体督导和完整轨迹。 JSONL 适合后续统计分析、经验回放和训练数据转换。
 
 ### 列出或删除运行
 
@@ -436,9 +415,13 @@ SQLite 保存案例、运行、session、turn、记忆、规则评测、整体�
 psych-sandbox runs list
 psych-sandbox runs delete --run run-xxxxxxxxxxxx
 psych-sandbox runs delete --run run-xxxxxxxxxxxx --yes
+psych-sandbox runs clean-tests
+psych-sandbox runs clean-tests --yes
 ```
 
-第二条只读预览；第三条才确认永久删除该运行目录及数据库关联记录，包括 RFT 候选。不需要 API 密钥，不删除其他运行或共享案例/技能；拒绝被运行锁占用的任务。目录已手动删除时，也能清理剩余数据库记录。中断后保留 `.deletions/<run_id>/deletion.json`，同一命令可重试。预览范围、运行锁、缺失目录和失败语义见 [统一删除说明](docs/RUN_ARTIFACTS.md#按运行编号统一删除)。
+`runs delete` 第二条只读预览，第三条才确认永久删除该运行目录及数据库关联记录，包括 RFT 候选。不需要 API 密钥，不删除其他运行或共享案例/技能；拒绝被运行锁占用的任务。目录已手动删除时，也能清理剩余数据库记录。中断后保留 `.deletions/<run_id>/deletion.json`，同一命令可重试。预览范围、运行锁、缺失目录和失败语义见 [统一删除说明](docs/RUN_ARTIFACTS.md#按运行编号统一删除)。
+
+`runs clean-tests` 清理 `runs/tests` 下的测试日志（默认只预览，加 `--yes` 确认删除）；`pytest` 每次结束默认自动删除该次调用目录，如需保留失败现场可设置 `PSYCHSANDBOX_KEEP_TESTS=1`，见 [清理测试日志](docs/RUN_ARTIFACTS.md#清理测试日志runs-clean-tests)。
 
 ## 9. 从 session 边界恢复
 
@@ -477,7 +460,7 @@ set MODEL_MAX_TOKENS=4096
 
 展开原子技能超过 24 项时调用 embedding 并保留 12 项。聊天与 embedding 都使用官方 ChatECNU 端点时，可以共用 `MODEL_API_KEY`，默认向量模型为 `ecnu-embedding-small`；显式 `EMBEDDING_MODEL`、`EMBEDDING_BASE_URL`、`EMBEDDING_API_KEY` 优先。其他端点仍需独立配置，不会跨主机/端口/路径转发聊天密钥。超时由 `EMBEDDING_TIMEOUT_SECONDS` 控制（默认 60 秒），缺配置时在触发筛选处明确报错。详见 [技能筛选配置](docs/SKILL_SELECTION.md)。
 
-`SUPERVISOR_MODEL` 未设置时会回退到 `COUNSELOR_MODEL`，用于多会话结束后的一次性整体督导，以及开启 RFT 后的候选会谈评分；两者使用不同模板和分值定义。 `SUMMARY_MODEL` 未设置时同样回退到 `COUNSELOR_MODEL`，用于 E.7/E.8/E.9 记忆流水线（对话信息提取、档案合并与临床摘要）。
+`SUPERVISOR_MODEL` 未设置时会回退到 `COUNSELOR_MODEL`，用于每个 session 的量表评分、多会话结束后的整体督导，以及开启 RFT 后的候选会谈评分；三处使用同一套 `prompts/eval` 量表提示词与分值定义。 `SUMMARY_MODEL` 未设置时同样回退到 `COUNSELOR_MODEL`，用于 E.7/E.8/E.9 记忆流水线（对话信息提取、档案合并与临床摘要）。
 
 `MODEL_STRUCTURED_OUTPUT=auto` 会按角色和模型判断：ChatECNU 的 `ecnu-plus` 与 `ecnu-turbo` 自动启用原生 `response_format=json_schema`；`ecnu-max` 及其他兼容接口保持提示词 JSON 模式。已确认供应商支持 JSON Schema 时可显式设为 `json_schema`，不支持时设为 `off`。ChatECNU 推荐配置示例：
 
@@ -536,7 +519,7 @@ pytest -q
 - CLI session 进度反馈和异常运行 `failed` 状态持久化。
 - 跨 session 状态连续性。
 - SQLite 恢复和 JSONL 输出。
-- 六维规则督导报告与多会话后整体督导（PsychEval 量表）持久化。
+- 多会话后整体督导（PsychEval 量表）持久化，RFT 候选评分保留在候选审计记录。
 - E.7/E.8/E.9 记忆流水线（信息披露提取、ground-truth 门控档案合并、临床摘要）。
 - 结构化 5Ps、五流派适配、纵向报告和进度驱动计划。
 - HTML 过程/结果可视化与整体督导展示。
@@ -557,9 +540,7 @@ outputs\
 checkpoints\
 ```
 
-下载产物按次保存在 `runs\runtime` 并通过最近成功指针供显式转换使用；转换后的唯一运行时案例缓存固定为
-`data\processed\psycheval`。运行时不会读取旧 processed、不会动态转换原始 JSON，也不会用本地 legacy profile
-回退。仓库内的 `data\<therapy>`、`assets` 和 `prompts` 是固定研究资源，但只有上述明确标为运行入口的子集会被当前代码加载。项目不采集真实医疗记录、真实咨询录音或真实求助者隐私。人工评测应仅使用公开案例、合成资料或经过批准的脱敏材料。
+下载产物按次保存在 `runs\runtime` 并通过最近成功指针供显式转换使用；转换后的唯一运行时案例缓存固定为 `data\processed\psycheval`。运行时不会读取旧 processed、不会动态转换原始 JSON，也不会用本地 legacy profile 回退。仓库内的 `data\<therapy>`、`assets` 和 `prompts` 是固定研究资源，但只有上述明确标为运行入口的子集会被当前代码加载。项目不采集真实医疗记录、真实咨询录音或真实求助者隐私。人工评测应仅使用公开案例、合成资料或经过批准的脱敏材料。
 
 PsychEval 采用 CC BY-NC 4.0，本项目对其数据的使用限于非商业教学研究。转换器增加了统一字段、确定性划分、派生元技能 ID 和仿真人格先验，但不会伪造官方缺失的原子技能 ID。详见 [NOTICE.md](NOTICE.md) 和 [THIRD_PARTY_LICENSES](THIRD_PARTY_LICENSES/README.md)。
 

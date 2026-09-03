@@ -29,7 +29,8 @@ def sandbox(root, tmp_path, repository):
 def test_three_session_end_to_end(sandbox):
     result = asyncio.run(sandbox.run_case("psycheval-cbt-001", session_count=3))
     assert len(result.sessions) == 3
-    assert all(session.supervisor_report for session in result.sessions)
+    assert all(session.safety_verdict for session in result.sessions)
+    assert result.holistic_report is not None
 
 
 def test_first_session_is_counselor_first_and_initial_memory_is_empty(sandbox):
@@ -202,28 +203,14 @@ def test_run_reports_session_progress(sandbox):
     assert any("状态=completed" in message for message in messages)
 
 
-def test_supervisor_has_six_dimensions(sandbox):
+def test_holistic_supervisor_has_psych_eval_instruments(sandbox):
     result = asyncio.run(sandbox.run_case("psycheval-cbt-006", session_count=1))
-    assert len(result.sessions[0].supervisor_report.metrics) == 6
-
-
-def test_client_simulation_report_has_separate_dimensions(sandbox):
-    result = asyncio.run(sandbox.run_case("psycheval-cbt-006", session_count=1))
-    report = result.sessions[0].client_simulation_report
+    report = result.holistic_report
     assert report is not None
-    assert len(report.metrics) == 8
-    rows = sandbox.store.evaluation_rows(result.run_id)
-    assert rows[0]["client_report"]["session_index"] == 1
-
-
-def test_old_session_json_without_client_report_still_loads(sandbox):
-    result = asyncio.run(sandbox.run_case("psycheval-cbt-008", session_count=1))
-    raw = result.sessions[0].model_dump(mode="json")
-    raw.pop("client_simulation_report")
-    from psychsandbox.domain import SessionRecord
-
-    restored = SessionRecord.model_validate(raw)
-    assert restored.client_simulation_report is None
+    assert report.counselor_shared
+    assert {item.name for item in report.counselor_specific} == {"ctrs"}
+    assert report.client_shared
+    assert {item.name for item in report.client_specific} == {"bdi_ii"}
 
 
 def test_patientact_pipeline_can_be_disabled(root, tmp_path, repository):

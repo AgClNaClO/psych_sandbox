@@ -55,7 +55,6 @@ def test_phase_one_has_five_registered_therapy_profiles():
         "psychodynamic",
         "postmodern",
     }
-    assert get_therapy_profile("humanistic_existential").therapy_metric == "tes_lite"
     assert get_therapy_profile("bt").therapy_id == "behavioral"
 
 
@@ -82,25 +81,23 @@ def test_each_therapy_uses_its_configured_holistic_instruments(
     (
         "therapy_code",
         "therapy_id",
-        "metric_name",
         "counselor_instrument",
         "client_instrument",
     ),
     [
-        ("bt", "behavioral", "miti_lite", "miti", "stai"),
-        ("cbt", "cbt", "ctrs_lite", "ctrs", "bdi_ii"),
-        ("het", "humanistic_existential", "tes_lite", "tes", "cct"),
-        ("pdt", "psychodynamic", "psc_lite", "psc", "ipo"),
-        ("pmt", "postmodern", "eft_tfs_lite", "eft_tfs", "sfbt"),
+        ("bt", "behavioral", "miti", "stai"),
+        ("cbt", "cbt", "ctrs", "bdi_ii"),
+        ("het", "humanistic_existential", "tes", "cct"),
+        ("pdt", "psychodynamic", "psc", "ipo"),
+        ("pmt", "postmodern", "eft_tfs", "sfbt"),
     ],
 )
-def test_each_therapy_runs_with_specific_skills_and_metric(
+def test_each_therapy_runs_with_specific_skills(
     root,
     tmp_path,
     repository,
     therapy_code,
     therapy_id,
-    metric_name,
     counselor_instrument,
     client_instrument,
 ):
@@ -119,11 +116,6 @@ def test_each_therapy_runs_with_specific_skills_and_metric(
         for session in result.sessions
         for skill_id in session.interventions_used
     )
-    metric_names = {
-        metric.name
-        for metric in result.sessions[0].supervisor_report.metrics
-    }
-    assert metric_name in metric_names
     assert result.holistic_report is not None
     assert {item.name for item in result.holistic_report.counselor_specific} == {
         counselor_instrument
@@ -199,7 +191,8 @@ def test_visual_report_contains_process_results_and_turns(root, tmp_path, reposi
     html = output.read_text(encoding="utf-8")
     assert "运行过程" in html
     assert "来访者状态趋势" in html
-    assert "督导指标" in html
+    assert "整体督导分" in html
+    assert "纵向判断" in html
     assert "咨询师可审计规划与决策" in html
     assert "Action / Observation" in html
     assert "咨询师会后自评" in html

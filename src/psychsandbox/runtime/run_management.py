@@ -18,7 +18,7 @@ from ..domain import utc_now
 _RUN_ID = re.compile(r"run-[0-9a-f]{12}\Z")
 _RUN_TABLES = (
     "turns", "memories", "evaluations", "llm_evaluations",
-    "client_evaluations", "trajectories", "holistic_evaluations",
+    "trajectories", "holistic_evaluations",
     "sessions", "rollout_batches", "experiment_runs",
 )
 

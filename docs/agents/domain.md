@@ -25,7 +25,7 @@ Read this file when changing simulation flow, information permissions, therapy a
 | `skills/` | skill registry, exact-ID catalog observation and conditional vector narrowing |
 | `runtime/` | orchestration, isolated session candidates, disclosure, safety, state, memory and storage |
 | `runtime/run_management.py` | read-only deletion previews, confirmed run cleanup and retry journals |
-| `evaluation/` | rule, client-simulation, longitudinal, independent session RFT and holistic evaluation |
+| `evaluation/` | rule, longitudinal, independent session RFT and holistic evaluation |
 | `visualization/` | read-only HTML/SVG reporting from normalized results |
 
 ## Cross-module invariants

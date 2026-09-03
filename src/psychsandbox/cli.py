@@ -46,6 +46,12 @@ def build_parser() -> argparse.ArgumentParser:
     delete = run_commands.add_parser("delete", help="默认只预览；--yes 确认删除")
     delete.add_argument("--run", required=True)
     delete.add_argument("--yes", action="store_true", help="确认永久删除该运行目录和关联数据库记录")
+    clean_tests = run_commands.add_parser(
+        "clean-tests", help="清理 runs/tests 下的测试日志；默认只预览，--yes 确认删除"
+    )
+    clean_tests.add_argument(
+        "--yes", action="store_true", help="确认删除 runs/tests 下的全部测试产物目录"
+    )
 
     data = commands.add_parser("data")
     data_commands = data.add_subparsers(dest="data_command", required=True)
@@ -249,10 +255,9 @@ async def _simulate(args: argparse.Namespace) -> int:
     print(DISCLAIMER)
     print(f"运行：{result.run_id}；案例：{result.case_id}；sessions：{len(result.sessions)}")
     for session in result.sessions:
-        score = session.supervisor_report.overall_score if session.supervisor_report else "N/A"
         print(
             f"Session {session.session_index}: {session.end_reason}; "
-            f"督导={score}; 技能={','.join(session.interventions_used) or '无'}"
+            f"技能={','.join(session.interventions_used) or '无'}"
         )
     if result.holistic_report:
         report = result.holistic_report
@@ -267,23 +272,25 @@ async def _simulate(args: argparse.Namespace) -> int:
 
 def _evaluate(root: Path, run_id: str, full: bool) -> int:
     with closing(_open_store(root)) as store:
-        rows = store.evaluation_rows(run_id)
-    if not rows:
-        raise SystemExit(f"找不到运行 {run_id} 的督导结果")
+        report = store.load_holistic_report(run_id)
+    if report is None:
+        raise SystemExit(f"找不到运行 {run_id} 的整体督导结果")
     if full:
-        print(json.dumps(rows, ensure_ascii=False, indent=2))
+        print(report.model_dump_json(indent=2))
     else:
-        for row in rows:
-            report = row["rule_report"]
-            dimensions = ", ".join(
-                f"{item['name']}={item['score']}" for item in report["metrics"]
-            )
-            print(
-                f"Session {row['session_index']}: overall={report['overall_score']}; "
-                f"{dimensions}"
-            )
-            if row.get("llm_report"):
-                print(f"  llm_overall={row['llm_report']['overall_score']}")
+        scales = (
+            report.counselor_shared
+            + report.counselor_specific
+            + report.client_shared
+            + report.client_specific
+        )
+        dimensions = ", ".join(
+            f"{item.name}={item.score}" for item in scales
+        )
+        print(
+            f"整体督导：counselor={report.counselor_overall}, "
+            f"client={report.client_overall}; {dimensions}"
+        )
     return 0
 
 
@@ -300,7 +307,37 @@ def _visualize(root: Path, run_id: str, output: Path | None) -> int:
     return 0
 
 
+def _clean_tests(args: argparse.Namespace, root: Path) -> int:
+    tests_root = (root / "runs" / "tests").resolve()
+    directories = sorted(
+        (path for path in tests_root.glob("*") if path.is_dir()),
+        key=lambda path: path.name,
+    )
+    preview = {
+        "tests_root": str(tests_root),
+        "count": len(directories),
+        "directories": [
+            {"name": path.name, "path": str(path)} for path in directories
+        ],
+    }
+    print(json.dumps(preview, ensure_ascii=False, indent=2))
+    if not args.yes:
+        print("仅预览，未删除任何内容。确认删除时再次执行并添加 --yes。")
+        return 0
+    removed = 0
+    for path in directories:
+        try:
+            shutil.rmtree(path)
+            removed += 1
+        except OSError as exc:
+            print(f"删除失败：{path}（{exc}）", file=sys.stderr)
+    print(f"已删除 {removed}/{len(directories)} 个测试产物目录。")
+    return 0 if removed == len(directories) else 1
+
+
 def _runs(args: argparse.Namespace, root: Path) -> int:
+    if args.runs_command == "clean-tests":
+        return _clean_tests(args, root)
     config = default_config(root)
     database_path = config.database_path
     trace_dir = config.trace_dir

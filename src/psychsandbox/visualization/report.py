@@ -4,8 +4,14 @@ from html import escape
 from pathlib import Path
 from typing import Any
 
-from ..domain import HolisticEvaluationReport, RolloutSelection, RunResult, SessionRecord, ScaleScore
-from .charts import metric_bars, state_line_chart
+from ..domain import (
+    HolisticEvaluationReport,
+    RolloutSelection,
+    RunResult,
+    ScaleScore,
+    SessionRecord,
+)
+from .charts import state_line_chart
 
 
 PROCESS_STEPS = (
@@ -52,12 +58,9 @@ def generate_run_report(result: RunResult, output: Path) -> Path:
 
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    scores = [
-        item.supervisor_report.overall_score
-        for item in result.sessions
-        if item.supervisor_report
-    ]
-    mean_score = sum(scores) / len(scores) if scores else 0
+    counselor_overall = result.holistic_report.counselor_overall if result.holistic_report else 0.0
+    client_overall = result.holistic_report.client_overall if result.holistic_report else 0.0
+    overall = (counselor_overall + client_overall) / 2
     safety_events = sum(
         event.level.value in {"high", "imminent"}
         for session in result.sessions
@@ -91,7 +94,7 @@ def generate_run_report(result: RunResult, output: Path) -> Path:
   </header>
   <section class="summary-grid">
     {_summary_card("会谈数", str(len(result.sessions)), "sessions", "📋")}
-    {_summary_card("平均督导分", f"{mean_score:.2f}", "/ 10", "📊")}
+    {_summary_card("整体督导分", f"{overall:.2f}", "0–10", "📊")}
     {_summary_card("高风险事件", str(safety_events), "需人工复核", "⚠️")}
     {_summary_card("暴露泄漏", str(leaks), "越低越好", "🔒")}
   </section>
@@ -106,7 +109,7 @@ def generate_run_report(result: RunResult, output: Path) -> Path:
     <div class="chart">{state_line_chart(result.sessions)}</div>
   </section>
   <section>
-    <h2>会谈与督导明细</h2>
+    <h2>会谈明细</h2>
     {''.join(_session_section(item) for item in result.sessions)}
   </section>
 </main>
@@ -171,9 +174,23 @@ def _scale_list(scores: list[ScaleScore]) -> str:
     return f'<ul class="scale-list">{rows}</ul>'
 
 
+def _join_objectives(objectives: list[str]) -> str:
+    """Join session objectives onto separate lines without doubled punctuation."""
+    cleaned = [escape(obj).rstrip("。；;，,、 ") for obj in objectives]
+    return "；".join(cleaned).replace("；", "<br>")
+
+
+def _session_summary_text(session: SessionRecord) -> str:
+    parts = []
+    if session.clinical_summary and session.clinical_summary.session_summary_abstract:
+        parts.append(
+            "<details><summary>临床摘要（E.9）</summary>"
+            f"<p>{escape(session.clinical_summary.session_summary_abstract)}</p></details>"
+        )
+    return "".join(parts)
+
+
 def _session_section(session: SessionRecord) -> str:
-    report = session.supervisor_report
-    score = report.overall_score if report else 0
     longitudinal = session.longitudinal_report
     trend = longitudinal.trend if longitudinal else "n/a"
     action = longitudinal.stage_action if longitudinal else "n/a"
@@ -195,6 +212,7 @@ def _session_section(session: SessionRecord) -> str:
         "".join(f"<li>{escape(item)}</li>" for item in review_items)
         or "<li>暂无咨询师会后自评</li>"
     )
+    summary_html = _session_summary_text(session)
     # Build thinking summary from turn records
     thinking_cards = _session_thinking_summary(session)
 
@@ -204,26 +222,24 @@ def _session_section(session: SessionRecord) -> str:
     <div>
       <span class="badge">Session {session.session_index}</span>
       <h3>{escape(session.plan.stage.value)}</h3>
-      <p>{escape("；".join(session.plan.objectives[:3]))}</p>
+      <p>{_join_objectives(session.plan.objectives[:3])}</p>
     </div>
-    <div class="score">{score:.2f}<small>/10</small></div>
   </div>
+  {summary_html}
   <div class="session-grid">
-    <div>
-      <h4>督导指标</h4>
-      {metric_bars(report.metrics if report else [])}
-    </div>
     <div>
       <h4>纵向判断</h4>
       <div class="trend"><span>趋势</span><strong>{escape(trend)}</strong></div>
       <div class="trend"><span>阶段动作</span><strong>{escape(action)}</strong></div>
       {_delta_table(session)}
+    </div>
+    <div>
       <h4>咨询师会后自评：{escape(review_status)}</h4>
       <ul>{review_html}</ul>
     </div>
   </div>
   {_rollout_selection(session.rollout_selection)}
-  <details open>
+  <details>
     <summary>{ICON_BRAIN} 咨询师可审计规划与决策（{len(session.turn_records)} turns）</summary>
     <p class="muted">以下展示模型或规则明确输出的决策摘要、执行步骤和交互信号，不是内部逐 token 思维链。</p>
     <div class="thinking-grid">{thinking_cards}</div>
@@ -246,7 +262,15 @@ def _rollout_selection(selection: RolloutSelection | None) -> str:
     for item in selection.candidates:
         reward = item.reward
         score = f"{reward.total:.3f}" if reward else "—"
-        delta = f"{reward.client_delta:+.3f}" if reward and reward.client_delta is not None else "无基线"
+        if reward:
+            client_signals = [s for s in reward.signals if s.side == "client"]
+            if client_signals:
+                client_z = sum(s.standardized for s in client_signals) / len(client_signals)
+                delta = f"{client_z:+.3f}"
+            else:
+                delta = "无基线"
+        else:
+            delta = "—"
         rows.append(
             f"<tr><td>{item.index}</td><td>{escape(item.status)}</td><td>{score}</td>"
             f"<td>{delta}</td><td>{escape(item.reason)}</td></tr>"

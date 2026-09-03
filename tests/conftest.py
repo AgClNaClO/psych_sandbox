@@ -3,7 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from datetime import datetime
 import json
+import logging
 import os
+import shutil
 import sys
 import tempfile
 
@@ -76,6 +78,24 @@ def pytest_sessionfinish(session, exitstatus):
     )
     if terminal:
         terminal.write_sep("-", f"Artifacts: {run_dir}")
+    _maybe_auto_clean_tests(run_dir)
+
+
+def _maybe_auto_clean_tests(run_dir: Path) -> None:
+    """Delete this invocation's test artifacts after the session finishes.
+
+    Test output is cleaned up by default so ``runs/tests/`` does not grow
+    across runs. Set ``PSYCHSANDBOX_KEEP_TESTS=1`` to retain the per-invocation
+    directory for inspecting failures.
+    """
+    flag = os.environ.get("PSYCHSANDBOX_KEEP_TESTS", "").strip().lower()
+    if flag in {"1", "true", "yes", "on"}:
+        return
+    # Close the --log-file handler so the open pytest.log is not left behind
+    # (Windows cannot delete a file that still has an open handle).
+    logging.shutdown()
+    if run_dir.is_dir():
+        shutil.rmtree(run_dir, ignore_errors=True)
 
 
 def pytest_unconfigure(config: pytest.Config) -> None:

@@ -1,20 +1,11 @@
-from .client_realism import ClientSimulationEvaluator
 from .longitudinal import LongitudinalEvaluator
 from .psycheval_supervisor import PsychEvalSupervisor
-from .rule_session import RuleSessionEvaluator
+from .safety_gate import SessionSafetyGate
+from .session_supervisor import SessionSupervisorEvaluator
 
 __all__ = [
-    "ClientSimulationEvaluator",
     "LongitudinalEvaluator",
     "PsychEvalSupervisor",
-    "RuleSessionEvaluator",
-    "SupervisorAgent",
+    "SessionSafetyGate",
+    "SessionSupervisorEvaluator",
 ]
-
-
-def __getattr__(name: str):
-    if name == "SupervisorAgent":
-        from ..agents.supervisor import SupervisorAgent
-
-        return SupervisorAgent
-    raise AttributeError(name)

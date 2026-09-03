@@ -134,7 +134,12 @@ def _distinctive_clauses(content: str) -> list[str]:
 def _disclosure_evidence(utterance: str, content: str) -> str | None:
     normalized_utterance = normalize_disclosure_text(utterance)
     normalized_content = normalize_disclosure_text(content)
-    if len(normalized_content) >= 4 and normalized_content in normalized_utterance:
+    # Routine facts such as names ("明山"), occupations ("学生") or education
+    # ("大专") are legitimately two characters long, so the literal-match
+    # threshold must accept them.  It stays above the leakage detector's
+    # distinctive-clause threshold because the fact has already been both
+    # declared by the client and authorized for this turn.
+    if len(normalized_content) >= 2 and normalized_content in normalized_utterance:
         return content
     clauses = [
         item.strip()
@@ -143,7 +148,7 @@ def _disclosure_evidence(utterance: str, content: str) -> str | None:
         # observable disclosure evidence.  This threshold is intentionally
         # lower than the leakage detector's distinctive-clause threshold:
         # here the fact has already been authorized for this turn.
-        if len(normalize_disclosure_text(item)) >= 4
+        if len(normalize_disclosure_text(item)) >= 2
     ]
     for clause in clauses:
         normalized_clause = normalize_disclosure_text(clause)

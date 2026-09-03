@@ -77,6 +77,18 @@ psych-sandbox simulate --case psycheval-cbt-001 --sessions 6 --resume-run run-xx
 
 测试产物可在进程退出后按次删除；原有完成后自动删除临时目录的行为已取消，因此空间占用会增长。正式运行的目录与共享 SQLite 数据库应一起备份。只删除报告目录不会删除数据库记录，也不要只删除数据库，否则评估、重新生成报告和续跑将失去来源。诊断、轨迹和报告可能含有案例内容；全部被 Git 忽略，不提交、不自动上传。
 
+### 清理测试日志（runs clean-tests）
+
+`runs/tests` 下的测试产物与正式运行数据库独立，可通过以下命令清理，无需模型密钥、不调用 API：
+
+```powershell
+Set-Location -LiteralPath 'D:\0test\psych_sandbox'
+.\.venv\Scripts\python.exe -B -m psychsandbox runs clean-tests
+.\.venv\Scripts\python.exe -B -m psychsandbox runs clean-tests --yes
+```
+
+默认只预览 `runs/tests` 下的测试目录（不含 `README.md`），加 `--yes` 才实际删除。`pytest` 会话结束（无论成败）默认自动删除本次调用目录，避免 `runs/tests` 持续增长；如需保留失败现场以便排查，设置环境变量 `PSYCHSANDBOX_KEEP_TESTS=1`。
+
 ### 按运行编号统一删除
 
 此入口不需要模型密钥，不调用任何 API。`--root` 指向项目根目录；清理使用该项目 YAML 的 `database_path` 和 `trace_dir`，默认就是 `runs/runtime`。先列出并预览：

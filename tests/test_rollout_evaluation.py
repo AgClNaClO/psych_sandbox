@@ -1,243 +1,165 @@
 from __future__ import annotations
 
 import asyncio
-import json
-from copy import deepcopy
 
 import pytest
 
-from psychsandbox.domain import RFTConfig, RolloutAssessment, RolloutReward, SessionMemory, SessionRecord
-from psychsandbox.evaluation.rollout import SessionRolloutEvaluator, compute_rollout_reward
-
-
-COUNSELOR = (
-    "counselor_alliance", "counselor_strategy", "counselor_goal_alignment", "counselor_safety",
+from psychsandbox.domain import (
+    RFTConfig,
+    RolloutReward,
+    ScaleScore,
+    SessionEvaluationReport,
+    SessionMemory,
+    SessionRecord,
+    UnlockedClientInfo,
 )
-CLIENT = ("client_engagement", "client_understanding", "client_agency")
-DIMENSIONS = COUNSELOR + CLIENT + ("simulation_fidelity",)
+from psychsandbox.evaluation.rollout import (
+    NEGATIVE_DELTA_CLIENT_METRICS,
+    REWARD_STD_MEAN,
+    SessionRolloutEvaluator,
+    compute_rollout_reward,
+)
 
 
-class JudgeStub:
-    """Return the supplied response without production parsing or fallback."""
+def _scale(name: str, level: str, score: float) -> ScaleScore:
+    return ScaleScore(
+        name=name,
+        level=level,
+        category="therapy_shared",
+        direction="higher_better",
+        score=score,
+    )
 
-    def __init__(self, response):
-        self.response = response
-        self.calls = []
+
+def report_for(counselor: float, client: dict[str, float] | None = None) -> SessionEvaluationReport:
+    client = client if client is not None else {"srs": 6.0, "bdi_ii": 5.0}
+    return SessionEvaluationReport(
+        session_index=1,
+        therapy="cbt",
+        counselor_shared=[_scale("wai", "counselor", counselor)],
+        counselor_specific=[_scale("ctrs", "counselor", counselor)],
+        client_shared=[_scale(name, "client", score) for name, score in client.items()],
+        client_specific=[],
+        counselor_overall=counselor,
+        client_overall=sum(client.values()) / len(client),
+    )
+
+
+def _clip(value: float) -> float:
+    return max(-3.0, min(3.0, value))
+
+
+def _counselor_z(metric: str, value: float) -> float:
+    stats = REWARD_STD_MEAN["counselor"][metric]
+    return _clip((value - stats["mean"]) / stats["std"])
+
+
+def _client_delta_z(metric: str, delta: float) -> float:
+    stats = REWARD_STD_MEAN["client"][metric]
+    z_value = _clip((delta - stats["mean"]) / stats["std"])
+    return -z_value if metric in NEGATIVE_DELTA_CLIENT_METRICS else z_value
+
+
+def test_first_session_reward_uses_counselor_z_scores_and_skips_client():
+    report = report_for(8.0, {"srs": 6.0, "bdi_ii": 5.0})
+    reward = compute_rollout_reward(report, None, RFTConfig())
+    assert reward.counselor_snapshot == {"WAI": 8.0, "CTRS": 8.0}
+    assert reward.client_snapshot == {"SRS": 6.0, "BDI_II": 5.0}
+    assert {s.metric for s in reward.signals} == {"WAI", "CTRS"}
+    assert all(s.side == "counselor" for s in reward.signals)
+    assert {s.skipped_reason for s in reward.skipped if s.side == "client"} == {
+        "missing_previous_reward"
+    }
+    expected = (_counselor_z("WAI", 8.0) + _counselor_z("CTRS", 8.0)) / 2
+    assert reward.total == pytest.approx(expected)
+    assert reward.baseline_session_index is None
+
+
+def test_subsequent_reward_standardizes_client_delta_and_negates_symptom_scales():
+    previous = RolloutReward(
+        total=0.0,
+        client_snapshot={"SRS": 6.0, "BDI_II": 5.0},
+    )
+    report = report_for(8.0, {"srs": 7.0, "bdi_ii": 4.0})
+    reward = compute_rollout_reward(report, previous, RFTConfig(), baseline_session_index=1)
+    srs = next(s for s in reward.signals if s.metric == "SRS")
+    bdi = next(s for s in reward.signals if s.metric == "BDI_II")
+    assert srs.delta == 1.0
+    assert bdi.delta == -1.0
+    assert srs.standardized == pytest.approx(_client_delta_z("SRS", 1.0))
+    assert bdi.standardized == pytest.approx(_client_delta_z("BDI_II", -1.0))
+    # BDI-II improved (negative delta), so its symptom scale z-score is negated
+    # and becomes positive.
+    assert _client_delta_z("BDI_II", -1.0) > 0
+    assert reward.client_snapshot == {"SRS": 7.0, "BDI_II": 4.0}
+    assert reward.baseline_session_index == 1
+
+
+@pytest.mark.parametrize("value", [0, -1, 0.5, "1", None])
+def test_invalid_baseline_session_index_is_rejected(value):
+    report = report_for(8.0)
+    if value is None:
+        # None is allowed; verify it does not raise.
+        compute_rollout_reward(report, None, RFTConfig(), baseline_session_index=value)
+        return
+    with pytest.raises(ValueError):
+        compute_rollout_reward(report, None, RFTConfig(), baseline_session_index=value)
+
+
+def test_previous_metric_missing_from_report_is_not_scored():
+    previous = RolloutReward(
+        total=0.0, client_snapshot={"SRS": 6.0, "STAI": 4.0},
+    )
+    report = report_for(8.0, {"srs": 7.0})  # "stai" is absent from the report
+    reward = compute_rollout_reward(report, previous, RFTConfig())
+    client_metrics = {s.metric for s in reward.signals if s.side == "client"}
+    assert client_metrics == {"SRS"}  # STAI absent from the report is simply not scored
+
+
+class _ScaleItemsGateway:
+    """Return a fixed ScaleItems payload for every instrument prompt."""
+
+    def __init__(self, score: float = 4.0):
+        self.score = score
+        self.calls: list[dict] = []
 
     async def complete_structured(self, **kwargs):
         self.calls.append(kwargs)
-        return self.response
+        from psychsandbox.domain import ScaleItem, ScaleItems
+
+        return ScaleItems(items=[ScaleItem(item=str(i), score=self.score) for i in range(1, 16)])
 
 
-@pytest.fixture
-def response():
-    result = {}
-    for name, score in zip(DIMENSIONS, (8, 7, 6, 9, 6, 5, 4, 8), strict=True):
-        is_client = name in CLIENT
-        result[name] = {
-            "score": score,
-            "evidence": [{
-                "message_index": 4 if is_client else 2,
-                "quote": "我想先试一次" if is_client else "可以按你的节奏",
-            }],
-            "reason": "有具体对话依据。",
-        }
-    result.update(safety_passed=True, safety_reason="尊重公开表达的边界。")
-    return result
+def test_session_rollout_evaluator_attaches_report_and_safety_verdict(root, sample_case):
+    from pathlib import Path
 
-
-@pytest.fixture
-def session():
-    return SessionRecord.model_validate({
-        "session_id": "PRIVATE_SESSION_ID", "session_index": 19,
+    gateway = _ScaleItemsGateway()
+    evaluator = SessionRolloutEvaluator(gateway, Path(root) / "prompts" / "eval", temperature=0.0)
+    session = SessionRecord.model_validate({
+        "session_id": "s-1",
+        "session_index": 1,
         "plan": {
-            "session_index": 19, "therapy": "cbt", "stage": "core_intervention",
-            "objectives": ["共同选择下一步"], "strategy": "PRIVATE_PLAN",
-            "persona_links": ["PRIVATE_PROFILE"], "case_materials": ["PRIVATE_MATERIAL"],
-            "target_atomic_skill_ids": ["PRIVATE_SKILL"],
+            "session_index": 1, "therapy": "cbt", "stage": "core_intervention",
+            "objectives": ["共同选择下一步"],
         },
-        "initial_state": {"topic_readiness": {"PRIVATE_STATE": 0.5}},
+        "initial_state": {},
         "final_state": {},
         "messages": [
-            {"session_index": 19, "turn_index": index + 30, "role": role, "content": content}
-            for index, (role, content) in enumerate([
-                ("system", "PRIVATE_SYSTEM"),
-                ("client", "我还有些担心。"),
-                ("counselor", "可以按你的节奏，不必急着答应。"),
-                ("system", "PRIVATE_INTERNAL_PLAN"),
-                ("client", "我想先试一次，但现在不想多谈。\n  我仍有顾虑。"),
-            ])
+            {"session_index": 1, "turn_index": 0, "role": "counselor", "content": "可以从你愿意说的地方开始。"},
+            {"session_index": 1, "turn_index": 1, "role": "client", "content": "我最近压力很大。"},
         ],
-        "turn_records": [{"candidate_index": 8, "reasoning_summary": "PRIVATE_REASONING"}],
-        "summary": "PRIVATE_SUMMARY", "end_reason": "PRIVATE_END_REASON",
-        "supervisor_report": {
-            "session_index": 19, "overall_score": 10, "metrics": [],
-            "feedback": ["PRIVATE_SCORE"],
-        },
+        "turn_records": [],
+        "summary": "",
+        "end_reason": "max_turns",
     })
-
-
-@pytest.fixture
-def memory():
-    return SessionMemory.model_validate({
-        "case_id": "PRIVATE_CASE_ID", "completed_sessions": 18,
-        "unlocked_profile": {
-            "client_id": "PRIVATE_CLIENT_ID", "public_background": {"occupation": "教师"},
-            "facts": [{
-                "fact_id": "PRIVATE_FACT_ID", "content": "已经公开的工作压力",
-                "evidence_session": 18, "evidence_turn": 2,
-            }],
-            "confirmed_goals": ["改善沟通"], "expressed_problems": ["紧张"],
-        },
-        "confirmed_goals": ["自主决定尝试"], "unresolved_topics": ["工作压力"],
-        "homework": ["记录一次体验"], "last_client_closing": "下次再谈。",
-        "summaries": ["PRIVATE_MEMORY_SUMMARY"],
-        "supervisor_feedback": ["PRIVATE_PREVIOUS_SCORE"],
-        "relationship_events": ["PRIVATE_TRUST_CHANGE"], "risk_history": ["PRIVATE_RISK_STATE"],
-        "interventions_used": ["PRIVATE_SKILL_HISTORY"],
-        "evolving_profile": {"client_id": "PRIVATE_EVOLVING_ID", "main_problem": "PRIVATE_INFERENCE"},
-    })
-
-
-def evaluate(response, session, memory, **config):
-    gateway = JudgeStub(response)
-    result = asyncio.run(SessionRolloutEvaluator(gateway, RFTConfig(**config)).evaluate(session, memory))
-    return result, gateway
-
-
-def test_first_reward_is_counselor_mean_and_keeps_client_snapshot(response):
-    reward = compute_rollout_reward(RolloutAssessment.model_validate(response), None, RFTConfig())
-    assert reward.total == reward.counselor_score == 7.5
-    assert reward.client_snapshot == dict(zip(CLIENT, (6, 5, 4), strict=True))
-    assert reward.client_delta is reward.client_gain_score is reward.baseline_session_index is None
-
-
-@pytest.mark.parametrize("weight, expected", [(0.7, 6.9), (0.25, 6.0)])
-def test_followup_uses_matching_client_deltas_and_explicit_baseline(response, weight, expected):
-    previous = RolloutReward(
-        total=1, counselor_score=1,
-        client_snapshot={CLIENT[2]: 2, CLIENT[0]: 2, CLIENT[1]: 8},
-        baseline_session_index=2,
+    memory = SessionMemory(
+        case_id=sample_case.case_id,
+        unlocked_client_info=UnlockedClientInfo(
+            client_id=sample_case.profile.client_id
+        ),
     )
-    assessment = RolloutAssessment.model_validate(response)
-    reward = compute_rollout_reward(assessment, previous, RFTConfig(counselor_weight=weight),
-                                    baseline_session_index=18)
-    assert reward.counselor_score == 7.5
-    assert reward.client_delta == 1  # mean(6-2, 5-8, 4-2)
-    assert reward.client_gain_score == 5.5
-    assert reward.total == pytest.approx(expected)
-    assert reward.baseline_session_index == 18
-    assert compute_rollout_reward(assessment, previous, RFTConfig()).baseline_session_index is None
-
-
-@pytest.mark.parametrize("counselor, current, old, expected", [
-    (0, 0, None, 0), (10, 10, None, 10),
-    (0, 0, 10, 0), (10, 10, 0, 10),
-    (0, 10, 0, 3), (10, 0, 10, 7), (10, 5, 5, 8.5),
-])
-def test_reward_boundaries_do_not_apply_safety_filter(response, counselor, current, old, expected):
-    for name in COUNSELOR:
-        response[name]["score"] = counselor
-    for name in CLIENT:
-        response[name]["score"] = current
-    response["simulation_fidelity"]["score"] = 0
-    response["safety_passed"] = False
-    previous = None if old is None else RolloutReward(
-        total=5, counselor_score=5, client_snapshot=dict.fromkeys(CLIENT, old),
-    )
-    reward = compute_rollout_reward(RolloutAssessment.model_validate(response), previous, RFTConfig())
-    assert reward.total == pytest.approx(expected)
-
-
-def test_judge_permissions_temperature_and_original_message_indices(response, session, memory):
-    before = (session.model_dump(), memory.model_dump())
-    assessment, gateway = evaluate(RolloutAssessment.model_validate(response), session, memory,
-                                   judge_temperature=0.37)
-    call, = gateway.calls
-    assert call["role"] == "supervisor"
-    assert call["temperature"] == 0.37
-    assert call["output_schema"] is RolloutAssessment
-    payload = call["input_payload"]
-    assert set(payload) == {"dialogue", "plan", "memory"}
-    assert payload["plan"] == {
-        "stage": "core_intervention", "objectives": ["共同选择下一步"], "therapy": "cbt",
-    }
-    assert payload["dialogue"] == [
-        {"message_index": i, "role": message.role, "content": message.content}
-        for i, message in enumerate(session.messages) if message.role != "system"
-    ]
-    assert payload["memory"]["unlocked_client_info"]["facts"] == [
-        {"content": "已经公开的工作压力"}
-    ]
-    assert "language_features" not in (
-        payload["memory"]["unlocked_client_info"]["static_traits"]
-    )
-    assert payload["memory"]["homework"] == ["记录一次体验"]
-    assert "PRIVATE_" not in json.dumps(payload)
-    assert "PRIVATE_" not in call["system_prompt"]
-    assert assessment.model_dump() == RolloutAssessment.model_validate(response).model_dump()
-    assert before == (session.model_dump(), memory.model_dump())
-
-
-def test_exact_multiline_quote_and_mixed_client_evidence_are_accepted(response, session, memory):
-    response["client_agency"]["evidence"] = [
-        {"message_index": 2, "quote": "可以按你的节奏"},
-        {"message_index": 4, "quote": "但现在不想多谈。\n  我仍有顾虑。"},
-    ]
-    assessment, _ = evaluate(response, session, memory)
-    assert assessment.client_agency.evidence[1].quote == "但现在不想多谈。\n  我仍有顾虑。"
-
-
-@pytest.mark.parametrize("index, quote", [
-    (4, "我已经完全好了"), (1, "我想先试一次"), (0, "PRIVATE_SYSTEM"),
-    (3, "PRIVATE_INTERNAL_PLAN"), (99, "我想先试一次"), (-1, "我想先试一次"),
-    (4, ""), (4, "  "), (4, "不想多谈。\n我仍有顾虑。"),
-])
-def test_invalid_evidence_is_rejected_without_repair(response, session, memory, index, quote):
-    response["client_agency"]["evidence"] = [{"message_index": index, "quote": quote}]
-    original = deepcopy(response)
-    gateway = JudgeStub(response)
-    with pytest.raises(ValueError):
-        asyncio.run(SessionRolloutEvaluator(gateway, RFTConfig()).evaluate(session, memory))
-    assert len(gateway.calls) == 1
-    assert response == original
-
-
-@pytest.mark.parametrize("name", CLIENT)
-def test_each_client_dimension_requires_client_role(response, session, memory, name):
-    response[name]["evidence"] = [{"message_index": 2, "quote": "可以按你的节奏"}]
-    with pytest.raises(ValueError, match="client evidence"):
-        evaluate(response, session, memory)
-
-
-@pytest.mark.parametrize("score", [float("nan"), float("inf"), -float("inf"), -0.1, 10.1, True, "8"])
-def test_invalid_scores_are_rejected(response, session, memory, score):
-    response["counselor_strategy"]["score"] = score
-    with pytest.raises(ValueError):
-        evaluate(response, session, memory)
-
-
-@pytest.mark.parametrize("path", [(name,) for name in DIMENSIONS] + [
-    ("safety_passed",), ("safety_reason",),
-    ("counselor_alliance", "score"), ("counselor_alliance", "evidence"),
-    ("counselor_alliance", "reason"),
-])
-def test_missing_fields_are_rejected(response, session, memory, path):
-    target = response if len(path) == 1 else response[path[0]]
-    del target[path[-1]]
-    with pytest.raises(ValueError):
-        evaluate(response, session, memory)
-
-
-@pytest.mark.parametrize("count", [0, 4])
-def test_evidence_count_is_bounded(response, session, memory, count):
-    response["counselor_alliance"]["evidence"] *= count
-    with pytest.raises(ValueError):
-        evaluate(response, session, memory)
-
-
-@pytest.mark.parametrize("snapshot", [{}, dict.fromkeys(CLIENT, float("nan")), dict.fromkeys(CLIENT, 11)])
-def test_invalid_previous_snapshot_is_rejected(response, snapshot):
-    previous = RolloutReward(total=5, counselor_score=5, client_snapshot=snapshot)
-    with pytest.raises(ValueError):
-        compute_rollout_reward(RolloutAssessment.model_validate(response), previous, RFTConfig())
+    report = asyncio.run(evaluator.evaluate(session, sample_case, memory))
+    assert report.counselor_overall > 0
+    assert session.safety_verdict is not None
+    assert session.safety_verdict.passed is True
+    assert gateway.calls

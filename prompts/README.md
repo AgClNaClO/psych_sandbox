@@ -1,14 +1,13 @@
 # `prompts/`
 
-本目录共有 56 个提示词资产：55 个有当前运行链调用点（46 个整体督导量表和 9 个生成/评分模板），另有 `client/dialogue.jinja2` 仅作来源/风格参考。生成模板由 `src/psychsandbox/prompts.py::render_prompt` 在具体调用点渲染；目录中的文件不会自动启用。
+本目录共有 55 个提示词资产：54 个有当前运行链调用点（46 个督导量表和 8 个生成模板），另有 `client/dialogue.jinja2` 仅作来源/风格参考。生成模板由 `src/psychsandbox/prompts.py::render_prompt` 在具体调用点渲染；目录中的文件不会自动启用。
 
 ## 实际使用情况
 
 | 类别 | 文件数 | 当前状态 | 实际入口 |
 |---|---:|---|---|
-| `eval/` 中代码映射的量表 | 46 | 已使用 | `src/psychsandbox/evaluation/psycheval_supervisor.py` |
+| `eval/` 中代码映射的量表 | 46 | 已使用（每 session 与整体督导共用） | `src/psychsandbox/evaluation/psycheval_supervisor.py` |
 | `counselor/`、`simclient/`、`memory/` 生成提示词 | 8 | 已使用（Jinja2 模板） | `src/psychsandbox/prompts.py::render_prompt` |
-| `rft/session_judge.jinja2` | 1 | 仅开启会谈 RFT 时使用 | `src/psychsandbox/evaluation/rollout.py` |
 | `client/dialogue.jinja2` | 1 | 参考模板，未接入 | 无生产调用点 |
 
 当前咨询师、来访者和会后记忆生成提示词以 **Jinja2 模板（`.jinja2`）** 存放。调用链路为：「Pydantic 领域对象构造输入 dict → Jinja2 渲染 → 调用大模型（结构化 JSON）→ Pydantic 输出验证」。当前 agent 直接调用 `render_prompt` 和 `complete_structured`，没有统一经过独立输入 schema；系统提示词由模板裸渲染生成，业务数据作为 `input_payload` 一并发送给 `complete_structured`。
@@ -48,14 +47,20 @@
 
 ## 已使用的 `eval/` 量表
 
-`src/psychsandbox/runtime/orchestrator.py` 将 `prompts/eval` 传给 `PsychEvalSupervisor`。一个 case 的全部 session 完成后，督导师按流派选择以下文件，注入来访者背景和整条可见对话，再调用 `SUPERVISOR_MODEL`：
+`src/psychsandbox/runtime/orchestrator.py` 将 `prompts/eval` 传给督导智能体（`PsychEvalSupervisor` 是整体督导，`SessionSupervisorEvaluator` 仅在开启 RFT 时用于候选排名，二者共享 `psycheval_supervisor.py` 中的 `Instrument` 注册表）。一个 case 的全部 session 完成后再由 `PsychEvalSupervisor` 对整条轨迹统一做一次整体督导，产出 `HolisticEvaluationReport`；开启 RFT 时，`SessionSupervisorEvaluator` 用同一套量表给每个候选整场会谈打分，产出 `SessionEvaluationReport`（仅作为候选排名信号，存入候选 `assessment`，不写入已提交 session）。评分时注入来访者背景和可见对话，再调用 `SUPERVISOR_MODEL`：
 
 | 层级 | 共享量表 | 流派专属量表 |
 |---|---|---|
-| Counselor-Level | WAI、HTAIS、RRO、`custom_dim` 四维 | BT→MITI；CBT→CTRS；HET→TES；PDT→PSC；PMT→EFT-TFS |
+| Counselor-Level | WAI、HTAIS、RRO、`custom_dim` | BT→MITI；CBT→CTRS；HET→TES；PDT→PSC；PMT→EFT-TFS |
 | Client-Level | SCL-90、PANAS、RRO、SRS | BT→STAI；CBT→BDI-II；HET→CCT；PDT→IPO；PMT→SFBT |
 
-完整文件名以 `psycheval_supervisor.py` 中 `Instrument.prompt_files` 为唯一映射来源。部分上游文件名包含弯引号，加载器会在同一目录做规范化文件名匹配。整体量表结果不回写下一 session 计划。
+对齐 PsychEval 的细节：
+
+- **RRO** 是单个 24 条目量表，按 4 个因子分解（Client Realism / Client Genuineness / Counselor Realism / Counselor Genuineness），并对条目 {2,7,16,17,18,19,24} 反向计分；咨询师侧与来访者侧各取两个因子均值，共用同一次模型调用。
+- **`custom_dim`** 是单个咨询师侧量表，把 Ethics、Interaction、Intervention、Perception 四个 criteria 聚合为一个分数，不再拆成四个独立 ScaleScore。
+- **原始条目范围不一致**：WAI、HTAIS、`custom_dim`、EFT-TFS、MITI、IPO、PANAS 为 1–5；TES 为 1–7；PSC、CTRS 为 0–6；SCL-90、SRS、STAI、SFBT 为 0–4；BDI-II 为 0–3；CCT 为 0–2。各量表范围记录在 `Instrument.scale`，归一化按 `(均值 - 下限) / (上限 - 下限) × 10` 换算为 0–10 原始分；症状量表（SCL-90、BDI-II、IPO）不取反（越高越重），`direction` 仅作元数据。PANAS 单独按正/负情绪平衡公式 `(positive − negative + 10) / 2` 计算。
+
+完整文件名以 `psycheval_supervisor.py` 中 `Instrument.prompt_files` 为唯一映射来源，原始范围以 `Instrument.scale` 为唯一来源。部分上游文件名包含弯引号，加载器会在同一目录做规范化文件名匹配。RFT 候选评分与整体督导均不回写下一 session 计划。
 
 ## 维护检查
 

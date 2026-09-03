@@ -3,6 +3,22 @@ from __future__ import annotations
 from ..domain import SessionMemory, SessionPlan, SessionRecord, SessionStage
 
 
+def _supervisor_feedback(session: SessionRecord) -> list[str]:
+    """Surface rule-based safety/disclosure gate reasons only.
+
+    The supervisor is a scorer, not a planner (PsychAgent §3.3 / PsychEval §5):
+    its scale scores must not drive the next session's goals. This function
+    therefore only surfaces deterministic safety/disclosure gate reasons; goal
+    and strategy revision is handled by ``LongitudinalEvaluator`` (goal
+    completion / client-state deltas) and the counselor's post-session review,
+    never by scale scores.
+    """
+    verdict = session.safety_verdict
+    if not verdict:
+        return []
+    return [f"安全/披露：{reason}" for reason in verdict.reasons]
+
+
 class MemoryConsolidator:
     def consolidate(
         self,
@@ -11,9 +27,7 @@ class MemoryConsolidator:
         *,
         next_index: int,
     ) -> SessionMemory:
-        feedback = (
-            session.supervisor_report.feedback if session.supervisor_report else []
-        )
+        feedback = _supervisor_feedback(session)
         client_messages = [
             item.content for item in session.messages if item.role == "client"
         ]

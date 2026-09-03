@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from psychsandbox.datasets.atomizer import ExtractiveAtomizer
+from psychsandbox.datasets.atomizer import ExtractedSpans, ExtractiveAtomizer
 from psychsandbox.datasets.profile_compiler import AtomicSpan, stable_evidence_id
 from psychsandbox.datasets.psycheval import (
     PsychEvalAdapter,
@@ -147,6 +147,63 @@ def test_extractive_atomizer_locates_exact_text_instead_of_trusting_model_offset
         (5, 10, "实习失败。"),
     ]
     assert audit.fallback is False
+
+
+def test_extractive_atomizer_ignores_punctuation_residue_between_spans():
+    source = "家庭支持。…实习失败。"
+    output = ExtractedSpans.model_validate(
+        {
+            "spans": [
+                {"start": 0, "end": 5, "text": "家庭支持。", "kind": "event"},
+                {"start": 6, "end": 11, "text": "实习失败。", "kind": "event"},
+            ]
+        }
+    )
+
+    spans = ExtractiveAtomizer._validate(source, output, "growth")
+
+    assert [(item.start, item.end, item.text) for item in spans] == [
+        (0, 5, "家庭支持。"),
+        (6, 11, "实习失败。"),
+    ]
+
+
+def test_extractive_atomizer_ignores_ascii_period_residue():
+    source = "Diagnosed schizophrenic; declared \u201cincurable\u201d after several years. "
+    output = ExtractedSpans.model_validate(
+        {
+            "spans": [
+                {"start": 0, "end": 23, "text": "Diagnosed schizophrenic", "kind": "case_fact"},
+                {
+                    "start": 25,
+                    "end": 71,
+                    "text": "declared \u201cincurable\u201d after several years",
+                    "kind": "case_fact",
+                },
+            ]
+        }
+    )
+
+    spans = ExtractiveAtomizer._validate(source, output, "five_ps")
+
+    assert [item.text for item in spans] == [
+        "Diagnosed schizophrenic",
+        "declared \u201cincurable\u201d after several years",
+    ]
+
+
+def test_extractive_atomizer_tolerates_quote_normalization():
+    source = "妈妈生气时常会说\"我不要你了，把你送给你爸爸\u201d,让她害怕妈妈真的不要自己。"
+    text = "妈妈生气时常会说\"我不要你了，把你送给你爸爸\",让她害怕妈妈真的不要自己。"
+    output = ExtractedSpans.model_validate(
+        {"spans": [{"start": 0, "end": 1, "text": text, "kind": "event"}]}
+    )
+
+    spans = ExtractiveAtomizer._validate(source, output, "growth")
+
+    assert [(item.start, item.end, item.text) for item in spans] == [
+        (0, len(text), text),
+    ]
 
 
 def test_pilot_failure_reports_the_underlying_atomizer_reason(root, tmp_path):

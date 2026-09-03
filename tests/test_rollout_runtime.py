@@ -8,8 +8,8 @@ from types import SimpleNamespace
 import pytest
 
 from psychsandbox.domain import (
-    EvaluationMetric, Message, RFTConfig, RolloutAssessment,
-    RolloutDimension, RolloutEvidence, SessionRecord, SupervisorReport,
+    Message, RFTConfig, ScaleItem, ScaleItems, ScaleScore,
+    SessionEvaluationReport, SessionRecord, SessionSafetyVerdict,
     CounselorActorOutput, CounselorSessionReview, SandboxConfig,
 )
 from psychsandbox.runtime import CounselingSandbox, SQLiteStore
@@ -28,40 +28,24 @@ def session_for(index, plan, state, *, text=None):
             Message(session_index=plan.session_index, turn_index=1, role="counselor", content=text or f"我愿意理解你的感受，先从片段 {index} 谈起"),
         ],
         turn_records=[{"turn_index": 1}],
-        supervisor_report=SupervisorReport(
-            session_index=plan.session_index, overall_score=10,
-            metrics=[EvaluationMetric(name=name, score=10, reason="test") for name in (
-                "ethics_and_safety", "hidden_information_leakage",
-            )],
-        ),
     )
 
 
-def assessment_for(session, score):
-    client_index = next(
-        (index for index, item in enumerate(session.messages) if item.role == "client"),
-        0,
-    )
-    counselor_index = next(
-        (index for index, item in enumerate(session.messages) if item.role == "counselor"),
-        1,
-    )
-
-    def dimension(value, index):
-        return RolloutDimension(
-            score=value, evidence=[RolloutEvidence(message_index=index, quote=session.messages[index].content)],
-            reason="离线评分替身",
+def report_for(session, score):
+    def scale(name, level):
+        return ScaleScore(
+            name=name, level=level, category="therapy_shared",
+            direction="higher_better", score=float(score),
         )
-    return RolloutAssessment(
-        counselor_alliance=dimension(score, counselor_index),
-        counselor_strategy=dimension(score, counselor_index),
-        counselor_goal_alignment=dimension(score, counselor_index),
-        counselor_safety=dimension(9, counselor_index),
-        client_engagement=dimension(6, client_index),
-        client_understanding=dimension(6, client_index),
-        client_agency=dimension(6, client_index),
-        simulation_fidelity=dimension(9, client_index),
-        safety_passed=True, safety_reason="离线测试无安全违规",
+    return SessionEvaluationReport(
+        session_index=session.session_index,
+        therapy=session.plan.therapy,
+        counselor_shared=[scale("wai", "counselor")],
+        counselor_specific=[],
+        client_shared=[scale("srs", "client")],
+        client_specific=[],
+        counselor_overall=float(score),
+        client_overall=6.0,
     )
 
 
@@ -69,10 +53,14 @@ class Judge:
     def __init__(self):
         self.calls = []
 
-    async def evaluate(self, session, memory_before):
+    async def evaluate(self, session, case, memory_before):
         self.calls.append(session.session_id)
         index = int(session.session_id.split("-")[-1])
-        return assessment_for(session, 5 + index)
+        report = report_for(session, 6 + index)
+        session.safety_verdict = SessionSafetyVerdict(
+            session_index=session.session_index, passed=True,
+        )
+        return report
 
 
 @pytest.fixture
@@ -94,10 +82,10 @@ def runner_for(setup, judge=None, **settings):
 
 
 async def run(runner, setup, generate):
-    _, memory, plan, state, _, _ = setup
+    case, memory, plan, state, _, _ = setup
     return await runner.run(
         run_id="run-test", plan=plan, memory=memory, state=state,
-        previous=None, generate=generate, notify=lambda _: None,
+        case=case, previous=None, generate=generate, notify=lambda _: None,
     )
 
 
@@ -139,9 +127,13 @@ def test_duplicate_sessions_are_not_scored_again_and_ties_use_index(setup):
     _, _, plan, _, _, _ = setup
     judge = Judge()
 
-    async def tied(session, memory):
+    async def tied(session, case, memory):
         judge.calls.append(session.session_id)
-        return assessment_for(session, 8)
+        report = report_for(session, 8)
+        session.safety_verdict = SessionSafetyVerdict(
+            session_index=session.session_index, passed=True,
+        )
+        return report
     judge.evaluate = tied
 
     async def generate(index, memory, state, checkpoint):
@@ -171,22 +163,22 @@ def test_all_duplicates_fail_without_committing_and_retain_batch(setup):
     assert list(path.glob("rollouts/s001__*/selection.json"))
 
 
-@pytest.mark.parametrize("failure", ["generation", "score", "timeout", "unsafe", "fidelity", "rule", "leak"])
+@pytest.mark.parametrize("failure", ["generation", "score", "timeout", "unsafe", "rule", "leak"])
 def test_failed_or_rejected_candidate_never_wins(setup, failure):
     _, _, plan, _, _, _ = setup
     judge = Judge()
     original_evaluate = judge.evaluate
 
-    async def evaluate(session, memory):
-        result = await original_evaluate(session, memory)
+    async def evaluate(session, case, memory):
+        report = await original_evaluate(session, case, memory)
         if session.session_id.endswith("-3"):
             if failure == "score":
-                raise ValueError("bad evidence")
+                raise ValueError("bad scale")
             if failure == "unsafe":
-                result.safety_passed = False
-            if failure == "fidelity":
-                result.simulation_fidelity.score = 2
-        return result
+                session.safety_verdict = SessionSafetyVerdict(
+                    session_index=session.session_index, passed=False, reasons=["unsafe"],
+                )
+        return report
     judge.evaluate = evaluate
 
     async def generate(index, memory, state, checkpoint):
@@ -244,17 +236,44 @@ def test_resample_is_bounded_by_limit(setup):
     assert all(c.status == "generation_failed" for c in error.value.selection.candidates)
 
 
+def test_scoring_failure_is_resampled_when_eligible_insufficient(setup):
+    _, _, plan, _, _, _ = setup
+    judge = Judge()
+    original_evaluate = judge.evaluate
+
+    async def evaluate(session, case, memory):
+        index = int(session.session_id.split("-")[-1])
+        if index in (1, 3):
+            raise RuntimeError("judge API 500")
+        return await original_evaluate(session, case, memory)
+    judge.evaluate = evaluate
+
+    async def generate(index, memory, state, checkpoint):
+        return session_for(index, plan, state)
+
+    session, _ = asyncio.run(run(runner_for(setup, judge, resample_limit=1), setup, generate))
+    selection = session.rollout_selection
+    assert selection.candidates[0].status == "scoring_failed"
+    assert selection.candidates[2].status == "scoring_failed"
+    assert selection.winner_index == 4
+    assert selection.candidates[3].status == "selected"
+
+
 def test_judge_validation_failure_is_retried(setup):
     _, _, plan, _, _, _ = setup
     judge = Judge()
     attempts = {}
 
-    async def evaluate(session, memory):
+    async def evaluate(session, case, memory):
         index = int(session.session_id.split("-")[-1])
         attempts[index] = attempts.get(index, 0) + 1
         if index == 3 and attempts[index] == 1:
-            raise ValueError("quote is not an exact source substring")
-        return assessment_for(session, 5 + index)
+            raise ValueError("scale validation failed")
+        report = report_for(session, 5 + index)
+        session.safety_verdict = SessionSafetyVerdict(
+            session_index=session.session_index, passed=True,
+        )
+        return report
     judge.evaluate = evaluate
 
     async def generate(index, memory, state, checkpoint):
@@ -323,16 +342,14 @@ class RolloutGateway(DeterministicGateway):
 
     async def complete_structured(self, **kwargs):
         schema = kwargs["output_schema"]
-        if schema is RolloutAssessment:
+        if schema is ScaleItems:
             if self.fail_judge:
                 raise RuntimeError("judge temporarily unavailable")
-            dialogue = kwargs["input_payload"]["dialogue"]
-            number = int(re.findall(r"离线样本 (\d+)", " ".join(m["content"] for m in dialogue))[-1])
-            session = SimpleNamespace(messages=[
-                SimpleNamespace(role=m["role"], content=m["content"])
-                for m in dialogue
-            ])
-            return assessment_for(session, 7 if number % 2 else 9)
+            dialogue = kwargs["input_payload"].get("dialogue", "")
+            match = re.search(r"离线样本 (\d+)", dialogue)
+            number = int(match.group(1)) if match else 0
+            score = 5.0 if number % 2 == 0 else 4.0
+            return ScaleItems(items=[ScaleItem(item=str(i), score=score) for i in range(1, 16)])
         if schema is CounselorSessionReview:
             self.review_payloads.append(kwargs["input_payload"])
         result = await super().complete_structured(**kwargs)
@@ -456,7 +473,7 @@ def test_judging_has_its_own_concurrency_limit_and_deadline(setup):
     active = peak = 0
     judge = Judge()
 
-    async def evaluate(session, memory):
+    async def evaluate(session, case, memory):
         nonlocal active, peak
         active += 1
         peak = max(peak, active)
@@ -464,7 +481,11 @@ def test_judging_has_its_own_concurrency_limit_and_deadline(setup):
             if session.session_id.endswith("-3"):
                 await asyncio.Event().wait()
             await asyncio.sleep(0.01)
-            return assessment_for(session, 8)
+            report = report_for(session, 8)
+            session.safety_verdict = SessionSafetyVerdict(
+                session_index=session.session_index, passed=True,
+            )
+            return report
         finally:
             active -= 1
     judge.evaluate = evaluate

@@ -17,7 +17,6 @@ class TherapyProfile:
     display_name: str
     counselor_role: str
     conceptualization_focus: str
-    therapy_metric: str
     stage_goals: dict[SessionStage, tuple[str, ...]]
 
     def system_prompt(self) -> str:
@@ -40,7 +39,6 @@ CBT = TherapyProfile(
     display_name="认知行为取向（CBT）",
     counselor_role="CBT counselor",
     conceptualization_focus="自动思维、条件假设、核心信念及其与情绪和行为的循环",
-    therapy_metric="ctrs_lite",
     stage_goals={
         SessionStage.CONCEPTUALIZATION: (
             "建立合作关系",
@@ -64,7 +62,6 @@ HUMANISTIC_EXISTENTIAL = TherapyProfile(
     display_name="人本—存在取向",
     counselor_role="humanistic-existential counselor",
     conceptualization_focus="主观体验、一致性、自我接纳、选择与意义",
-    therapy_metric="tes_lite",
     stage_goals={
         SessionStage.CONCEPTUALIZATION: (
             "建立真诚、安全且尊重自主性的关系",
@@ -87,7 +84,6 @@ BEHAVIORAL = TherapyProfile(
     display_name="行为取向（BT）",
     counselor_role="behavioral counselor",
     conceptualization_focus="可观察的目标行为、前因、功能、后果以及维持行为的强化循环",
-    therapy_metric="miti_lite",
     stage_goals={
         SessionStage.CONCEPTUALIZATION: (
             "建立合作关系并操作化目标行为",
@@ -110,7 +106,6 @@ PSYCHODYNAMIC = TherapyProfile(
     display_name="心理动力学取向（PDT）",
     counselor_role="psychodynamic counselor",
     conceptualization_focus="核心冲突、客体关系、情感、防御机制和关系中的重复模式",
-    therapy_metric="psc_lite",
     stage_goals={
         SessionStage.CONCEPTUALIZATION: (
             "建立稳定的治疗框架和联盟",
@@ -133,7 +128,6 @@ POSTMODERN = TherapyProfile(
     display_name="后现代取向（PMT）",
     counselor_role="postmodern counselor",
     conceptualization_focus="问题外化、例外事件、优势资源、偏好故事与来访者定义的改变",
-    therapy_metric="eft_tfs_lite",
     stage_goals={
         SessionStage.CONCEPTUALIZATION: (
             "建立平等合作的关系",

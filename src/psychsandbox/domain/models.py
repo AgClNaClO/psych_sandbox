@@ -800,23 +800,6 @@ class ClientGeneration(StrictModel):
     goal_progress_signal: float = Field(default=0, ge=-1, le=1)
 
 
-class EvaluationMetric(StrictModel):
-    name: str
-    score: float = Field(ge=0, le=10)
-    evidence: list[str] = Field(default_factory=list)
-    reason: str
-    violations: list[str] = Field(default_factory=list)
-    evaluator: Literal["rule", "llm", "human"] = "rule"
-
-
-class SupervisorReport(StrictModel):
-    session_index: int
-    metrics: list[EvaluationMetric]
-    overall_score: float = Field(ge=0, le=10)
-    feedback: list[str] = Field(default_factory=list)
-    created_at: str = Field(default_factory=utc_now)
-
-
 class LongitudinalReport(StrictModel):
     """Session-to-session progress signal for planning, not a clinical outcome."""
 
@@ -826,14 +809,6 @@ class LongitudinalReport(StrictModel):
     trend: Literal["baseline", "improving", "stable", "worsening", "mixed"]
     stage_action: Literal["continue", "advance", "regress", "hold", "close"]
     evidence: list[str] = Field(default_factory=list)
-
-
-class ClientSimulationReport(StrictModel):
-    session_index: int
-    metrics: list[EvaluationMetric]
-    overall_score: float = Field(ge=0, le=10)
-    red_flags: list[str] = Field(default_factory=list)
-    created_at: str = Field(default_factory=utc_now)
 
 
 class ScaleItem(StrictModel):
@@ -863,8 +838,10 @@ class ScaleScore(StrictModel):
     """Aggregated 0-10 score for one PsychEval instrument.
 
     ``item_scores`` preserves raw per-item ratings (usually 1-5) keyed by item
-    number string, while ``score`` carries the normalized, direction-adjusted
-    0-10 summary used for reporting.
+    number string, while ``score`` carries the normalized 0-10 summary mapped
+    from the instrument's own raw range. ``direction`` records whether higher
+    or lower is better (symptom scales are ``lower_better``); ``score`` stays
+    raw and is not direction-adjusted, matching the official eval methods.
     """
 
     name: str
@@ -894,6 +871,40 @@ class HolisticEvaluationReport(StrictModel):
     created_at: str = Field(default_factory=utc_now)
 
 
+class SessionEvaluationReport(StrictModel):
+    """Per-session external supervision result aligned with PsychEval.
+
+    Scored once per session with the same PsychEval instruments used by the
+    final holistic report, so per-session supervision and RFT reward share a
+    single LLM-as-judge evaluation. ``counselor_overall``/``client_overall``
+    are 0-10 summaries (higher is better) of the counselor- and client-level
+    instruments respectively.
+    """
+
+    session_index: int = Field(ge=1)
+    therapy: str
+    counselor_shared: list[ScaleScore] = Field(default_factory=list)
+    counselor_specific: list[ScaleScore] = Field(default_factory=list)
+    client_shared: list[ScaleScore] = Field(default_factory=list)
+    client_specific: list[ScaleScore] = Field(default_factory=list)
+    counselor_overall: float = Field(ge=0, le=10)
+    client_overall: float = Field(ge=0, le=10)
+    created_at: str = Field(default_factory=utc_now)
+
+
+class SessionSafetyVerdict(StrictModel):
+    """Rule-based disclosure-leakage and crisis-safety gate, not a score.
+
+    ``passed`` gates RFT eligibility; it never contributes to the reward.
+    """
+
+    session_index: int = Field(ge=1)
+    passed: bool
+    reasons: list[str] = Field(default_factory=list)
+    leaked_fact_ids: list[str] = Field(default_factory=list)
+    created_at: str = Field(default_factory=utc_now)
+
+
 class RFTConfig(StrictModel):
     enabled: bool = False
     candidates: int = Field(default=3, ge=2, le=32)
@@ -904,9 +915,6 @@ class RFTConfig(StrictModel):
     min_eligible: int = Field(default=2, ge=2, le=32)
     counselor_temperature: float = Field(default=0.9, ge=0, le=2)
     judge_temperature: float = Field(default=0.0, ge=0, le=2)
-    counselor_weight: float = Field(default=0.7, gt=0, lt=1)
-    min_safety_score: float = Field(default=7, ge=7, le=10)
-    min_fidelity_score: float = Field(default=6, ge=0, le=10)
     judge_retries: int = Field(default=1, ge=0, le=8)
     resample_limit: int = Field(default=2, ge=0, le=32)
 
@@ -917,41 +925,31 @@ class RFTConfig(StrictModel):
         return self
 
 
-class RolloutEvidence(StrictModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-    message_index: int = Field(ge=0)
-    quote: str = Field(min_length=1, max_length=240)
+class RewardSignal(StrictModel):
+    """One z-scored reward signal, mirroring PsychAgent's ``src/rft/reward.py``.
 
+    Counselor metrics are standardized on their absolute score; client metrics
+    are standardized on their delta against the previous winner, with symptom
+    scales negated so that higher is always better.
+    """
 
-class RolloutDimension(StrictModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-    score: float = Field(ge=0, le=10, allow_inf_nan=False)
-    evidence: list[RolloutEvidence] = Field(min_length=1, max_length=3)
-    reason: str = Field(min_length=1, max_length=240)
-
-
-class RolloutAssessment(StrictModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-    counselor_alliance: RolloutDimension
-    counselor_strategy: RolloutDimension
-    counselor_goal_alignment: RolloutDimension
-    counselor_safety: RolloutDimension
-    client_engagement: RolloutDimension
-    client_understanding: RolloutDimension
-    client_agency: RolloutDimension
-    simulation_fidelity: RolloutDimension
-    safety_passed: bool
-    safety_reason: str = Field(min_length=1, max_length=300)
+    side: Literal["counselor", "client"]
+    metric: str
+    raw_value: float = Field(allow_inf_nan=False)
+    standardized: float = Field(allow_inf_nan=False)
+    previous_value: float | None = None
+    delta: float | None = None
+    skipped_reason: str | None = None
 
 
 class RolloutReward(StrictModel):
-    total: float = Field(ge=0, le=10, allow_inf_nan=False)
-    counselor_score: float = Field(ge=0, le=10)
-    client_snapshot: dict[str, float]
-    client_delta: float | None = None
-    client_gain_score: float | None = None
+    total: float = Field(allow_inf_nan=False)
+    counselor_snapshot: dict[str, float] = Field(default_factory=dict)
+    client_snapshot: dict[str, float] = Field(default_factory=dict)
+    signals: list[RewardSignal] = Field(default_factory=list)
+    skipped: list[RewardSignal] = Field(default_factory=list)
     baseline_session_index: int | None = None
-    formula_version: str = "session-rft-v1"
+    formula_version: str = "psychagent-rft-v1"
 
 
 class RolloutCandidateSummary(StrictModel):
@@ -963,7 +961,7 @@ class RolloutCandidateSummary(StrictModel):
     reason: str = ""
     dialogue_hash: str = ""
     duplicate_of: int | None = None
-    assessment: RolloutAssessment | None = None
+    assessment: SessionEvaluationReport | None = None
     reward: RolloutReward | None = None
     artifact_path: str
     turns: int = 0
@@ -997,9 +995,7 @@ class SessionRecord(StrictModel):
     interventions_used: list[str] = Field(default_factory=list)
     risk_events: list[RiskAssessment] = Field(default_factory=list)
     next_session_plan: SessionPlan | None = None
-    supervisor_report: SupervisorReport | None = None
-    llm_supervisor_report: SupervisorReport | None = None
-    client_simulation_report: ClientSimulationReport | None = None
+    safety_verdict: SessionSafetyVerdict | None = None
     longitudinal_report: LongitudinalReport | None = None
     evaluation_errors: list[str] = Field(default_factory=list)
     rollout_selection: RolloutSelection | None = None
@@ -1017,6 +1013,14 @@ class CounselingCase(StrictModel):
 
 
 class Trajectory(StrictModel):
+    """One committed session plus its selection reward.
+
+    ``reward`` is either the 0-10 counselor overall score (plain run) or the
+    RFT z-score average (``--rollouts N``), which is clipped to [-3, 3]. It is
+    only an ordering signal for downstream selection/training export, not a
+    clinical outcome measure.
+    """
+
     trajectory_id: str
     run_id: str
     case_id: str
@@ -1025,7 +1029,7 @@ class Trajectory(StrictModel):
     memory_before: SessionMemory
     plan: SessionPlan
     session: SessionRecord
-    reward: float = Field(ge=0, le=10)
+    reward: float = Field(ge=-3, le=10)
     safety_passed: bool
     created_at: str = Field(default_factory=utc_now)
 

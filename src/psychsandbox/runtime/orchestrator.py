@@ -18,10 +18,9 @@ from ..artifacts import (
 )
 from ..datasets import CaseRepository
 from ..evaluation import (
-    ClientSimulationEvaluator,
     LongitudinalEvaluator,
     PsychEvalSupervisor,
-    SupervisorAgent,
+    SessionSafetyGate,
 )
 from ..client_simulation import ClientSimulator, ClientTurnInput
 from ..evaluation.rollout import SessionRolloutEvaluator
@@ -141,8 +140,7 @@ class CounselingSandbox:
             config.temperature_counselor,
             skill_selection=config.skill_selection,
         )
-        self.supervisor = SupervisorAgent()
-        self.client_evaluator = ClientSimulationEvaluator()
+        self.safety_gate = SessionSafetyGate()
         self.holistic_supervisor = PsychEvalSupervisor(
             self.gateway,
             config.project_root / "prompts" / "eval",
@@ -337,13 +335,10 @@ class CounselingSandbox:
                         session = await self._run_session(
                             case, plan, memory, initial_state, turn_progress=turn_progress
                         )
-                    report = session.supervisor_report or await self.supervisor.evaluate(
-                        session, case=case, memory_before=memory_before
-                    )
-                    session.supervisor_report = report
-                    session.client_simulation_report = await self.client_evaluator.evaluate(
-                        session
-                    )
+                    if session.safety_verdict is None:
+                        session.safety_verdict = self.safety_gate.evaluate(
+                            session, case, memory_before
+                        )
                     session.longitudinal_report = self.longitudinal.evaluate(
                         session, sessions
                     )
@@ -374,6 +369,7 @@ class CounselingSandbox:
                         session.longitudinal_report,
                         session.counselor_review,
                     )
+                    rft_reward = selected_reward(session)
                     trajectory = Trajectory(
                         trajectory_id=f"traj-{uuid.uuid4().hex[:12]}",
                         run_id=run_id,
@@ -403,12 +399,9 @@ class CounselingSandbox:
                         memory_before=memory_before,
                         plan=plan,
                         session=session,
-                        reward=selected_reward(session).total if selected_reward(session) else report.overall_score,
-                        safety_passed=all(
-                            metric.score >= 7
-                            for metric in report.metrics
-                            if metric.name
-                            in {"ethics_and_safety", "hidden_information_leakage"}
+                        reward=rft_reward.total if rft_reward else 0.0,
+                        safety_passed=bool(
+                            session.safety_verdict and session.safety_verdict.passed
                         ),
                     )
                     self.store.save_session(run_id, session, memory, trajectory)
@@ -418,9 +411,10 @@ class CounselingSandbox:
                     completed = session_index - start + 1
                     remaining = session_count - session_index
                     eta = (elapsed / completed) * remaining if remaining > 0 else 0.0
+                    rft_label = f"RFT={rft_reward.total:.3f}；" if rft_reward else ""
                     notify(
                         f"Session {session_index}/{session_count} 完成；"
-                        f"turns={len(session.turn_records)}；督导={report.overall_score}；"
+                        f"turns={len(session.turn_records)}；{rft_label}"
                         f"已用时间={_format_duration(elapsed)}；"
                         f"预计剩余={_format_duration(eta) if remaining > 0 else '无'}"
                     )
@@ -668,18 +662,21 @@ class CounselingSandbox:
                 turn_progress=candidate_progress if turn_progress else None,
                 progress_label=str(index),
             )
-            session.supervisor_report = await self.supervisor.evaluate(
-                session, case=branch_case, memory_before=memory,
-            )
             return session
 
         runner = SessionRolloutRunner(
-            self.config.rft, SessionRolloutEvaluator(self.gateway, self.config.rft),
-            self.store, self.run_dir,
+            self.config.rft,
+            SessionRolloutEvaluator(
+                self.gateway,
+                self.config.project_root / "prompts" / "eval",
+                temperature=self.config.rft.judge_temperature,
+            ),
+            self.store,
+            self.run_dir,
         )
         return await runner.run(
             run_id=run_id, plan=plan, memory=memory, state=initial_state,
-            previous=previous, generate=generate, notify=notify,
+            case=case, previous=previous, generate=generate, notify=notify,
         )
 
     @staticmethod

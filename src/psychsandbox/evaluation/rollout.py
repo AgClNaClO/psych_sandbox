@@ -1,177 +1,242 @@
 from __future__ import annotations
 
-from copy import deepcopy
-from math import isfinite
-from statistics import mean
+from pathlib import Path
 
 from ..domain import (
+    CounselingCase,
     RFTConfig,
-    RolloutAssessment,
+    RewardSignal,
     RolloutReward,
+    SessionEvaluationReport,
     SessionMemory,
     SessionRecord,
 )
 from ..model_client import ModelGateway
-from ..prompts import render_prompt
+from .safety_gate import SessionSafetyGate
+from .session_supervisor import SessionSupervisorEvaluator
 
 
-SESSION_JUDGE_TEMPLATE = "rft/session_judge.jinja2"
-COUNSELOR_DIMENSIONS = (
-    "counselor_alliance",
-    "counselor_strategy",
-    "counselor_goal_alignment",
-    "counselor_safety",
+# Fixed standardization statistics from PsychAgent's ``src/rft/reward.py``.
+# Counselor scales use absolute 0-10 scores; client scales use the delta
+# against the previous winner's snapshot. Symptom scales are negated so that
+# higher is always better.
+REWARD_STD_MEAN: dict[str, dict[str, dict[str, float]]] = {
+    "counselor": {
+        "RRO": {"mean": 7.637, "std": 1.073},
+        "HTAIS": {"mean": 6.404, "std": 1.07},
+        "WAI": {"mean": 7.257, "std": 1.461},
+        "CUSTOM_DIM": {"mean": 7.363, "std": 0.957},
+        "CTRS": {"mean": 9.19, "std": 0.89},
+        "EFT_TFS": {"mean": 3.144, "std": 1.948},
+        "TES": {"mean": 7.362, "std": 1.346},
+        "MITI": {"mean": 5.881, "std": 1.112},
+        "PSC": {"mean": 7.269, "std": 1.119},
+    },
+    "client": {
+        "RRO": {"mean": 0.211, "std": 1.262},
+        "PANAS": {"mean": 0.442, "std": 0.94},
+        "SCL_90": {"mean": -0.14, "std": 0.892},
+        "SRS": {"mean": 0.225, "std": 1.507},
+        "BDI_II": {"mean": -0.446, "std": 1.39},
+        "SFBT": {"mean": 0.158, "std": 1.568},
+        "CCT": {"mean": 0.136, "std": 1.016},
+        "STAI": {"mean": 0.279, "std": 1.741},
+        "IPO": {"mean": -0.085, "std": 2.464},
+    },
+}
+
+# Symptom scales whose negative delta indicates improvement, so the delta
+# z-score is inverted (mirroring ``NEGATIVE_DELTA_CLIENT_METRICS``).
+NEGATIVE_DELTA_CLIENT_METRICS: frozenset[str] = frozenset({"SCL_90", "BDI_II", "IPO"})
+
+# Project instrument keys -> PsychAgent canonical metric names. The reward uses
+# the official 8-method list; SCL-90 is reported by the PsychEval supervisor but
+# is not part of the PsychAgent RFT reward, so it is intentionally absent.
+_METRIC_ALIASES: dict[str, str] = {
+    "wai": "WAI",
+    "htais": "HTAIS",
+    "custom_dim": "CUSTOM_DIM",
+    "rro": "RRO",
+    "rro_client": "RRO",
+    "ctrs": "CTRS",
+    "tes": "TES",
+    "psc": "PSC",
+    "miti": "MITI",
+    "eft_tfs": "EFT_TFS",
+    "panas": "PANAS",
+    "srs": "SRS",
+    "bdi_ii": "BDI_II",
+    "cct": "CCT",
+    "ipo": "IPO",
+    "stai": "STAI",
+    "sfbt": "SFBT",
+}
+
+_REWARD_COUNSELOR_METRICS: frozenset[str] = frozenset(
+    {"RRO", "CUSTOM_DIM", "HTAIS", "WAI", "CTRS", "EFT_TFS", "TES", "MITI", "PSC"}
 )
-CLIENT_DIMENSIONS = (
-    "client_engagement",
-    "client_understanding",
-    "client_agency",
+_REWARD_CLIENT_METRICS: frozenset[str] = frozenset(
+    {"RRO", "PANAS", "SRS", "BDI_II", "SFBT", "CCT", "STAI", "IPO"}
 )
-DIMENSIONS = COUNSELOR_DIMENSIONS + CLIENT_DIMENSIONS + ("simulation_fidelity",)
 
 
-def _validated_assessment(value: object) -> RolloutAssessment:
-    # Revalidate even model instances: model_copy/model_construct can bypass
-    # Pydantic validation, including for nested scores and evidence.
-    if isinstance(value, RolloutAssessment):
-        value = value.model_dump()
-    assessment = RolloutAssessment.model_validate(value, strict=True)
-    for name in DIMENSIONS:
-        dimension = getattr(assessment, name)
-        if not dimension.reason.strip():
-            raise ValueError(f"{name}: reason must not be blank")
-        if any(not item.quote.strip() for item in dimension.evidence):
-            raise ValueError(f"{name}: evidence quote must not be blank")
-    if not assessment.safety_reason.strip():
-        raise ValueError("safety_reason must not be blank")
-    return assessment
+def _canonical_metric(name: str) -> str:
+    return _METRIC_ALIASES.get(name, str(name).strip().upper().replace("-", "_"))
 
 
-def _public_memory(memory: SessionMemory) -> dict:
-    """Whitelist disclosed context, without IDs or internal assessments.
-
-    Opaque summaries, evolving profiles, supervisor feedback, risk/state
-    histories and skill histories are deliberately not judge inputs. Facts
-    already admitted to unlocked_client_info are the disclosure boundary.
-    """
-    profile = memory.unlocked_client_info
-    return deepcopy({
-        "unlocked_client_info": {
-            "static_traits": profile.static_traits.model_dump(
-                mode="json", exclude={"language_features"}
-            ),
-            "main_problem": profile.main_problem,
-            "topic": profile.topic,
-            "core_demands": profile.core_demands,
-            "growth_experiences": list(profile.growth_experiences),
-            "facts": [{"content": fact.content} for fact in profile.facts],
-            "theory": deepcopy(profile.theory),
-        },
-        "unresolved_topics": memory.unresolved_topics,
-        "homework": memory.homework,
-        "last_client_closing": memory.last_client_closing,
-    })
+def _clip(value: float, lower: float = -3.0, upper: float = 3.0) -> float:
+    if value < lower:
+        return lower
+    if value > upper:
+        return upper
+    return value
 
 
 class SessionRolloutEvaluator:
-    """Judge one complete session using only public, attributable evidence."""
+    """Per-session judge for RFT candidate ranking.
 
-    def __init__(self, gateway: ModelGateway, config: RFTConfig) -> None:
-        self.gateway = gateway
-        self.config = config
+    A single LLM-as-judge evaluation (the PsychEval instruments) feeds the
+    candidate reward signal only; the clinical supervisor scores once after
+    the full trajectory via :class:`PsychEvalSupervisor`. A deterministic
+    disclosure/safety gate decides eligibility and never contributes a score.
+    """
+
+    def __init__(
+        self,
+        gateway: ModelGateway,
+        prompts_dir: Path,
+        temperature: float,
+    ) -> None:
+        self.supervisor = SessionSupervisorEvaluator(
+            gateway, prompts_dir, temperature=temperature
+        )
+        self.safety_gate = SessionSafetyGate()
 
     async def evaluate(
-        self, session: SessionRecord, memory_before: SessionMemory
-    ) -> RolloutAssessment:
-        dialogue = [
-            {"message_index": index, "role": message.role, "content": message.content}
-            for index, message in enumerate(session.messages)
-            if message.role in {"client", "counselor"}
-        ]
-        # Snapshot the exact sources before awaiting a shared gateway; neither
-        # filtered positions nor turn_index identify an evidence source.
-        sources = {
-            item["message_index"]: (item["role"], item["content"])
-            for item in dialogue
-        }
-        if not any(role == "client" for role, _ in sources.values()):
-            raise ValueError("session must contain client evidence")
-        result = await self.gateway.complete_structured(
-            role="supervisor",
-            system_prompt=render_prompt(SESSION_JUDGE_TEMPLATE),
-            input_payload={
-                "dialogue": dialogue,
-                "plan": {
-                    "stage": session.plan.stage.value,
-                    "objectives": list(session.plan.objectives),
-                    "therapy": session.plan.therapy,
-                },
-                "memory": _public_memory(memory_before),
-            },
-            output_schema=RolloutAssessment,
-            temperature=self.config.judge_temperature,
-        )
-        assessment = _validated_assessment(result)
-        for name in DIMENSIONS:
-            dimension = getattr(assessment, name)
-            has_client_evidence = False
-            for evidence in dimension.evidence:
-                source = sources.get(evidence.message_index)
-                if source is None:
-                    raise ValueError(f"{name}: message_index is not a dialogue source")
-                role, content = source
-                if evidence.quote not in content:
-                    raise ValueError(f"{name}: quote is not an exact source substring")
-                has_client_evidence |= role == "client"
-            if name in CLIENT_DIMENSIONS and not has_client_evidence:
-                raise ValueError(f"{name}: at least one client evidence quote is required")
-        return assessment
+        self,
+        session: SessionRecord,
+        case: CounselingCase,
+        memory_before: SessionMemory,
+    ) -> SessionEvaluationReport:
+        report = await self.supervisor.evaluate(session, case)
+        session.safety_verdict = self.safety_gate.evaluate(session, case, memory_before)
+        return report
 
 
 def compute_rollout_reward(
-    assessment: RolloutAssessment,
+    report: SessionEvaluationReport,
     previous: RolloutReward | None,
     config: RFTConfig,
     *,
     baseline_session_index: int | None = None,
 ) -> RolloutReward:
-    """Compute a research ranking signal, without eligibility/safety filtering.
+    """Compute the session reward with PsychAgent's fixed z-score statistics.
 
-    The caller supplies the previous winner's session index explicitly.
-    previous.baseline_session_index identifies that winner's own baseline,
-    so it must never be reused or incremented to infer the current baseline.
-    With no previous reward, client scores are stored but do not affect total.
+    Counselor scales are standardized on their absolute 0-10 score; client
+    scales are standardized on their delta against the previous winner's
+    snapshot, with symptom scales (SCL-90, BDI-II, IPO) negated so that higher
+    is better. The final score is the arithmetic mean of all available z-values
+    (0.0 when none), matching ``src/rft/reward.py``. ``config`` is kept in the
+    signature for call-site compatibility but does not influence the reward.
     """
-    assessment = _validated_assessment(assessment)
     if baseline_session_index is not None and (
         type(baseline_session_index) is not int or baseline_session_index < 1
     ):
         raise ValueError("baseline_session_index must be a positive integer or None")
-    counselor_score = mean(getattr(assessment, name).score for name in COUNSELOR_DIMENSIONS)
-    snapshot = {name: getattr(assessment, name).score for name in CLIENT_DIMENSIONS}
-    if previous is None:
-        return RolloutReward(
-            total=counselor_score,
-            counselor_score=counselor_score,
-            client_snapshot=snapshot,
+
+    counselor_snapshot = {
+        _canonical_metric(score.name): float(score.score)
+        for score in report.counselor_shared + report.counselor_specific
+    }
+    client_snapshot = {
+        _canonical_metric(score.name): float(score.score)
+        for score in report.client_shared + report.client_specific
+    }
+
+    prev_client: dict[str, float] = {}
+    if previous is not None:
+        previous = RolloutReward.model_validate(previous.model_dump(), strict=True)
+        prev_client = previous.client_snapshot
+
+    signals: list[RewardSignal] = []
+    skipped: list[RewardSignal] = []
+
+    for metric, value in counselor_snapshot.items():
+        if metric not in _REWARD_COUNSELOR_METRICS:
+            continue
+        stats = REWARD_STD_MEAN["counselor"].get(metric)
+        if not stats:
+            skipped.append(
+                RewardSignal(
+                    side="counselor",
+                    metric=metric,
+                    raw_value=value,
+                    standardized=0.0,
+                    skipped_reason="missing_std_stats",
+                )
+            )
+            continue
+        z_value = _clip((value - stats["mean"]) / stats["std"])
+        signals.append(
+            RewardSignal(
+                side="counselor",
+                metric=metric,
+                raw_value=value,
+                standardized=z_value,
+            )
         )
 
-    previous = RolloutReward.model_validate(previous.model_dump(), strict=True)
-    if set(previous.client_snapshot) != set(CLIENT_DIMENSIONS):
-        raise ValueError("previous client_snapshot must contain exactly the three client dimensions")
-    if any(
-        not isfinite(value) or not 0 <= value <= 10
-        for value in previous.client_snapshot.values()
-    ):
-        raise ValueError("previous client_snapshot scores must be finite and within 0-10")
-    delta = mean(snapshot[name] - previous.client_snapshot[name] for name in CLIENT_DIMENSIONS)
-    gain = 5 + delta / 2
-    total = config.counselor_weight * counselor_score + (1 - config.counselor_weight) * gain
+    for metric, value in client_snapshot.items():
+        if metric not in _REWARD_CLIENT_METRICS:
+            continue
+        previous_value = prev_client.get(metric)
+        if previous_value is None:
+            skipped.append(
+                RewardSignal(
+                    side="client",
+                    metric=metric,
+                    raw_value=value,
+                    standardized=0.0,
+                    skipped_reason="missing_previous_reward",
+                )
+            )
+            continue
+        stats = REWARD_STD_MEAN["client"].get(metric)
+        if not stats:
+            skipped.append(
+                RewardSignal(
+                    side="client",
+                    metric=metric,
+                    raw_value=value,
+                    previous_value=previous_value,
+                    delta=value - previous_value,
+                    standardized=0.0,
+                    skipped_reason="missing_std_stats",
+                )
+            )
+            continue
+        delta = value - previous_value
+        z_value = _clip((delta - stats["mean"]) / stats["std"])
+        if metric in NEGATIVE_DELTA_CLIENT_METRICS:
+            z_value = -z_value
+        signals.append(
+            RewardSignal(
+                side="client",
+                metric=metric,
+                raw_value=value,
+                previous_value=previous_value,
+                delta=delta,
+                standardized=z_value,
+            )
+        )
+
+    z_values = [signal.standardized for signal in signals]
+    total = sum(z_values) / len(z_values) if z_values else 0.0
     return RolloutReward(
         total=total,
-        counselor_score=counselor_score,
-        client_snapshot=snapshot,
-        client_delta=delta,
-        client_gain_score=gain,
+        counselor_snapshot=counselor_snapshot,
+        client_snapshot=client_snapshot,
+        signals=signals,
+        skipped=skipped,
         baseline_session_index=baseline_session_index,
     )

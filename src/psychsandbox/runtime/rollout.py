@@ -12,7 +12,7 @@ from typing import Any
 
 from ..artifacts import write_json
 from ..domain import (
-    ClientState, RFTConfig, RolloutCandidateSummary, RolloutReward,
+    ClientState, CounselingCase, RFTConfig, RolloutCandidateSummary, RolloutReward,
     RolloutSelection, SessionMemory, SessionPlan, SessionRecord,
 )
 from ..evaluation.rollout import SessionRolloutEvaluator, compute_rollout_reward
@@ -94,7 +94,7 @@ class SessionRolloutRunner:
 
     async def run(
         self, *, run_id: str, plan: SessionPlan, memory: SessionMemory,
-        state: ClientState, previous: SessionRecord | None,
+        state: ClientState, case: CounselingCase, previous: SessionRecord | None,
         generate: GenerateSession, notify: Callable[[str], None],
     ) -> tuple[SessionRecord, SessionMemory]:
         batch_id = f"batch-{uuid.uuid4().hex[:12]}"
@@ -204,7 +204,9 @@ class SessionRolloutRunner:
                         try:
                             with model_diagnostic_scope(diagnostics):
                                 async with asyncio.timeout(self.config.judge_timeout_sec):
-                                    assessment = await self.evaluator.evaluate(candidate.session, memory)
+                                    report = await self.evaluator.evaluate(
+                                        candidate.session, case, memory
+                                    )
                             break
                         except ValueError:
                             if attempt >= self.config.judge_retries:
@@ -214,16 +216,14 @@ class SessionRolloutRunner:
                                 f"Session {plan.session_index} 候选 {candidate.summary.index}: "
                                 f"评分校验失败，第 {attempt}/{self.config.judge_retries} 次重试"
                             )
-                    candidate.summary.assessment = assessment
-                    if not assessment.safety_passed or assessment.counselor_safety.score < self.config.min_safety_score:
+                    candidate.summary.assessment = report
+                    verdict = candidate.session.safety_verdict
+                    if not verdict.passed:
                         candidate.summary.status = "rejected"
-                        candidate.summary.reason = f"评分安全门槛未通过：{assessment.safety_reason}"
-                    elif assessment.simulation_fidelity.score < self.config.min_fidelity_score:
-                        candidate.summary.status = "rejected"
-                        candidate.summary.reason = "来访者模拟可信度不足"
+                        candidate.summary.reason = "规则安全或披露检查未通过：" + "；".join(verdict.reasons)
                     else:
                         candidate.summary.reward = compute_rollout_reward(
-                            assessment, baseline, self.config,
+                            report, baseline, self.config,
                             baseline_session_index=selection.baseline_session_index,
                         )
                         candidate.summary.status = "eligible"
@@ -263,45 +263,79 @@ class SessionRolloutRunner:
             await _gather_and_drain([sample(candidate) for candidate in candidates])
             hold_if_crisis()
 
-            # Resample candidates whose generation failed (e.g. transient API errors)
-            # so a single network blip does not sink the whole batch.
+            seen: dict[str, int] = {}
             resampled = 0
-            while resampled < self.config.resample_limit:
-                failed = [c for c in candidates if c.summary.status == "generation_failed" and not c.replaced]
+
+            def reject_duplicates_and_safety() -> None:
+                for candidate in candidates:
+                    if candidate.summary.status != "generated":
+                        continue
+                    session = candidate.session
+                    if (
+                        session.end_reason == "safety_output_block"
+                        or any(r.get("client_leakage", {}).get("exposed_to_counselor") for r in session.turn_records)
+                    ):
+                        candidate.summary.status = "rejected"
+                        candidate.summary.reason = "规则安全或披露检查未通过"
+                    elif candidate.summary.dialogue_hash in seen:
+                        candidate.summary.status = "duplicate"
+                        candidate.summary.duplicate_of = seen[candidate.summary.dialogue_hash]
+                        candidate.summary.reason = "与已保留候选的双方对话完全相同，不重复评分"
+                    else:
+                        seen[candidate.summary.dialogue_hash] = candidate.summary.index
+                    save_candidate(candidate)
+
+            async def judge_pending() -> None:
+                await _gather_and_drain(
+                    [judge(c) for c in candidates if c.summary.status == "generated"]
+                )
+
+            async def resample_failed(statuses: set[str]) -> bool:
+                """Replace the first failed candidate, honoring the shared budget."""
+                nonlocal resampled
+                if resampled >= self.config.resample_limit:
+                    return False
+                failed = [
+                    c for c in candidates
+                    if c.summary.status in statuses and not c.replaced
+                ]
                 if not failed:
-                    break
+                    return False
                 failed[0].replaced = True
                 replacement = make_candidate(len(candidates) + 1)
                 save_candidate(replacement)
                 save_batch()
-                notify(f"Session {plan.session_index} 补采候选 {replacement.summary.index}（替换候选 {failed[0].summary.index}）")
+                notify(
+                    f"Session {plan.session_index} 补采候选 {replacement.summary.index}"
+                    f"（替换 {failed[0].summary.status} 候选 {failed[0].summary.index}）"
+                )
                 await _gather_and_drain([sample(replacement)])
                 resampled += 1
+                return True
+
+            # Resample generation-failed candidates first (e.g. transient API
+            # errors) so a single network blip does not sink the whole batch.
+            while resampled < self.config.resample_limit:
+                if not await resample_failed({"generation_failed"}):
+                    break
             if resampled:
                 hold_if_crisis()
 
-            seen: dict[str, int] = {}
-            for candidate in candidates:
-                if candidate.summary.status != "generated":
-                    continue
-                session = candidate.session
-                metrics = {m.name: m for m in session.supervisor_report.metrics} if session.supervisor_report else {}
-                required = [metrics.get(name) for name in ("ethics_and_safety", "hidden_information_leakage")]
-                if (
-                    session.end_reason == "safety_output_block"
-                    or any(m is None or m.score < 7 or m.violations for m in required)
-                    or any(r.get("client_leakage", {}).get("exposed_to_counselor") for r in session.turn_records)
-                ):
-                    candidate.summary.status = "rejected"
-                    candidate.summary.reason = "规则安全或披露检查未通过"
-                elif candidate.summary.dialogue_hash in seen:
-                    candidate.summary.status = "duplicate"
-                    candidate.summary.duplicate_of = seen[candidate.summary.dialogue_hash]
-                    candidate.summary.reason = "与已保留候选的双方对话完全相同，不重复评分"
-                else:
-                    seen[candidate.summary.dialogue_hash] = candidate.summary.index
-                save_candidate(candidate)
-            await _gather_and_drain([judge(c) for c in candidates if c.summary.status == "generated"])
+            reject_duplicates_and_safety()
+            await judge_pending()
+
+            # Scoring can also fail transiently (e.g. a judge API 500). If we
+            # still lack enough eligible candidates, resample those too.
+            while resampled < self.config.resample_limit:
+                eligible = [c for c in candidates if c.summary.status == "eligible"]
+                if len(eligible) >= self.config.min_eligible:
+                    break
+                if not await resample_failed({"scoring_failed"}):
+                    break
+                hold_if_crisis()
+                reject_duplicates_and_safety()
+                await judge_pending()
+
             eligible = [c for c in candidates if c.summary.status == "eligible"]
             if len(eligible) < self.config.min_eligible:
                 selection.status = "failed"
