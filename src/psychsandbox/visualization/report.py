@@ -226,7 +226,7 @@ def _session_section(session: SessionRecord) -> str:
     </div>
   </div>
   {summary_html}
-  <div class="session-grid">
+  <div class="session-sections">
     <div>
       <h4>纵向判断</h4>
       <div class="trend"><span>趋势</span><strong>{escape(trend)}</strong></div>
@@ -612,6 +612,7 @@ color:#3730a3;border-radius:99px;padding:4px 12px;font-weight:700;font-size:13px
 .score{font-size:38px;font-weight:800;color:var(--blue)}
 .score small{font-size:14px;color:var(--muted)}
 .session-grid{display:grid;grid-template-columns:1.35fr 1fr;gap:28px;padding:18px 0}
+.session-sections{display:grid;grid-template-columns:1fr;gap:28px;padding:18px 0}
 
 /* ---- Metrics ---- */
 .metric{margin:12px 0}

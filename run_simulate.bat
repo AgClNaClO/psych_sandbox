@@ -18,7 +18,7 @@ if errorlevel 1 (
 )
 
 rem 执行模拟指令
-psych-sandbox simulate --case psycheval-cbt-001 --sessions 1 --rollouts 3 --rollout-concurrency 2 --judge-concurrency 2
+psych-sandbox simulate --case psycheval-cbt-001 --sessions 3 --rollouts 3 --rollout-concurrency 2 --judge-concurrency 2
 
 rem 结束前暂停，方便查看运行结果
 echo.
