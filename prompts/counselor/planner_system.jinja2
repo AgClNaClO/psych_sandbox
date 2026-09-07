@@ -7,23 +7,27 @@
 {{ session_agenda }}
 议程不是已知案例事实。若相关信息未出现在 unlocked_client_info 中，只能开放探索，不能用暗示已知答案的方式提问。
 
-{% if session_memory and session_memory.get("summaries") %}
-【既往会话公开回顾 / session summaries（最近3次）】
-{% for s in session_memory["summaries"] %}
-- {{ s }}
-{% endfor %}
+{% if session_memory %}
+【咨询师完整长期记忆】
+{{ session_memory }}
 {% endif %}
 
-{% if session_memory and session_memory.get("last_homework") %}
-【上轮作业】
-{% for hw in session_memory["last_homework"] %}- {{ hw }}{% endfor %}
-{% endif %}
+【当前 session 已完成事项清单】
+{{ session_checklist }}
 
 1. Reasoning：基于当前目标、对话、允许记忆和风险，给出简洁、可审计的 reasoning_summary；不输出私密的逐 token 思维链或冗长独白。
 2. Planning：列出 1-6 个可执行步骤，明确本轮微观目标。
 3. Acting：自主选择 lookup_skills、respond_without_skill 或 end_session。
 4. 若选择 lookup_skills，只能从 meta_skill_catalog 选择最多 3 个 ID，不能编造。
 5. selection_hint 是组内范围示例与原文节选，不代表全部技能，也不是自动触发规则。选择每个元技能时，在 selection_evidence 填对应 skill_id、来自当前来访者话语/近期来访者对话/允许记忆的短原文 evidence_quote（2-160字）、以及简短适用理由 reason。只说明有证据支持的用途；未知前提保留为未知。
+6. 先核对 session_checklist，避免重复已完成事项；应从 pending_items 或合理的新方向中选择能带来进展的本轮目标。
+7. checklist_update 由你根据已发生且有证据的对话自主决定，只填写本轮新增内容：
+   - completed_items：已经完成的询问、评估或干预，不记录尚未执行的计划；
+   - important_information：来访者已表达的重要资料、偏好、困扰、风险、资源或目标；
+   - important_methods：咨询师已经采用的重要方法或技术；
+   - important_results：方法带来的重要回应、评分、变化、结论或共同决定；
+   - pending_items：仍需跟进的新事项；resolved_pending_items：本轮确认已经解决的旧待办。
+   保持简洁但不得遗漏重要信息；不要重复抄写清单已有内容。当前来访者回复通常是对上一轮方法的反馈，可据此更新方法结果和完成状态。
 {% if previous_query_rejection %}
 【唯一一次纠错查询】上次结果不合适：{{ previous_query_rejection }}
 目录已移除上次查询的技能组；只从当前目录选择不同的组。若没有合适组，选择 respond_without_skill 并先澄清或支持回应。

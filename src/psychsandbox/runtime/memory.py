@@ -1,6 +1,37 @@
 from __future__ import annotations
 
-from ..domain import SessionMemory, SessionPlan, SessionRecord, SessionStage
+from ..domain import (
+    SessionChecklist,
+    SessionChecklistUpdate,
+    SessionMemory,
+    SessionPlan,
+    SessionRecord,
+    SessionStage,
+)
+
+
+def _unique(items: list[str]) -> list[str]:
+    return list(dict.fromkeys(item.strip() for item in items if item.strip()))
+
+
+def merge_session_checklist(
+    current: SessionChecklist,
+    update: SessionChecklistUpdate,
+) -> SessionChecklist:
+    """Apply one model-selected delta without allowing earlier entries to vanish."""
+
+    resolved = {item.strip() for item in update.resolved_pending_items if item.strip()}
+    pending = [item for item in current.pending_items if item not in resolved]
+    pending.extend(update.pending_items)
+    return SessionChecklist(
+        completed_items=_unique(current.completed_items + update.completed_items),
+        important_information=_unique(
+            current.important_information + update.important_information
+        ),
+        important_methods=_unique(current.important_methods + update.important_methods),
+        important_results=_unique(current.important_results + update.important_results),
+        pending_items=_unique(pending),
+    )
 
 
 def _supervisor_feedback(session: SessionRecord) -> list[str]:
@@ -41,6 +72,11 @@ class MemoryConsolidator:
             not in (None, "unchanged")
         ]
         unresolved = list(memory.unresolved_topics)
+        clinical_summary = session.clinical_summary
+        if clinical_summary:
+            completed = set(clinical_summary.completed_items)
+            unresolved = [item for item in unresolved if item not in completed]
+            unresolved.extend(clinical_summary.pending_items)
         if session.end_reason == "max_turns":
             unresolved.extend(session.plan.objectives[:1])
         return memory.model_copy(
@@ -52,6 +88,10 @@ class MemoryConsolidator:
                 "interventions_used": list(
                     dict.fromkeys(memory.interventions_used + session.interventions_used)
                 ),
+                "homework": list(dict.fromkeys(
+                    memory.homework
+                    + (clinical_summary.homework if clinical_summary else [])
+                )),
                 "risk_history": memory.risk_history
                 + [event.level.value for event in session.risk_events if event.level.value != "low"],
                 "supervisor_feedback": memory.supervisor_feedback + feedback,

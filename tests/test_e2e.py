@@ -8,7 +8,14 @@ from pathlib import Path
 
 import pytest
 
-from psychsandbox.domain import SandboxConfig, SkillStatus, SkillVersion, StaticTraits
+from psychsandbox.domain import (
+    CounselorPlanning,
+    SandboxConfig,
+    SessionChecklistUpdate,
+    SkillStatus,
+    SkillVersion,
+    StaticTraits,
+)
 from psychsandbox.evolution import SkillEvolutionManager
 from psychsandbox.model_client import ModelGateway
 from psychsandbox.runtime import CounselingSandbox, SQLiteStore
@@ -109,6 +116,93 @@ def test_e7_e8_e9_feed_counselor_review_before_next_session(root, tmp_path, repo
     assert persisted is not None
     assert persisted.unlocked_client_info.main_problem == "最近总担心自己出错"
     assert len(persisted.clinical_summaries) == 2
+
+
+def test_session_checklist_is_local_then_archived_into_complete_memory(
+    root, tmp_path, repository
+):
+    class ChecklistGateway(DeterministicGateway):
+        def __init__(self):
+            self.planning_payloads: list[dict] = []
+            self.summary_payloads: list[dict] = []
+
+        async def complete_structured(self, **kwargs):
+            schema = kwargs["output_schema"]
+            payload = kwargs["input_payload"]
+            result = await super().complete_structured(**kwargs)
+            if schema is CounselorPlanning:
+                self.planning_payloads.append(payload)
+                turn = int(payload["counselor_turn_count"])
+                update = (
+                    SessionChecklistUpdate(pending_items=["确认希望的称呼"])
+                    if turn == 0
+                    else SessionChecklistUpdate(
+                        completed_items=["确认希望的称呼"],
+                        important_information=["来访者希望称呼为明山"],
+                        important_methods=["使用开放式问题确认称呼"],
+                        important_results=["双方确认后续使用明山这一称呼"],
+                        pending_items=["讨论压力对睡眠的影响"],
+                        resolved_pending_items=["确认希望的称呼"],
+                    )
+                )
+                return result.model_copy(update={"checklist_update": update})
+            if schema.__name__ == "_SessionSummaryWrapper":
+                self.summary_payloads.append(payload)
+                summary = result.session_summary.model_copy(update={
+                    "homework": ["记录一次压力事件"],
+                    "important_information": [],
+                    "important_methods": [],
+                    "important_results": [],
+                    "completed_items": [],
+                    "pending_items": [],
+                })
+                return result.model_copy(update={"session_summary": summary})
+            return result
+
+    gateway = ChecklistGateway()
+    config = SandboxConfig(
+        project_root=root,
+        max_turns_per_session=2,
+        database_path=tmp_path / "checklist.sqlite3",
+        trace_dir=tmp_path / "checklist-traces",
+    )
+    sandbox = CounselingSandbox(config, gateway=gateway, repository=repository)
+
+    result = asyncio.run(sandbox.run_case("psycheval-cbt-002", session_count=2))
+
+    first_session_payloads = [
+        item for item in gateway.planning_payloads if item["session_index"] == 1
+    ]
+    second_session_payloads = [
+        item for item in gateway.planning_payloads if item["session_index"] == 2
+    ]
+    assert first_session_payloads[0]["session_checklist"]["pending_items"] == []
+    assert first_session_payloads[1]["session_checklist"]["pending_items"] == [
+        "确认希望的称呼"
+    ]
+    assert all(
+        not values
+        for values in second_session_payloads[0]["session_checklist"].values()
+    )
+
+    first_summary = gateway.summary_payloads[0]["session_checklist"]
+    assert first_summary["important_information"] == ["来访者希望称呼为明山"]
+    assert first_summary["important_methods"] == ["使用开放式问题确认称呼"]
+    assert first_summary["important_results"] == ["双方确认后续使用明山这一称呼"]
+    assert first_summary["completed_items"] == ["确认希望的称呼"]
+    assert first_summary["pending_items"] == ["讨论压力对睡眠的影响"]
+
+    archived = result.final_memory.clinical_summaries[0]
+    assert archived.important_information == ["来访者希望称呼为明山"]
+    assert archived.important_methods == ["使用开放式问题确认称呼"]
+    assert archived.important_results == ["双方确认后续使用明山这一称呼"]
+    assert archived.completed_items == ["确认希望的称呼"]
+    assert archived.pending_items == ["讨论压力对睡眠的影响"]
+    assert "讨论压力对睡眠的影响" in result.final_memory.unresolved_topics
+    assert "记录一次压力事件" in result.final_memory.homework
+    assert second_session_payloads[0]["session_memory"]["clinical_summaries"][0][
+        "important_information"
+    ] == ["来访者希望称呼为明山"]
 
 
 def test_each_turn_has_safety_and_decision(sandbox):

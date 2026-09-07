@@ -33,6 +33,7 @@ from ..domain import (
     RunResult,
     RFTConfig,
     SandboxConfig,
+    SessionChecklist,
     SessionMemory,
     SessionPlan,
     SessionRecord,
@@ -44,7 +45,7 @@ from ..skills import SkillCatalog, SkillRegistry
 from ..therapies import normalize_therapy_id
 from .disclosure import DisclosureGate
 from .run_management import available_run_dir
-from .memory import MemoryConsolidator
+from .memory import MemoryConsolidator, merge_session_checklist
 from .memory_pipeline import (
     ClientMergeAgent,
     DialogueSummaryAgent,
@@ -477,6 +478,7 @@ class CounselingSandbox:
         initial = state.model_copy(deep=True)
         session_started_at = time.monotonic()
         messages: list[Message] = []
+        session_checklist = SessionChecklist()
         decisions, risks, interventions, new_fact_ids, turn_records = [], [], [], [], []
         recent_signals: list[ClientTurnSignal] = []
         end_reason = "max_turns"
@@ -488,6 +490,7 @@ class CounselingSandbox:
                     "decisions": [d.model_dump(mode="json") for d in decisions],
                     "turn_records": list(turn_records),
                     "state": state.model_dump(mode="json"),
+                    "session_checklist": session_checklist.model_dump(mode="json"),
                 })
 
         save_progress()
@@ -512,6 +515,11 @@ class CounselingSandbox:
                 recent_messages=[m.model_dump(mode="json") for m in messages],
                 risk=risk,
                 counselor_turn_count=turn_index - 1,
+                session_checklist=session_checklist,
+            )
+            session_checklist = merge_session_checklist(
+                session_checklist,
+                counselor_turn.planning.checklist_update,
             )
             output_risk = self.safety.assess_output(counselor_turn.response, risk)
             risks.append(output_risk)
@@ -539,6 +547,7 @@ class CounselingSandbox:
                     "state_before": state_before,
                     "state_after": state_before,
                     "state_update": {"rule_delta": {}, "model_signal_delta": {}},
+                    "session_checklist": session_checklist.model_dump(mode="json"),
                 })
                 end_reason = "imminent_risk" if risk.requires_immediate_stop else "safety_output_block"
                 save_progress()
@@ -594,6 +603,7 @@ class CounselingSandbox:
                 "state_before": state_before,
                 "state_after": state.model_dump(mode="json"),
                 "state_update": state_delta,
+                "session_checklist": session_checklist.model_dump(mode="json"),
             })
             save_progress()
             if turn_progress:
@@ -750,6 +760,11 @@ class CounselingSandbox:
             session.messages,
             plan,
             therapy_codes,
+            SessionChecklist.model_validate(
+                session.turn_records[-1].get("session_checklist", {})
+                if session.turn_records
+                else {}
+            ),
         )
 
     def _sync_jsonl(self, run_id: str) -> None:

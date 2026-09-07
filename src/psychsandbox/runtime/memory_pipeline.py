@@ -9,6 +9,7 @@ from ..domain import (
     ExtractedClientInfo,
     UnlockedClientInfo,
     Message,
+    SessionChecklist,
     SessionPlan,
     StaticTraits,
 )
@@ -108,7 +109,9 @@ class DialogueSummaryAgent:
         dialogue: list[Message],
         plan: SessionPlan,
         theory_select: list[str],
+        session_checklist: SessionChecklist | None = None,
     ) -> ClinicalSummary:
+        checklist = session_checklist or SessionChecklist()
         summary_payload = {
             "theory_select": theory_select,
             "session_index": session_index,
@@ -118,6 +121,7 @@ class DialogueSummaryAgent:
             },
             "session_dialogue": _format_dialogue(dialogue),
             "plan": plan.model_dump(mode="json"),
+            "session_checklist": checklist.model_dump(mode="json"),
         }
         result = await self.gateway.complete_structured(
             role="summarizer",
@@ -128,7 +132,19 @@ class DialogueSummaryAgent:
         )
         summary = _SessionSummaryWrapper.model_validate(result).session_summary
         summary.session_index = session_index
-        return summary
+        checklist_fields = (
+            "completed_items",
+            "important_information",
+            "important_methods",
+            "important_results",
+            "pending_items",
+        )
+        return summary.model_copy(update={
+            field: list(dict.fromkeys(
+                getattr(checklist, field) + getattr(summary, field)
+            ))
+            for field in checklist_fields
+        })
 
 
 def _format_dialogue(dialogue: list[Message]) -> str:

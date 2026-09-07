@@ -12,6 +12,7 @@ from ..domain import (
     CounselorTurn,
     RiskAssessment,
     RiskLevel,
+    SessionChecklist,
     SessionMemory,
     SessionPlan,
     SessionRecord,
@@ -63,9 +64,11 @@ class CounselorAgent:
         recent_messages: list[dict],
         risk: RiskAssessment,
         counselor_turn_count: int,
+        session_checklist: SessionChecklist | None = None,
     ) -> dict:
         """Build the strict counselor view; a full ClientProfile never enters it."""
         therapy_profile = get_therapy_profile(plan.therapy)
+        allowed_memory = self._allowed_memory_payload(memory)
         return {
             "therapy": plan.therapy,
             "therapy_name": therapy_profile.display_name,
@@ -77,10 +80,7 @@ class CounselorAgent:
             "strategy_from_previous_review": plan.strategy,
             "target_meta_skill_ids": plan.target_meta_skill_ids,
             "forbidden_actions": plan.forbidden_actions,
-            "unlocked_client_info": memory.unlocked_client_info.model_dump(
-                mode="json",
-                exclude={"static_traits": {"language_features"}},
-            ),
+            "unlocked_client_info": allowed_memory.pop("unlocked_client_info"),
             "session_agenda": {
                 "objectives": plan.objectives,
                 "instruction": (
@@ -88,17 +88,10 @@ class CounselorAgent:
                     "unlocked_client_info，必须用开放式探索，不得按已知事实发问。"
                 ),
             },
-            "session_memory": {
-                "summaries": memory.summaries[-3:],
-                "clinical_summaries": [
-                    item.model_dump(mode="json")
-                    for item in memory.clinical_summaries[-3:]
-                ],
-                "unresolved_topics": memory.unresolved_topics,
-                "homework": memory.homework,
-                "risk_history": memory.risk_history,
-                "supervisor_feedback": memory.supervisor_feedback[-2:],
-            },
+            "session_memory": allowed_memory,
+            "session_checklist": (
+                session_checklist or SessionChecklist()
+            ).model_dump(mode="json"),
             "client_message": client_message,
             "recent_messages": recent_messages[-8:],
             "risk_level": risk.level.value,
@@ -115,6 +108,7 @@ class CounselorAgent:
         recent_messages: list[dict],
         risk: RiskAssessment,
         counselor_turn_count: int,
+        session_checklist: SessionChecklist | None = None,
     ) -> CounselorTurn:
         guarded = self._guarded_turn(
             client_message=client_message,
@@ -131,6 +125,7 @@ class CounselorAgent:
             recent_messages=recent_messages,
             risk=risk,
             counselor_turn_count=counselor_turn_count,
+            session_checklist=session_checklist,
         )
         planning, observation, candidates, warnings = await self._query_skills(
             context=context, plan=plan, risk=risk, excluded_meta_ids=set()
@@ -333,9 +328,8 @@ class CounselorAgent:
         ):
             values.extend(cls._strings(profile.get(key, {})))
         values.extend(fact.get("content", "") for fact in profile.get("facts", []))
-        memory = context.get("session_memory", {})
-        for key in ("summaries", "confirmed_goals", "unresolved_topics", "supervisor_feedback"):
-            values.extend(cls._strings(memory.get(key, [])))
+        values.extend(cls._strings(context.get("session_memory", {})))
+        values.extend(cls._strings(context.get("session_checklist", {})))
         return [cls._normalize_text(item) for item in values if str(item).strip()]
 
     @classmethod
@@ -413,18 +407,7 @@ class CounselorAgent:
             "counselor_decisions": [
                 item.model_dump(mode="json") for item in session.decisions
             ],
-            "allowed_memory": {
-                "summaries": memory.summaries[-3:],
-                "clinical_summaries": [
-                    item.model_dump(mode="json")
-                    for item in memory.clinical_summaries[-3:]
-                ],
-                "unlocked_client_info": memory.unlocked_client_info.model_dump(
-                    mode="json",
-                    exclude={"static_traits": {"language_features"}},
-                ),
-                "unresolved_topics": memory.unresolved_topics,
-            },
+            "allowed_memory": self._allowed_memory_payload(memory),
             "baseline_next_plan": self._safe_plan_payload(baseline_next),
             "next_meta_skill_catalog": [
                 item.model_dump(mode="json") for item in next_meta
@@ -456,6 +439,18 @@ class CounselorAgent:
                     review.unmet_objectives or session.plan.objectives
                 )[:8]
         return review
+
+    @staticmethod
+    def _allowed_memory_payload(memory: SessionMemory) -> dict:
+        """Return all counselor-visible longitudinal memory and no private profile."""
+
+        return memory.model_dump(
+            mode="json",
+            exclude={
+                "migration_warnings": True,
+                "unlocked_client_info": {"static_traits": {"language_features"}},
+            },
+        )
 
     @staticmethod
     def _safe_plan_payload(plan: SessionPlan) -> dict:

@@ -7,6 +7,7 @@
 【对话记录】
 {{ session_dialogue }}
 【会话计划】{{ plan }}
+【本 session 最终已完成事项清单】{{ session_checklist }}
 
 核心原则：
 1. 督导视角下的临床现实性原则：最终写入报告的每一句分析和结论，都必须在当前
@@ -16,4 +17,8 @@
 4. theory_select 决定使用的流派框架；不存在的流派字段保持空。
 5. 下次会话计划（目标完成度、下一步 focus、家庭作业）应结合本轮证据与未尽议题，
    而不是机械重复原计划。
+6. 结合完整对话校正并补全清单，将所有重要内容分别写入 important_information、
+   important_methods、important_results、completed_items 和 pending_items；清单只是线索，
+   对话是最终依据。重要方法必须写明实际采用的技术，重要结果必须写明来访者反应、
+   量化结果、共同决定或有效/无效结论，不能只写笼统评价。
 输出只返回一个 JSON 对象（键名 session_summary），必须可被 json.loads 解析。

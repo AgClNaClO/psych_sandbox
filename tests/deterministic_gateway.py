@@ -362,6 +362,7 @@ def _merged_client_profile(payload: dict[str, Any]) -> dict[str, Any]:
 def _clinical_summary(payload: dict[str, Any]) -> dict[str, Any]:
     session_index = int(payload.get("session_index", 1))
     session_focus = payload.get("session_focus", {})
+    checklist = payload.get("session_checklist", {})
     objectives = "; ".join(session_focus.get("objective", []))
     return {
         "session_index": session_index,
@@ -383,6 +384,11 @@ def _clinical_summary(payload: dict[str, Any]) -> dict[str, Any]:
             "target_behavior": "",
         },
         "homework": [],
+        "important_information": checklist.get("important_information", []),
+        "important_methods": checklist.get("important_methods", []),
+        "important_results": checklist.get("important_results", []),
+        "completed_items": checklist.get("completed_items", []),
+        "pending_items": checklist.get("pending_items", []),
     }
 
 

@@ -22,6 +22,7 @@ from psychsandbox.domain import (
     ClientState,
     ClientTurnSignal,
     ClientUtterance,
+    ClinicalSummary,
     CounselorAction,
     CounselorActorOutput,
     CounselorDecision,
@@ -37,6 +38,8 @@ from psychsandbox.domain import (
     TrustChange,
     TrustTier,
     SessionMemory,
+    SessionChecklist,
+    SessionChecklistUpdate,
     SessionStage,
     SkillSelectionConfig,
     SkillSelectionEvidence,
@@ -46,6 +49,7 @@ from psychsandbox.domain import (
 from tests.deterministic_gateway import DeterministicGateway
 from psychsandbox.runtime import DisclosureGate, StateUpdater
 from psychsandbox.runtime.leakage import PrematureDisclosureGuard
+from psychsandbox.runtime.memory import merge_session_checklist
 from psychsandbox.runtime.memory_pipeline import _prevent_global_backfill
 from psychsandbox.skills import SkillCatalog, SkillRegistry
 from psychsandbox.skills.selection import SkillCandidateFilter
@@ -253,6 +257,68 @@ def test_counselor_payload_has_no_full_profile(sample_case):
     assert sample_case.profile.core_demands not in dumped
     for fact in sample_case.profile.disclosure_items:
         assert fact.content not in dumped
+
+
+def test_session_checklist_merges_model_updates_without_losing_prior_items():
+    current = SessionChecklist(
+        important_information=["来访者希望称呼为明山"],
+        pending_items=["确认当前压力强度", "讨论睡眠影响"],
+    )
+
+    updated = merge_session_checklist(
+        current,
+        SessionChecklistUpdate(
+            completed_items=["确认当前压力强度"],
+            important_methods=["使用0-10分量表评估压力"],
+            important_results=["压力强度为8分"],
+            resolved_pending_items=["确认当前压力强度"],
+        ),
+    )
+
+    assert updated.important_information == ["来访者希望称呼为明山"]
+    assert updated.completed_items == ["确认当前压力强度"]
+    assert updated.important_methods == ["使用0-10分量表评估压力"]
+    assert updated.important_results == ["压力强度为8分"]
+    assert updated.pending_items == ["讨论睡眠影响"]
+
+
+def test_counselor_payload_contains_current_checklist_and_complete_memory(sample_case):
+    clinical_summaries = [
+        ClinicalSummary(
+            session_index=index,
+            important_information=[f"第{index}次会谈的重要信息"],
+        )
+        for index in range(1, 5)
+    ]
+    memory = SessionMemory(
+        case_id=sample_case.case_id,
+        summaries=[f"摘要{index}" for index in range(1, 5)],
+        clinical_summaries=clinical_summaries,
+        unlocked_client_info=UnlockedClientInfo(client_id=sample_case.profile.client_id),
+        homework=["记录一次压力事件"],
+        interventions_used=["skill-1"],
+        relationship_events=["session=1,trust_change=increased"],
+        last_client_closing="我愿意试试看",
+    )
+    checklist = SessionChecklist(pending_items=["确认希望的称呼"])
+
+    payload = CounselorAgent(DeterministicGateway()).build_context_payload(
+        memory=memory,
+        plan=sample_case.global_plan[0],
+        client_message="你好",
+        recent_messages=[],
+        risk=RiskAssessment(level=RiskLevel.LOW),
+        counselor_turn_count=0,
+        session_checklist=checklist,
+    )
+
+    assert payload["session_checklist"] == checklist.model_dump(mode="json")
+    assert payload["session_memory"]["summaries"] == memory.summaries
+    assert len(payload["session_memory"]["clinical_summaries"]) == 4
+    assert payload["session_memory"]["homework"] == ["记录一次压力事件"]
+    assert payload["session_memory"]["interventions_used"] == ["skill-1"]
+    assert payload["session_memory"]["relationship_events"]
+    assert payload["session_memory"]["last_client_closing"] == "我愿意试试看"
 
 
 def test_e8_cannot_backfill_unspoken_core_demands_from_global_truth():
