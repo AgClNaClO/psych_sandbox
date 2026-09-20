@@ -6,21 +6,11 @@ from typing import Any
 
 from ..domain import (
     HolisticEvaluationReport,
+    Message,
     RolloutSelection,
     RunResult,
     ScaleScore,
     SessionRecord,
-)
-from .charts import state_line_chart
-
-
-PROCESS_STEPS = (
-    ("会谈准备", "读取允许记忆、阶段与目标"),
-    ("咨询师 ReAct", "规划 → 查询技能 → 观察 → 选策略 → 回复"),
-    ("双重安全门", "输入风险与输出边界检查"),
-    ("来访者反应", "披露门控 → 反应 → 行为/抗拒 → 表达"),
-    ("状态更新", "信任、痛苦、希望与抗拒"),
-    ("会后闭环", "咨询师自评 → 未达目标再规划 → 规则督导与纵向趋势"),
 )
 
 ICON_BRAIN = (
@@ -45,6 +35,44 @@ ICON_STETHOSCOPE = (
     '<path d="M22 12v2a4 4 0 0 1-8 0v-6"/><circle cx="6" cy="14" r="2"/>'
     '<line x1="6" y1="16" x2="6" y2="20"/><line x1="4" y1="20" x2="8" y2="20"/></svg>'
 )
+
+
+def _skill_name_map() -> dict[str, str]:
+    """Map skill IDs to their existing display names (read-only).
+
+    The registry is loaded strictly for display naming; recorded skill IDs in the
+    report data are never modified. IDs without a name field fall back to the ID
+    itself so no information is silently dropped.
+    """
+    try:
+        from ..skills.registry import SkillRegistry
+
+        root = Path(__file__).resolve().parents[3]
+        registry = SkillRegistry.from_project(root)
+        names = {
+            skill_id: skill.name
+            for skill_id, skill in registry.atomic_skills.items()
+        }
+        names.update(
+            {
+                meta_id: meta.name
+                for meta_id, meta in registry.meta_skills.items()
+            }
+        )
+        return names
+    except Exception:
+        return {}
+
+
+_SKILL_NAMES: dict[str, str] | None = None
+
+
+def _skill_name_for(skill_id: str) -> str:
+    """Return the display name for a skill ID (fallback: the ID itself)."""
+    global _SKILL_NAMES
+    if _SKILL_NAMES is None:
+        _SKILL_NAMES = _skill_name_map()
+    return _SKILL_NAMES.get(skill_id, skill_id)
 
 
 def generate_run_report(result: RunResult, output: Path) -> Path:
@@ -99,17 +127,13 @@ def generate_run_report(result: RunResult, output: Path) -> Path:
     {_summary_card("暴露泄漏", str(leaks), "越低越好", "🔒")}
   </section>
   {holistic_html}
-  <section class="panel">
-    <h2>运行过程</h2>
-    <div class="process">{_process_flow()}</div>
-  </section>
-  <section class="panel">
-    <h2>来访者状态趋势</h2>
-    <p class="muted">以下均为 0–1 仿真变量，不是临床量表分数。</p>
-    <div class="chart">{state_line_chart(result.sessions)}</div>
-  </section>
-  <section>
-    <h2>会谈明细</h2>
+  <section class="panel sessions">
+    <div class="sessions-head">
+      <h2>会谈明细</h2>
+      <nav class="session-nav" aria-label="跳转到会谈">
+        {''.join(_session_nav(item) for item in result.sessions)}
+      </nav>
+    </div>
     {''.join(_session_section(item) for item in result.sessions)}
   </section>
 </main>
@@ -119,6 +143,14 @@ def generate_run_report(result: RunResult, output: Path) -> Path:
     return output
 
 
+def _session_nav(session: SessionRecord) -> str:
+    """A jump button for one session block."""
+    return (
+        f'<a class="session-nav-btn" href="#session-{session.session_index}">'
+        f'Session {session.session_index}</a>'
+    )
+
+
 def _summary_card(label: str, value: str, note: str, icon: str) -> str:
     return (
         '<div class="summary-card">'
@@ -126,19 +158,6 @@ def _summary_card(label: str, value: str, note: str, icon: str) -> str:
         f"<span>{escape(label)}</span><strong>{escape(value)}</strong>"
         f"<small>{escape(note)}</small></div>"
     )
-
-
-def _process_flow() -> str:
-    parts = []
-    for index, (title, description) in enumerate(PROCESS_STEPS, start=1):
-        parts.append(
-            '<div class="process-step">'
-            f"<strong>{ICON_BRAIN}{index}. {escape(title)}</strong>"
-            f"<span>{escape(description)}</span></div>"
-        )
-        if index < len(PROCESS_STEPS):
-            parts.append('<div class="arrow">→</div>')
-    return "".join(parts)
 
 
 def _holistic_section(report: HolisticEvaluationReport | None) -> str:
@@ -191,9 +210,6 @@ def _session_summary_text(session: SessionRecord) -> str:
 
 
 def _session_section(session: SessionRecord) -> str:
-    longitudinal = session.longitudinal_report
-    trend = longitudinal.trend if longitudinal else "n/a"
-    action = longitudinal.stage_action if longitudinal else "n/a"
     review = session.counselor_review
     review_status = (
         "暂无"
@@ -213,11 +229,10 @@ def _session_section(session: SessionRecord) -> str:
         or "<li>暂无咨询师会后自评</li>"
     )
     summary_html = _session_summary_text(session)
-    # Build thinking summary from turn records
-    thinking_cards = _session_thinking_summary(session)
+    turn_blocks = _session_turn_blocks(session)
 
     return f"""
-<article class="session">
+<article class="session" id="session-{session.session_index}">
   <div class="session-head">
     <div>
       <span class="badge">Session {session.session_index}</span>
@@ -228,29 +243,19 @@ def _session_section(session: SessionRecord) -> str:
   {summary_html}
   <div class="session-sections">
     <div>
-      <h4>纵向判断</h4>
-      <div class="trend"><span>趋势</span><strong>{escape(trend)}</strong></div>
-      <div class="trend"><span>阶段动作</span><strong>{escape(action)}</strong></div>
-      {_delta_table(session)}
-    </div>
-    <div>
       <h4>咨询师会后自评：{escape(review_status)}</h4>
       <ul>{review_html}</ul>
     </div>
   </div>
   {_rollout_selection(session.rollout_selection)}
-  <details>
+  <details class="audit">
     <summary>{ICON_BRAIN} 咨询师可审计规划与决策（{len(session.turn_records)} turns）</summary>
-    <p class="muted">以下展示模型或规则明确输出的决策摘要、执行步骤和交互信号，不是内部逐 token 思维链。</p>
-    <div class="thinking-grid">{thinking_cards}</div>
+    <p class="muted">以下展示模型或规则明确输出的决策摘要、执行步骤和交互信号，不是内部逐 token 思维链。每个 turn 的规划与决策与其对应对话并排展示。</p>
+    <div class="turn-blocks">{turn_blocks}</div>
   </details>
   <details open>
     <summary>{ICON_CHAT} 对话记录</summary>
     <div class="dialogue">{_dialogue(session)}</div>
-  </details>
-  <details>
-    <summary>查看逐轮技术细节（{len(session.turn_records)} turns）</summary>
-    {_turn_timeline(session)}
   </details>
 </article>"""
 
@@ -308,90 +313,93 @@ def _rollout_selection(selection: RolloutSelection | None) -> str:
 
 def _session_thinking_summary(session: SessionRecord) -> str:
     """Render explicit decision summaries; never provider-internal reasoning."""
-    cards = []
-    for record in session.turn_records:
-        decision = record.get("decision", {})
-        planning = record.get("planning", {})
-        observation = record.get("observation", {})
-        turn = record.get("turn_index", "?")
-        assessment = decision.get("assessment", "")
-        strategy = decision.get("strategy", "")
-        state_obs = decision.get("state_observation", "")
-        skills = decision.get("selected_atomic_skill_ids", [])
-        risk = decision.get("risk_level", "low")
-        progress = decision.get("goal_progress", 0)
-        reasoning = planning.get("reasoning_summary", "")
-        current_goal = planning.get("current_goal", "")
-        action_input = planning.get("action_input", "")
-        action_name = planning.get("action", "—")
-        plan_steps = planning.get("plan_steps", [])
-        observation_status = observation.get("status", "—")
-        observed_count = len(observation.get("atomic_skills", []))
-
-        risk_class = ""
-        risk_label = ""
-        if risk == "high":
-            risk_class = "risk-high"
-            risk_label = "🔴 高风险"
-        elif risk == "medium":
-            risk_class = "risk-medium"
-            risk_label = "🟡 中风险"
-        elif risk == "imminent":
-            risk_class = "risk-imminent"
-            risk_label = "🚨 紧急"
-        else:
-            risk_class = "risk-low"
-            risk_label = "🟢 低风险"
-
-        cards.append(
-            '<div class="thinking-card">'
-            f'<div class="thinking-header">'
-            f'<span class="thinking-badge">Turn {escape(str(turn))}</span>'
-            f'<span class="risk-tag {risk_class}">{risk_label}</span>'
-            f'<span class="progress-tag">目标进度 {progress:.0%}</span>'
-            f'</div>'
-            f'<div class="thinking-body">'
-            f'<div class="thinking-item">'
-            f'<strong>🧭 决策摘要 / Planning</strong>'
-            f'<p>{escape(reasoning)}</p>'
-            f'<p><b>本轮目标：</b>{escape(current_goal)}</p>'
-            f'<p>{escape(" → ".join(plan_steps))}</p>'
-            f'</div>'
-            f'<div class="thinking-item">'
-            f'<strong>⚙️ Action / Observation</strong>'
-            f'<p>{escape(str(action_name))} → {escape(str(observation_status))} '
-            f'({observed_count} skills)</p>'
-            f'<p>{escape(action_input)}</p>'
-            f'</div>'
-            f'<div class="thinking-item">'
-            f'<strong>📋 评估</strong>'
-            f'<p>{escape(assessment)}</p>'
-            f'</div>'
-            f'<div class="thinking-item">'
-            f'<strong>🔍 状态观察</strong>'
-            f'<p>{escape(state_obs)}</p>'
-            f'</div>'
-            f'<div class="thinking-item">'
-            f'<strong>🎯 策略</strong>'
-            f'<p>{escape(strategy)}</p>'
-            f'</div>'
-            + (
-                f'<div class="thinking-item skills">'
-                f'<strong>🛠 使用技能</strong>'
-                f'<div class="skill-tags">'
-                + "".join(
-                    f'<span class="skill-tag">{escape(s)}</span>'
-                    for s in skills
-                )
-                + "</div></div>"
-                if skills
-                else ""
-            )
-            + _skill_query_audit(record)
-            + _client_decision_summary(record)
-            + "</div></div>"
-        )
+    cards = [_turn_decision_card(record) for record in session.turn_records]
     return "".join(cards) if cards else '<p class="muted">暂无决策摘要</p>'
+
+
+def _turn_decision_card(record: dict[str, Any]) -> str:
+    """Render one turn's auditable planning/decision card."""
+    decision = record.get("decision", {})
+    planning = record.get("planning", {})
+    observation = record.get("observation", {})
+    turn = record.get("turn_index", "?")
+    assessment = decision.get("assessment", "")
+    strategy = decision.get("strategy", "")
+    state_obs = decision.get("state_observation", "")
+    skills = decision.get("selected_atomic_skill_ids", [])
+    risk = decision.get("risk_level", "low")
+    progress = decision.get("goal_progress", 0)
+    reasoning = planning.get("reasoning_summary", "")
+    current_goal = planning.get("current_goal", "")
+    action_input = planning.get("action_input", "")
+    action_name = planning.get("action", "—")
+    plan_steps = planning.get("plan_steps", [])
+    observation_status = observation.get("status", "—")
+    observed_count = len(observation.get("atomic_skills", []))
+
+    risk_class = ""
+    risk_label = ""
+    if risk == "high":
+        risk_class = "risk-high"
+        risk_label = "🔴 高风险"
+    elif risk == "medium":
+        risk_class = "risk-medium"
+        risk_label = "🟡 中风险"
+    elif risk == "imminent":
+        risk_class = "risk-imminent"
+        risk_label = "🚨 紧急"
+    else:
+        risk_class = "risk-low"
+        risk_label = "🟢 低风险"
+
+    return (
+        '<div class="thinking-card">'
+        f'<div class="thinking-header">'
+        f'<span class="thinking-badge">Turn {escape(str(turn))}</span>'
+        f'<span class="risk-tag {risk_class}">{risk_label}</span>'
+        f'<span class="progress-tag">目标进度 {progress:.0%}</span>'
+        f'</div>'
+        f'<div class="thinking-body">'
+        f'<div class="thinking-item">'
+        f'<strong>🧭 决策摘要 / Planning</strong>'
+        f'<p>{escape(reasoning)}</p>'
+        f'<p><b>本轮目标：</b>{escape(current_goal)}</p>'
+        f'<p>{escape(" → ".join(plan_steps))}</p>'
+        f'</div>'
+        f'<div class="thinking-item">'
+        f'<strong>⚙️ Action / Observation</strong>'
+        f'<p>{escape(str(action_name))} → {escape(str(observation_status))} '
+        f'({observed_count} skills)</p>'
+        f'<p>{escape(action_input)}</p>'
+        f'</div>'
+        f'<div class="thinking-item">'
+        f'<strong>📋 评估</strong>'
+        f'<p>{escape(assessment)}</p>'
+        f'</div>'
+        f'<div class="thinking-item">'
+        f'<strong>🔍 状态观察</strong>'
+        f'<p>{escape(state_obs)}</p>'
+        f'</div>'
+        f'<div class="thinking-item">'
+        f'<strong>🎯 策略</strong>'
+        f'<p>{escape(strategy)}</p>'
+        f'</div>'
+        + (
+            f'<div class="thinking-item skills">'
+            f'<strong>🛠 使用技能</strong>'
+            f'<div class="skill-tags">'
+            + "".join(
+                f'<span class="skill-tag">{escape(_skill_name_for(s))}</span>'
+                for s in skills
+            )
+            + "</div></div>"
+            if skills
+            else ""
+        )
+        + _skill_query_audit(record)
+        + _client_decision_summary(record)
+        + "</div></div>"
+    )
 
 
 def _client_decision_summary(record: dict[str, Any]) -> str:
@@ -415,63 +423,72 @@ def _client_decision_summary(record: dict[str, Any]) -> str:
     )
 
 
-def _delta_table(session: SessionRecord) -> str:
-    report = session.longitudinal_report
-    if not report:
-        return '<p class="muted">暂无纵向数据</p>'
-    labels = {
-        "trust": "信任",
-        "distress": "痛苦",
-        "hope": "希望",
-        "resistance": "抗拒",
-        "valence": "效价",
-        "arousal": "唤醒",
-    }
-    rows = "".join(
-        f"<tr><td>{escape(labels.get(key, key))}</td>"
-        f'<td class="{"positive" if value > 0 else "negative" if value < 0 else ""}">'
-        f"{value:+.3f}</td></tr>"
-        for key, value in report.state_deltas.items()
-    )
-    return f'<table class="delta"><tbody>{rows}</tbody></table>'
+def _session_turn_blocks(session: SessionRecord) -> str:
+    """Render one block per turn: decision card placed beside its dialogue.
+
+    Turn records and messages share the same ``turn_index``, so each block
+    pairs the auditable planning/decision of a turn with the exact messages
+    produced in that turn. The opening client message (turn_index 0) has no
+    matching turn record and is shown on its own before the turn blocks.
+    """
+    opening: list[Message] = []
+    messages_by_turn: dict[int, list[Message]] = {}
+    for message in session.messages:
+        if message.role not in {"client", "counselor"}:
+            continue
+        if message.turn_index == 0:
+            opening.append(message)
+        else:
+            messages_by_turn.setdefault(message.turn_index, []).append(message)
+
+    blocks: list[str] = []
+    if opening:
+        blocks.append(
+            '<div class="turn-block">'
+            '<div class="turn-block-head">'
+            '<span class="turn-block-index">开场</span>'
+            '<span class="turn-block-caption">来访者开场消息</span>'
+            '</div>'
+            f'<div class="turn-dialogue">{_render_messages(opening)}</div>'
+            '</div>'
+        )
+    for record in session.turn_records:
+        turn = record.get("turn_index", "?")
+        dialogue = messages_by_turn.get(turn, [])
+        blocks.append(
+            '<div class="turn-block">'
+            '<div class="turn-block-head">'
+            f'<span class="turn-block-index">Turn {escape(str(turn))}</span>'
+            '<span class="turn-block-caption">规划与决策 ↔ 对应对话</span>'
+            '</div>'
+            '<div class="turn-block-grid">'
+            f'<div class="turn-decision">{_turn_decision_card(record)}</div>'
+            f'<div class="turn-dialogue">{_render_messages(dialogue)}</div>'
+            '</div>'
+            '</div>'
+        )
+    return "".join(blocks) if blocks else '<p class="muted">暂无逐轮决策记录</p>'
 
 
-def _turn_timeline(session: SessionRecord) -> str:
-    return '<div class="timeline">' + "".join(
-        _turn_card(record) for record in session.turn_records
-    ) + "</div>"
-
-
-def _turn_card(record: dict[str, Any]) -> str:
-    decision = record.get("decision", {})
-    planning = record.get("planning", {})
-    observation = record.get("observation", {})
-    signal = record.get("client_turn_signal", {})
-    disclosure = record.get("disclosure_decision", {})
-    input_safety = record.get("input_safety", {})
-    output_safety = record.get("output_safety", {})
-    skills = decision.get("selected_atomic_skill_ids", [])
-    state_before = record.get("state_before", {})
-    state_after = record.get("state_after", {})
-    trust_change = _number_delta(state_before, state_after, "trust")
-    distress_change = _number_delta(state_before, state_after, "distress")
-    return (
-        '<div class="turn-card">'
-        f'<div class="turn-index">Turn {escape(str(record.get("turn_index", "?")))}</div>'
-        f"<p><b>规划动作：</b>{escape(str(planning.get('action', '—')))}</p>"
-        f"<p><b>观察结果：</b>{escape(str(observation.get('status', '—')))}，"
-        f"{len(observation.get('atomic_skills', []))} 个技能</p>"
-        f"<p><b>目标/策略：</b>{escape(str(decision.get('strategy', '—')))}</p>"
-        f"<p><b>技能：</b>{escape(', '.join(skills) or '无')}</p>"
-        f"<p><b>来访者信号：</b>{escape(str(signal.get('reaction', '—')))} / "
-        f"{escape(str(signal.get('behavior', '—')))}</p>"
-        f"<p><b>披露：</b>retrieved {len(disclosure.get('retrieved', []))}，"
-        f"blocked {len(disclosure.get('blocked', []))}</p>"
-        f"<p><b>安全：</b>{escape(str(input_safety.get('level', '—')))} → "
-        f"{escape(str(output_safety.get('level', '—')))}</p>"
-        f"<p><b>状态变化：</b>信任 {trust_change}，痛苦 {distress_change}</p>"
-        + "</div>"
-    )
+def _render_messages(messages: list[Message]) -> str:
+    """Render conversation messages as chat bubbles, counselor vs client."""
+    parts = []
+    for message in messages:
+        if message.role not in {"client", "counselor"}:
+            continue
+        is_client = message.role == "client"
+        role_label = "来访者" if is_client else "咨询师"
+        avatar = ICON_USER if is_client else ICON_STETHOSCOPE
+        css_class = "msg-client" if is_client else "msg-counselor"
+        parts.append(
+            f'<div class="{css_class}">'
+            f'<div class="msg-avatar">{avatar}</div>'
+            f'<div class="msg-bubble">'
+            f'<div class="msg-role">{escape(role_label)}</div>'
+            f'<div class="msg-text">{escape(message.content)}</div>'
+            f"</div></div>"
+        )
+    return "".join(parts)
 
 
 def _skill_query_audit(record: dict[str, Any]) -> str:
@@ -510,45 +527,24 @@ def _skill_query_audit(record: dict[str, Any]) -> str:
             parts.append(f"<p><b>校验：</b>{escape(warning)}</p>")
         for evidence in planning.get("selection_evidence", []):
             parts.append(
-                f"<p><b>元技能依据 {escape(evidence['skill_id'])}：</b>"
+                f"<p><b>元技能依据 {escape(_skill_name_for(evidence['skill_id']))}：</b>"
                 f"“{escape(evidence['evidence_quote'])}” — {escape(evidence['reason'])}</p>"
             )
-        parts.append(f"<p><b>返回候选：</b>{escape('、'.join(returned) or '无')}</p>")
+        parts.append(
+            f"<p><b>返回候选：</b>{escape('、'.join(_skill_name_for(item) for item in returned) or '无')}</p>"
+        )
     for evidence in record.get("decision", {}).get("skill_evidence", []):
         parts.append(
-            f"<p><b>原子技能依据 {escape(evidence['skill_id'])}：</b>"
+            f"<p><b>原子技能依据 {escape(_skill_name_for(evidence['skill_id']))}：</b>"
             f"“{escape(evidence['evidence_quote'])}” — {escape(evidence['reason'])}</p>"
         )
     parts.append("</details>")
     return "".join(parts)
 
 
-def _number_delta(before: dict[str, Any], after: dict[str, Any], key: str) -> str:
-    try:
-        return f"{float(after[key]) - float(before[key]):+.3f}"
-    except (KeyError, TypeError, ValueError):
-        return "—"
-
-
 def _dialogue(session: SessionRecord) -> str:
-    """Render conversation with styled chat bubbles, counselor vs client."""
-    parts = []
-    for message in session.messages:
-        if message.role not in {"client", "counselor"}:
-            continue
-        is_client = message.role == "client"
-        role_label = "来访者" if is_client else "咨询师"
-        avatar = ICON_USER if is_client else ICON_STETHOSCOPE
-        css_class = "msg-client" if is_client else "msg-counselor"
-        parts.append(
-            f'<div class="{css_class}">'
-            f'<div class="msg-avatar">{avatar}</div>'
-            f'<div class="msg-bubble">'
-            f'<div class="msg-role">{escape(role_label)}</div>'
-            f'<div class="msg-text">{escape(message.content)}</div>'
-            f"</div></div>"
-        )
-    return "".join(parts)
+    """Render the complete conversation with styled chat bubbles."""
+    return _render_messages(session.messages)
 
 
 def _styles() -> str:
@@ -591,17 +587,18 @@ background:var(--blue);border-radius:4px 0 0 4px}
 .panel{padding:24px;margin:20px 0}
 h2{margin:32px 0 14px}h3,h4{margin:6px 0}
 
-/* ---- Process Flow ---- */
-.process{display:flex;align-items:stretch;overflow:auto;padding:4px;gap:0}
-.process-step{min-width:155px;flex:1;padding:16px;background:linear-gradient(135deg,#eef2ff,#e0e7ff);
-border-radius:12px;border:1px solid #c7d2fe;transition:transform .2s}
-.process-step:hover{transform:translateY(-2px)}
-.process-step strong{display:flex;align-items:center;gap:6px;font-size:13px;color:#3730a3}
-.process-step strong svg{flex-shrink:0;color:#6366f1}
-.process-step span{display:block;color:var(--muted);font-size:12px;margin-top:4px}
-.arrow{align-self:center;padding:0 10px;color:var(--blue);font-size:24px;font-weight:300}
-.chart svg{width:100%;height:auto}.axis,.legend{font-size:11px;fill:#64748b}
+/* ---- Session Nav ---- */
+.sessions-head{display:flex;align-items:center;justify-content:space-between;gap:16px;
+flex-wrap:wrap;margin-bottom:8px}
+.sessions-head h2{margin:0}
+.session-nav{display:flex;flex-wrap:wrap;gap:8px}
+.session-nav-btn{display:inline-block;padding:6px 14px;border-radius:99px;font-weight:700;
+font-size:13px;color:#3730a3;background:linear-gradient(135deg,#e0e7ff,#c7d2fe);
+border:1px solid #c7d2fe;text-decoration:none;transition:transform .15s,box-shadow .15s,background .15s}
+.session-nav-btn:hover{transform:translateY(-1px);box-shadow:0 4px 12px #3157d520;background:#dbe4ff}
 .muted{color:var(--muted)}
+html{scroll-behavior:smooth}
+.session:target{box-shadow:0 0 0 3px var(--blue),0 10px 34px #17203314}
 
 /* ---- Session ---- */
 .session{padding:24px;margin:20px 0}
@@ -682,11 +679,18 @@ justify-content:center;flex-shrink:0}
 .msg-role{font-size:11px;color:var(--muted);margin-bottom:4px;font-weight:600}
 .msg-text{font-size:14px;line-height:1.6;white-space:pre-wrap;word-break:break-word}
 
-/* ---- Turn Timeline ---- */
-.timeline{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-top:12px}
-.turn-card{padding:12px;border-left:4px solid var(--blue);background:#f8fafc;border-radius:8px}
-.turn-card p{margin:3px 0;font-size:13px}
-.turn-index{font-weight:800;color:var(--blue)}
+/* ---- Turn Blocks (decision beside dialogue) ---- */
+.turn-blocks{display:flex;flex-direction:column;gap:16px;margin-top:12px}
+.turn-block{border:1px solid var(--line);border-radius:12px;overflow:hidden;background:#fff}
+.turn-block-head{display:flex;align-items:center;gap:10px;padding:8px 14px;
+background:var(--surface2);border-bottom:1px solid var(--line)}
+.turn-block-index{font-weight:800;color:var(--blue);font-size:13px}
+.turn-block-caption{color:var(--muted);font-size:12px}
+.turn-block-grid{display:grid;grid-template-columns:1fr 1fr;gap:0}
+.turn-decision{padding:14px;border-right:1px solid var(--line)}
+.turn-decision .thinking-card{border-radius:10px}
+.turn-dialogue{padding:16px;display:flex;flex-direction:column;gap:12px;background:#fbfcfe}
+.turn-dialogue .msg-client,.turn-dialogue .msg-counselor{max-width:100%}
 
 /* ---- Animations ---- */
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.6}}
@@ -694,8 +698,10 @@ justify-content:center;flex-shrink:0}
 /* ---- Responsive ---- */
 @media(max-width:900px){
   .summary-grid{grid-template-columns:repeat(2,1fr)}
-  .session-grid,.timeline,.thinking-grid{grid-template-columns:1fr}
-  .process{display:grid;gap:8px}.arrow{display:none}
+  .session-grid,.thinking-grid{grid-template-columns:1fr}
+  .turn-block-grid{grid-template-columns:1fr}
+  .turn-decision{border-right:0;border-bottom:1px solid var(--line)}
+  .sessions-head{flex-direction:column;align-items:flex-start}
   .hero{display:block}.disclaimer{margin-top:12px;display:inline-block}
   .msg-client,.msg-counselor{max-width:96%}
 }

@@ -189,18 +189,38 @@ def test_visual_report_contains_process_results_and_turns(root, tmp_path, reposi
     )
     output = generate_run_report(result, tmp_path / "report.html")
     html = output.read_text(encoding="utf-8")
-    assert "运行过程" in html
-    assert "来访者状态趋势" in html
+    assert "整体督导评估" in html
     assert "整体督导分" in html
-    assert "纵向判断" in html
     assert "咨询师可审计规划与决策" in html
     assert "Action / Observation" in html
     assert "咨询师会后自评" in html
     assert "对话记录" in html
-    assert "逐轮技术细节" in html
     assert "技能查询记录（1 次）" in html
     assert "元技能依据" in html
     assert "原子技能依据" in html
+    # Deleted sections must no longer appear.
+    assert "运行过程" not in html
+    assert "来访者状态趋势" not in html
+    assert "纵向判断" not in html
+    assert "查看逐轮技术细节" not in html
+    # Sessions are split into blocks with jump buttons.
+    assert 'id="session-1"' in html and 'id="session-2"' in html
+    assert html.count('class="session-nav-btn"') == 2
+    assert 'href="#session-1"' in html and 'href="#session-2"' in html
+    # The audit section is split by turn with decision + matched dialogue.
+    assert '<div class="turn-block-grid">' in html
+    assert '<div class="turn-decision">' in html
+    assert '<div class="turn-dialogue">' in html
+    # Skill numbers are displayed as names, not raw IDs (when selected).
+    selected = [
+        s
+        for rec in result.sessions[0].turn_records
+        for s in rec["decision"]["selected_atomic_skill_ids"]
+    ]
+    if selected:
+        skill_id = selected[0]
+        assert 'class="skill-tag"' in html
+        assert f'<span class="skill-tag">{skill_id}</span>' not in html
     record = result.sessions[0].turn_records[0]
     assert record["planning"]["current_goal"] in html
     assert record["client_turn_signal"]["rationale"] in html
