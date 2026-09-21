@@ -120,23 +120,22 @@ def generate_run_report(result: RunResult, output: Path) -> Path:
     </div>
     <div class="disclaimer">仅用于教学与研究，不代表临床疗效</div>
   </header>
-  <section class="summary-grid">
-    {_summary_card("会谈数", str(len(result.sessions)), "sessions", "📋")}
-    {_summary_card("整体督导分", f"{overall:.2f}", "0–10", "📊")}
-    {_summary_card("高风险事件", str(safety_events), "需人工复核", "⚠️")}
-    {_summary_card("暴露泄漏", str(leaks), "越低越好", "🔒")}
+  <nav class="session-nav" aria-label="报告页面切换">
+    <a class="session-nav-btn active" href="#overview" data-page="overview">总览</a>
+    {''.join(_session_nav(item) for item in result.sessions)}
+  </nav>
+  <section class="page active" id="overview">
+    <section class="summary-grid">
+      {_summary_card("会谈数", str(len(result.sessions)), "sessions", "📋")}
+      {_summary_card("整体督导分", f"{overall:.2f}", "0–10", "📊")}
+      {_summary_card("高风险事件", str(safety_events), "需人工复核", "⚠️")}
+      {_summary_card("暴露泄漏", str(leaks), "越低越好", "🔒")}
+    </section>
+    {holistic_html}
   </section>
-  {holistic_html}
-  <section class="panel sessions">
-    <div class="sessions-head">
-      <h2>会谈明细</h2>
-      <nav class="session-nav" aria-label="跳转到会谈">
-        {''.join(_session_nav(item) for item in result.sessions)}
-      </nav>
-    </div>
-    {''.join(_session_section(item) for item in result.sessions)}
-  </section>
+  {''.join(_session_section(item) for item in result.sessions)}
 </main>
+<script>{_page_script()}</script>
 </body>
 </html>"""
     output.write_text(html, encoding="utf-8")
@@ -144,11 +143,38 @@ def generate_run_report(result: RunResult, output: Path) -> Path:
 
 
 def _session_nav(session: SessionRecord) -> str:
-    """A jump button for one session block."""
+    """A page-switch button for one session."""
+    page = f"session-{session.session_index}"
     return (
-        f'<a class="session-nav-btn" href="#session-{session.session_index}">'
+        f'<a class="session-nav-btn" href="#{page}" data-page="{page}">'
         f'Session {session.session_index}</a>'
     )
+
+
+def _page_script() -> str:
+    """Client-side page switching so each session is shown on its own page."""
+    return """
+(function () {
+  var pages = Array.prototype.slice.call(document.querySelectorAll('.page'));
+  var buttons = Array.prototype.slice.call(document.querySelectorAll('.session-nav-btn'));
+  if (!pages.length) { return; }
+  function activate() {
+    var id = (window.location.hash || '').replace('#', '');
+    var page = id ? document.getElementById(id) : null;
+    if (!page || pages.indexOf(page) === -1) { id = pages[0].id; }
+    pages.forEach(function (item) {
+      if (item.id === id) { item.classList.add('active'); }
+      else { item.classList.remove('active'); }
+    });
+    buttons.forEach(function (button) {
+      if (button.getAttribute('data-page') === id) { button.classList.add('active'); }
+      else { button.classList.remove('active'); }
+    });
+  }
+  window.addEventListener('hashchange', activate);
+  activate();
+})();
+"""
 
 
 def _summary_card(label: str, value: str, note: str, icon: str) -> str:
@@ -229,10 +255,9 @@ def _session_section(session: SessionRecord) -> str:
         or "<li>暂无咨询师会后自评</li>"
     )
     summary_html = _session_summary_text(session)
-    turn_blocks = _session_turn_blocks(session)
 
     return f"""
-<article class="session" id="session-{session.session_index}">
+<article class="page session" id="session-{session.session_index}">
   <div class="session-head">
     <div>
       <span class="badge">Session {session.session_index}</span>
@@ -241,22 +266,18 @@ def _session_section(session: SessionRecord) -> str:
     </div>
   </div>
   {summary_html}
+  {_rollout_selection(session.rollout_selection)}
+  <section class="panel">
+    <h2>{ICON_CHAT} 对话记录</h2>
+    <p class="muted">每条咨询师发言的上方是对应 turn 的「咨询师可审计规划与决策」思考，点击标题可展开或折叠。</p>
+    <div class="dialogue">{_dialogue(session)}</div>
+  </section>
   <div class="session-sections">
     <div>
       <h4>咨询师会后自评：{escape(review_status)}</h4>
       <ul>{review_html}</ul>
     </div>
   </div>
-  {_rollout_selection(session.rollout_selection)}
-  <details class="audit">
-    <summary>{ICON_BRAIN} 咨询师可审计规划与决策（{len(session.turn_records)} turns）</summary>
-    <p class="muted">以下展示模型或规则明确输出的决策摘要、执行步骤和交互信号，不是内部逐 token 思维链。每个 turn 的规划与决策与其对应对话并排展示。</p>
-    <div class="turn-blocks">{turn_blocks}</div>
-  </details>
-  <details open>
-    <summary>{ICON_CHAT} 对话记录</summary>
-    <div class="dialogue">{_dialogue(session)}</div>
-  </details>
 </article>"""
 
 
@@ -423,72 +444,31 @@ def _client_decision_summary(record: dict[str, Any]) -> str:
     )
 
 
-def _session_turn_blocks(session: SessionRecord) -> str:
-    """Render one block per turn: decision card placed beside its dialogue.
-
-    Turn records and messages share the same ``turn_index``, so each block
-    pairs the auditable planning/decision of a turn with the exact messages
-    produced in that turn. The opening client message (turn_index 0) has no
-    matching turn record and is shown on its own before the turn blocks.
-    """
-    opening: list[Message] = []
-    messages_by_turn: dict[int, list[Message]] = {}
-    for message in session.messages:
-        if message.role not in {"client", "counselor"}:
-            continue
-        if message.turn_index == 0:
-            opening.append(message)
-        else:
-            messages_by_turn.setdefault(message.turn_index, []).append(message)
-
-    blocks: list[str] = []
-    if opening:
-        blocks.append(
-            '<div class="turn-block">'
-            '<div class="turn-block-head">'
-            '<span class="turn-block-index">开场</span>'
-            '<span class="turn-block-caption">来访者开场消息</span>'
-            '</div>'
-            f'<div class="turn-dialogue">{_render_messages(opening)}</div>'
-            '</div>'
-        )
-    for record in session.turn_records:
-        turn = record.get("turn_index", "?")
-        dialogue = messages_by_turn.get(turn, [])
-        blocks.append(
-            '<div class="turn-block">'
-            '<div class="turn-block-head">'
-            f'<span class="turn-block-index">Turn {escape(str(turn))}</span>'
-            '<span class="turn-block-caption">规划与决策 ↔ 对应对话</span>'
-            '</div>'
-            '<div class="turn-block-grid">'
-            f'<div class="turn-decision">{_turn_decision_card(record)}</div>'
-            f'<div class="turn-dialogue">{_render_messages(dialogue)}</div>'
-            '</div>'
-            '</div>'
-        )
-    return "".join(blocks) if blocks else '<p class="muted">暂无逐轮决策记录</p>'
+def _inline_thinking(record: dict[str, Any]) -> str:
+    """One turn's collapsible planning/decision, shown above its counselor reply."""
+    turn = record.get("turn_index", "?")
+    return (
+        '<details class="thinking-inline">'
+        f'<summary>{ICON_BRAIN} 思考 · Turn {escape(str(turn))}</summary>'
+        f'<div class="thinking-inline-body">{_turn_decision_card(record)}</div>'
+        "</details>"
+    )
 
 
-def _render_messages(messages: list[Message]) -> str:
-    """Render conversation messages as chat bubbles, counselor vs client."""
-    parts = []
-    for message in messages:
-        if message.role not in {"client", "counselor"}:
-            continue
-        is_client = message.role == "client"
-        role_label = "来访者" if is_client else "咨询师"
-        avatar = ICON_USER if is_client else ICON_STETHOSCOPE
-        css_class = "msg-client" if is_client else "msg-counselor"
-        parts.append(
-            f'<div class="{css_class}">'
-            f'<div class="msg-avatar">{avatar}</div>'
-            f'<div class="msg-bubble">'
-            f'<div class="msg-role">{escape(role_label)}</div>'
-            f'<div class="msg-text">{escape(message.content)}</div>'
-            f"</div></div>"
-        )
-    return "".join(parts)
+def _message_bubble(message: Message) -> str:
+    """Render one conversation message as a chat bubble."""
+    is_client = message.role == "client"
+    role_label = "来访者" if is_client else "咨询师"
+    avatar = ICON_USER if is_client else ICON_STETHOSCOPE
+    css_class = "msg-client" if is_client else "msg-counselor"
+    return (
+        f'<div class="{css_class}">'
+        f'<div class="msg-avatar">{avatar}</div>'
+        f'<div class="msg-bubble">'
+        f'<div class="msg-role">{escape(role_label)}</div>'
+        f'<div class="msg-text">{escape(message.content)}</div>'
+        f"</div></div>"
+    )
 
 
 def _skill_query_audit(record: dict[str, Any]) -> str:
@@ -543,8 +523,29 @@ def _skill_query_audit(record: dict[str, Any]) -> str:
 
 
 def _dialogue(session: SessionRecord) -> str:
-    """Render the complete conversation with styled chat bubbles."""
-    return _render_messages(session.messages)
+    """Render the conversation; each counselor reply carries its turn thinking above it.
+
+    Turn records and messages share the same ``turn_index``, so the auditable
+    planning/decision of a turn is rendered directly above the counselor reply
+    produced in that same turn. The opening client message (turn_index 0) has no
+    matching turn record and stays a plain bubble.
+    """
+    records: dict[int, dict[str, Any]] = {}
+    for record in session.turn_records:
+        turn = record.get("turn_index")
+        if isinstance(turn, int):
+            records.setdefault(turn, record)
+
+    parts: list[str] = []
+    for message in session.messages:
+        if message.role not in {"client", "counselor"}:
+            continue
+        if message.role == "counselor":
+            record = records.get(message.turn_index)
+            if record is not None:
+                parts.append(_inline_thinking(record))
+        parts.append(_message_bubble(message))
+    return "".join(parts)
 
 
 def _styles() -> str:
@@ -587,18 +588,19 @@ background:var(--blue);border-radius:4px 0 0 4px}
 .panel{padding:24px;margin:20px 0}
 h2{margin:32px 0 14px}h3,h4{margin:6px 0}
 
-/* ---- Session Nav ---- */
-.sessions-head{display:flex;align-items:center;justify-content:space-between;gap:16px;
-flex-wrap:wrap;margin-bottom:8px}
-.sessions-head h2{margin:0}
-.session-nav{display:flex;flex-wrap:wrap;gap:8px}
-.session-nav-btn{display:inline-block;padding:6px 14px;border-radius:99px;font-weight:700;
-font-size:13px;color:#3730a3;background:linear-gradient(135deg,#e0e7ff,#c7d2fe);
-border:1px solid #c7d2fe;text-decoration:none;transition:transform .15s,box-shadow .15s,background .15s}
-.session-nav-btn:hover{transform:translateY(-1px);box-shadow:0 4px 12px #3157d520;background:#dbe4ff}
+/* ---- Session Nav (page switching) ---- */
+.session-nav{display:flex;flex-wrap:wrap;gap:8px;align-items:center;
+position:sticky;top:0;z-index:20;padding:12px 0;margin:22px 0 6px;background:var(--bg)}
+.session-nav-btn{display:inline-block;padding:7px 16px;border-radius:99px;font-weight:700;
+font-size:13px;color:#3730a3;background:var(--panel);border:1px solid #c7d2fe;
+text-decoration:none;transition:transform .15s,box-shadow .15s,background .15s,color .15s}
+.session-nav-btn:hover{transform:translateY(-1px);box-shadow:0 4px 12px #3157d520;background:#eef2ff}
+.session-nav-btn.active{color:#fff;border-color:transparent;
+background:linear-gradient(135deg,#3157d5,#4f7ae8);box-shadow:0 6px 18px #3157d533}
+.page{display:none}
+.page.active{display:block;scroll-margin-top:74px}
 .muted{color:var(--muted)}
 html{scroll-behavior:smooth}
-.session:target{box-shadow:0 0 0 3px var(--blue),0 10px 34px #17203314}
 
 /* ---- Session ---- */
 .session{padding:24px;margin:20px 0}
@@ -679,18 +681,14 @@ justify-content:center;flex-shrink:0}
 .msg-role{font-size:11px;color:var(--muted);margin-bottom:4px;font-weight:600}
 .msg-text{font-size:14px;line-height:1.6;white-space:pre-wrap;word-break:break-word}
 
-/* ---- Turn Blocks (decision beside dialogue) ---- */
-.turn-blocks{display:flex;flex-direction:column;gap:16px;margin-top:12px}
-.turn-block{border:1px solid var(--line);border-radius:12px;overflow:hidden;background:#fff}
-.turn-block-head{display:flex;align-items:center;gap:10px;padding:8px 14px;
-background:var(--surface2);border-bottom:1px solid var(--line)}
-.turn-block-index{font-weight:800;color:var(--blue);font-size:13px}
-.turn-block-caption{color:var(--muted);font-size:12px}
-.turn-block-grid{display:grid;grid-template-columns:1fr 1fr;gap:0}
-.turn-decision{padding:14px;border-right:1px solid var(--line)}
-.turn-decision .thinking-card{border-radius:10px}
-.turn-dialogue{padding:16px;display:flex;flex-direction:column;gap:12px;background:#fbfcfe}
-.turn-dialogue .msg-client,.turn-dialogue .msg-counselor{max-width:100%}
+/* ---- Inline turn thinking (inside the dialogue) ---- */
+.thinking-inline{width:100%;margin:2px 0 0;padding:0;border:1px solid #ddd6fe;
+border-radius:12px;background:linear-gradient(135deg,#faf5ff,#f3edff);overflow:hidden}
+.thinking-inline>summary{padding:8px 14px;font-size:13px;color:#5b21b6;border-radius:12px}
+.thinking-inline>summary:hover{color:#7c3aed}
+.thinking-inline[open]>summary{border-bottom:1px solid #ddd6fe;border-radius:12px 12px 0 0}
+.thinking-inline-body{padding:12px}
+.thinking-inline-body .thinking-card{border-radius:10px}
 
 /* ---- Animations ---- */
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.6}}
@@ -699,9 +697,8 @@ background:var(--surface2);border-bottom:1px solid var(--line)}
 @media(max-width:900px){
   .summary-grid{grid-template-columns:repeat(2,1fr)}
   .session-grid,.thinking-grid{grid-template-columns:1fr}
-  .turn-block-grid{grid-template-columns:1fr}
-  .turn-decision{border-right:0;border-bottom:1px solid var(--line)}
-  .sessions-head{flex-direction:column;align-items:flex-start}
+  .session-nav{flex-wrap:nowrap;overflow-x:auto;padding-bottom:10px}
+  .session-nav-btn{white-space:nowrap}
   .hero{display:block}.disclaimer{margin-top:12px;display:inline-block}
   .msg-client,.msg-counselor{max-width:96%}
 }

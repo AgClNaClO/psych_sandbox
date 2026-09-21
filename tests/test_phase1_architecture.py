@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from html import escape
 
 import pytest
 
@@ -203,14 +204,25 @@ def test_visual_report_contains_process_results_and_turns(root, tmp_path, reposi
     assert "来访者状态趋势" not in html
     assert "纵向判断" not in html
     assert "查看逐轮技术细节" not in html
-    # Sessions are split into blocks with jump buttons.
+    # Sessions are separate pages: the overview page plus one page per session.
+    assert 'class="page active" id="overview"' in html
+    assert html.count('class="page session" id="session-') == len(result.sessions)
     assert 'id="session-1"' in html and 'id="session-2"' in html
-    assert html.count('class="session-nav-btn"') == 2
+    assert html.count('class="session-nav-btn') == len(result.sessions) + 1
+    assert 'data-page="overview"' in html
+    assert 'data-page="session-2"' in html
     assert 'href="#session-1"' in html and 'href="#session-2"' in html
-    # The audit section is split by turn with decision + matched dialogue.
-    assert '<div class="turn-block-grid">' in html
-    assert '<div class="turn-decision">' in html
-    assert '<div class="turn-dialogue">' in html
+    # Each turn's thinking is collapsible and sits directly above its counselor reply.
+    assert '<details class="thinking-inline">' in html
+    assert '<details class="thinking-inline" open>' not in html
+    first_counselor = next(
+        message for message in result.sessions[0].messages if message.role == "counselor"
+    )
+    assert html.index('<details class="thinking-inline">') < html.index(
+        escape(first_counselor.content)
+    )
+    # The counselor self-review is placed at the end of each session page.
+    assert html.index("对话记录") < html.index("咨询师会后自评")
     # Skill numbers are displayed as names, not raw IDs (when selected).
     selected = [
         s
