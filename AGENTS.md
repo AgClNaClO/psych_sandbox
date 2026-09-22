@@ -9,7 +9,7 @@ Keep generated artifacts under `runs/tests` or `runs/runtime`, with one director
 ## Runtime invariants
 
 - Production simulation is API-only; deterministic gateways are test doubles under `tests/`.
-- Counselor context contains disclosed evidence and allowed memory, not the full private client profile.
+- Counselor context contains disclosed evidence and allowed memory, not the full private client profile. Read `docs/MEMORY.md` before changing memory fields, the counselor read view or the consolidation order.
 - Skill selection preserves the asset tree: therapy/stage filtering, evidence-backed model IDs, exact catalog expansion, then vector narrowing only above the configured threshold. Read `docs/SKILL_SELECTION.md` before changing skill metadata, filtering or query retries; at most one correction query may exclude the previous groups.
 - Counselor review plus longitudinal progress builds the next session plan. The clinical supervisor (`PsychEvalSupervisor`) scores exactly once, after the complete trajectory; per-session rule evaluation is audit evidence only. Neither score drives planning.
 - A committed `SessionRecord` keeps only the session summary, RFT selection, planning/decision artifacts and counselor self-review. It must not store a per-session `SessionEvaluationReport`; the PsychEval instruments are applied per session only for RFT candidate ranking, while the single clinical score lives in the post-trajectory `holistic_report`.

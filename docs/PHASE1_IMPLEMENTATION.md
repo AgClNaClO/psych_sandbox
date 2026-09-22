@@ -60,7 +60,9 @@ RFT 默认关闭，启用后默认 3 条候选；候选以整场会谈为单位�
 - `data/integrative` 是未注册的保留资源，不出现在可运行 case 列表。
 - `prompts/` 共有 55 个提示词资产，其中 54 个有调用点：46 个督导量表（每 session 与整体督导共用）、8 个普通生成模板。生成提示词以 Jinja2 模板存放，由具体 agent 构造输入字典并调用 `psychsandbox/prompts.py::render_prompt`，结构化输出按 Pydantic schema 解析。额外的 `client/dialogue.jinja2` 是参考资产，没有生产调用点。
 
-CLI 经 `default_config(root)` 加载 `configs/runtime.yaml` 后应用显式命令行参数。本机路径已迁至 `D:\0test\psych_sandbox`；测试/运行仍按次写入 `runs/tests` 与 `runs/runtime`，虚拟环境的可编辑安装需要在新位置重新安装，见 [README](../README.md)。
+CLI 经 `default_config(root)` 加载 `configs/runtime.yaml` 后应用显式命令行参数。本机检出目录现为 `D:\study\大创\project\psych_sandbox`（此前为 `D:\0test\psych_sandbox`）；测试/运行仍按次写入 `runs/tests` 与 `runs/runtime`，虚拟环境的可编辑安装需要在移动检出目录后重新安装，见 [README](../README.md#53-迁移后的安装检查powershell)。
+
+跨会话记忆的分层结构、写入者、咨询师读取范围和当前限制见 [记忆结构](MEMORY.md)。
 
 ## 流派扩展边界
 

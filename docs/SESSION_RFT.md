@@ -5,7 +5,7 @@
 ## 开启与预算
 
 ```powershell
-Set-Location -LiteralPath 'D:\0test\psych_sandbox'
+Set-Location -LiteralPath 'D:\study\大创\project\psych_sandbox'
 .\.venv\Scripts\python.exe -B -m psychsandbox simulate --case psycheval-cbt-001 --sessions 3 --rollouts 3 --rollout-concurrency 2 --judge-concurrency 2
 ```
 

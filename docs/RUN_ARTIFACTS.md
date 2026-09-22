@@ -4,7 +4,7 @@
 
 ## 当前本机位置与迁移
 
-项目现位于 `D:\0test\psych_sandbox`。相对输出规则不变；从该目录启动，默认产物会写入新位置的 `runs/`。若在别处启动 CLI，须在子命令之前指定 `--root D:\0test\psych_sandbox`。移动 `.venv` 后应先重新安装可编辑项目，见 [README 的迁移检查](../README.md#53-迁移后的安装检查powershell)。
+项目现位于 `D:\study\大创\project\psych_sandbox`（此前为 `D:\0test\psych_sandbox`）。相对输出规则不变；从该目录启动，默认产物会写入该项目的 `runs/`。若在别处启动 CLI，须在子命令之前指定 `--root D:\study\大创\project\psych_sandbox`。移动检出目录或 `.venv` 后应先重新安装可编辑项目，见 [README 的迁移检查](../README.md#53-迁移后的安装检查powershell)。
 
 此前“清理目录后数据库没有记录”的说明有误：正式运行保存在 `experiment_runs` 表，删除文件夹不会清除这些记录。当前可用下面的 `runs list` 核对数据库、目录及删除状态；本次没有删除现有运行。目录已缺失的旧记录仍可读取已保存评分，但不能直接续跑；需要彻底清理时使用统一删除入口。
 
@@ -82,7 +82,7 @@ psych-sandbox simulate --case psycheval-cbt-001 --sessions 6 --resume-run run-xx
 `runs/tests` 下的测试产物与正式运行数据库独立，可通过以下命令清理，无需模型密钥、不调用 API：
 
 ```powershell
-Set-Location -LiteralPath 'D:\0test\psych_sandbox'
+Set-Location -LiteralPath 'D:\study\大创\project\psych_sandbox'
 .\.venv\Scripts\python.exe -B -m psychsandbox runs clean-tests
 .\.venv\Scripts\python.exe -B -m psychsandbox runs clean-tests --yes
 ```
@@ -94,7 +94,7 @@ Set-Location -LiteralPath 'D:\0test\psych_sandbox'
 此入口不需要模型密钥，不调用任何 API。`--root` 指向项目根目录；清理使用该项目 YAML 的 `database_path` 和 `trace_dir`，默认就是 `runs/runtime`。先列出并预览：
 
 ```powershell
-Set-Location -LiteralPath 'D:\0test\psych_sandbox'
+Set-Location -LiteralPath 'D:\study\大创\project\psych_sandbox'
 .\.venv\Scripts\python.exe -B -m psychsandbox runs list
 .\.venv\Scripts\python.exe -B -m psychsandbox runs delete --run run-xxxxxxxxxxxx
 ```

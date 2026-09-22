@@ -6,7 +6,7 @@
 
 ## 快速开始
 
-本机项目已迁移至 `D:\0test\psych_sandbox`。已有项目无需重新 clone；先阅读 [迁移后的安装检查](#53-迁移后的安装检查powershell)。后文安装与运行示例除另有标注外使用 CMD。
+本机检出目录为 `D:\study\大创\project\psych_sandbox`（2026-09 从 `D:\0test\psych_sandbox` 移动到此路径；移动检出目录后须重做可编辑安装检查）。已有项目无需重新 clone；先阅读 [迁移后的安装检查](#53-迁移后的安装检查powershell)。后文安装与运行示例除另有标注外使用 CMD。
 
 以下命令适用于 Windows CMD。运行前请先根据 `.env.example` 配置 API 密钥、接口地址和各角色模型：
 
@@ -20,7 +20,7 @@ pytest -q
 psych-sandbox simulate --case psycheval-cbt-001 --sessions 3
 ```
 
-仓库已包含运行所需的 `data/`、`assets/` 和 `prompts/`，首次运行不需要下载或转换数据。 `data fetch` 与 `data convert` 仅用于重新获取或生成兼容的 PsychEval 数据。
+仓库已包含原始病例 `data/<therapy>/`、`assets/` 和 `prompts/`，不需要先下载数据。但生产 `simulate` 还要求一次性的 schema-v4 缓存 `data\processed\psycheval`（已被 Git 忽略；缺失或过期时命令会明确提示，见 6.2 节的必需转换步骤）。`data fetch` 用于重新获取官方 PsychEval 原始数据。
 
 仿真结束后，终端会输出 `run-xxxxxxxxxxxx` 格式的运行编号，并自动生成 `runs\runtime\时间__案例ID__run-xxxxxxxxxxxx\report.html`。该报告可直接在浏览器中离线打开；也可以随时重新生成：
 
@@ -42,9 +42,15 @@ psych-sandbox visualize --run run-xxxxxxxxxxxx
 - 将咨询师升级为 API 驱动的 `evidence_vector_retry_v2`：先规划，再查询技能并观察结果，最后执行回复；技能选择要求公开适用依据；原子候选过多时才使用向量筛选，差查询最多纠错一次。
 - 新增 RFT 候选的 PsychEval 量表评分（RFT 奖励）和跨 session 纵向趋势分析。
 - 每个 session 结束后由咨询师模型核对目标与对话证据；未达目标时重新选择策略、目标和元技能，纵向进度信号继续负责阶段推进与安全保持，RFT 候选评分不直接驱动计划。
-- 新增单文件 HTML 可视化报告，集中呈现运行流程、状态曲线、整体督导评估、摘要与纵向判断、信息披露、安全检查和完整对话。
+- 新增单文件 HTML 可视化报告，集中呈现运行流程、状态曲线、整体督导评估、摘要与纵向判断、信息披露、安全检查和完整对话（该版式已在后续更新中改为概览页 + 每场会谈独立页，见下文）。
 - 自动化测试覆盖多会话连续性、SQLite 恢复、信息隔离、安全分流、 API 结构化输出、失败状态持久化与 CLI 进度反馈。
 - 新增可选整场会谈多候选、统一 PsychEval 量表评分与选优；仅胜出会谈进入会后整理和正式轨迹。默认关闭，不包含权重训练，详见 [会谈 RFT](docs/SESSION_RFT.md)。
+
+## v0.3.0 之后的更新
+
+- HTML 报告改为“概览页 + 每场会谈独立页”：逐轮规划/决策、技能查询记录、来访者模拟决策摘要和会后自评改为对话上方可折叠的内联卡片；原先独立的“运行过程 / 来访者状态趋势 / 纵向判断”板块不再渲染，这些数据仍保存在 `result.json`、SQLite 和 `trajectory.jsonl` 中。
+- 新增 [记忆结构说明](docs/MEMORY.md)，记录当前咨询师记忆的三层结构、写入者、咨询师读取范围与已知限制。
+- 本机检出目录由 `D:\0test\psych_sandbox` 移至 `D:\study\大创\project\psych_sandbox`，本文档与 `docs/` 下的路径、安装检查和提示词/测试计数同步更新。
 
 ## 1. 项目要解决什么问题
 
@@ -90,10 +96,10 @@ SQLite、JSONL 轨迹和后续经验池
 - 支持来访者话题边界识别、咨询师重复回复检测和互动修复，避免固定追问形成对话循环。
 - 每轮记录 Reasoning 摘要、Planning 步骤、Action、Observation、实际技能、结构化决策、状态变化和安全结果。
 - 每个 session 生成咨询师目标自评、必要的策略再规划、摘要、纵向趋势和下一次计划；开启 RFT 时另做候选评分与选优。
-- 每次 CLI 仿真自动生成单文件 HTML 报告，展示流程、状态曲线、整体督导评估、摘要与纵向判断、披露/安全过程和完整对话。
+- 每次 CLI 仿真自动生成单文件 HTML 报告：一个概览页加每场会谈的独立页面，页内对话上方可折叠查看该轮的规划与决策、技能查询记录、会后自评和 E.9 临床摘要，并汇总整体督导评估、披露/安全记录和完整对话。
 - 生产运行统一使用 OpenAI-compatible API，不提供离线或本地模型后端。
 - 自动化测试覆盖 API 契约和主要控制流程。
-- 2026-08-28 新目录的最终全量测试为 383 项通过（173.23 秒），覆盖统一删除与 ChatECNU 配置；未调用真实模型 API，不据此声称模型质量或真实接口联调通过。
+- 测试套件当前为 386 项（2026-09-22 用 `pytest --collect-only -q` 统计）。最近一次记录的全量通过为 2026-08-28 的 383 项（173.23 秒），覆盖统一删除与 ChatECNU 配置；本次路径与文档更新只做了收集计数和两个记忆相关单测，未重跑全量套件，也未调用真实模型 API，因此不据此声称模型质量或真实接口联调通过。
 - 三随机种子、30 案例正式实验和人工评审仍需要在后续实验阶段完成。
 
 ## 3. 项目中的三个智能体
@@ -160,6 +166,8 @@ src/psychsandbox/
 └── cli.py           可选数据刷新、案例、仿真和报告命令
 ```
 
+跨会话记忆的分层结构、写入者、咨询师读取范围与当前限制见 [记忆结构](docs/MEMORY.md)。
+
 ### `src` 与 `tests` 分别负责什么
 
 - `src/psychsandbox/` 是可安装的生产包：定义领域模型、数据适配、API 智能体、运行时编排、评测、持久化和可视化。`psych-sandbox` CLI 最终进入这里；生产仿真只接受真实 OpenAI-compatible API 网关。
@@ -187,11 +195,11 @@ src/psychsandbox/
 3. `consolidate_session`
     - 运行规则安全/披露门控（`SessionSafetyGate`），只做准入与安全标记、不评分。
     - 计算状态差值、相邻会谈趋势和阶段动作。
-    - 咨询师模型评测本次目标是否达到；未达到时生成改进项、修订策略、下次目标和元技能方向。
-    - 将咨询师再规划与纵向阶段动作合并为下一次计划，不依赖督导评分。
     - 运行 E.7/E.8/E.9 记忆流水线：提取实际披露信息、门控合并演化档案并生成有证据的摘要。
-    - 整理跨 session 记忆、目标进度和已使用技能。
-    - 保存 SQLite 和 JSONL 轨迹。
+    - 整理跨 session 记忆：追加本场摘要与临床摘要，更新作业、未尽议题、风险与关系记录、已使用技能和末段来访者话语。
+    - 咨询师模型评测本次目标是否达到（读取刚合并的记忆）；未达到时生成改进项、修订策略、下次目标和元技能方向。
+    - 将咨询师再规划与纵向阶段动作合并为下一次计划，不依赖督导评分。
+    - 保存 SQLite 和 JSONL 轨迹：`memories` 保存该会谈结束后的记忆，轨迹另存会话前的记忆副本 `Trajectory.memory_before`。
 4. 全部 session 结束后，`PsychEvalSupervisor` 用官方量表对整条轨迹做一次整体督导，保存 Counselor-Level 与 Client-Level 结果；CLI 再生成可折叠查看逐轮过程的 HTML 报告。
 
 ## 5. Windows CMD 环境准备
@@ -209,7 +217,7 @@ src/psychsandbox/
 先打开 CMD，进入项目目录：
 
 ```bat
-cd /d D:\0test\psych_sandbox
+cd /d D:\study\大创\project\psych_sandbox
 ```
 
 确认 Python 和 Git：
@@ -231,7 +239,7 @@ python -m pip install -e ".[dev]"
 以后每次重新打开 CMD，只需要执行：
 
 ```bat
-cd /d D:\0test\psych_sandbox
+cd /d D:\study\大创\project\psych_sandbox
 call .venv\Scripts\activate.bat
 ```
 
@@ -249,18 +257,18 @@ python -m psychsandbox --help
 
 ### 5.3 迁移后的安装检查（PowerShell）
 
-复制或移动 `.venv` 不保证环境可移植；此前遇到过可编辑安装的 `.pth` 仍指向旧目录的问题。目前已核验新目录的模块 CLI 可以启动。新环境或再次迁移时，重新安装并核对实际导入位置：
+复制或移动 `.venv` 不保证环境可移植；此前遇到过可编辑安装的 `.pth` 仍指向旧目录的问题。当前检出目录下，`pytest` 依据 `pyproject.toml` 的 `pythonpath = ["src"]` 直接收集并运行测试（收集计数见第 2 节），`.venv\Scripts\` 中已有 `psych-sandbox.exe`；直接用未安装本项目的解释器执行 `python -m psychsandbox` 会报 `No module named psychsandbox`，此时先完成可编辑安装。新环境或再次移动检出目录时，重新安装并核对实际导入位置：
 
 ```powershell
-Set-Location -LiteralPath 'D:\0test\psych_sandbox'
+Set-Location -LiteralPath 'D:\study\大创\project\psych_sandbox'
 .\.venv\Scripts\python.exe -B -m pip install -e '.[dev]'
 .\.venv\Scripts\python.exe -B -c "import psychsandbox; print(psychsandbox.__file__)"
 .\.venv\Scripts\python.exe -B -m psychsandbox --help
 ```
 
-导入位置应在 `D:\0test\psych_sandbox\src` 下。安装需要可用的依赖源；若缺少构建依赖，不要用 `--no-build-isolation` 跳过准备。若解释器本身不能启动，应使用本机 Python 3.11+ 重建环境并重新安装依赖。旧 `pip.exe`、`pytest.exe`、激活脚本可能保留原路径，迁移后优先直接使用 `.venv\Scripts\python.exe -m pip/pytest/psychsandbox`，不依赖这些旧入口。
+导入位置应在 `D:\study\大创\project\psych_sandbox\src` 下。安装需要可用的依赖源；若缺少构建依赖，不要用 `--no-build-isolation` 跳过准备。若解释器本身不能启动，应使用本机 Python 3.11+ 重建环境并重新安装依赖。旧 `pip.exe`、`pytest.exe`、激活脚本可能保留原路径，移动目录后优先直接使用 `.venv\Scripts\python.exe -m pip/pytest/psychsandbox`，不依赖这些旧入口。
 
-CLI 默认以当前目录作为项目根目录；在其他目录调用时，将 `--root D:\0test\psych_sandbox` 放在 `simulate`、`cases` 等子命令之前。清理过的运行编号不再可查，后续运行会在新项目的 `runs/runtime/` 下建立新目录。仅手动删除文件夹不会清除数据库，需用统一删除入口同步清理。
+CLI 默认以当前目录作为项目根目录；在其他目录调用时，将 `--root D:\study\大创\project\psych_sandbox` 放在 `simulate`、`cases` 等子命令之前。清理过的运行编号不再可查，后续运行会在当前项目的 `runs/runtime/` 下建立新目录。仅手动删除文件夹不会清除数据库，需用统一删除入口同步清理。
 
 ## 6. 数据资源与可选刷新
 
@@ -283,7 +291,7 @@ prompts\client\           dialogue.jinja2 参考模板，未接入生产
 
 当前运行时注册 BT、CBT、HET、PDT、PMT 五个适配器。`data\integrative` 仍作为资源保留，但在具有独立技能树和评估标准之前不会冒充其中任一流派。
 
-提示词目录共有 56 个资产，其中 55 个有当前文件加载链调用点：46 个 `prompts/eval` 量表，另有 9 个生成/评分提示词（`prompts/counselor/`、`prompts/simclient/`、`prompts/memory/`、`prompts/rft/`）以 **Jinja2 模板**存放，由 `psychsandbox/prompts.py::render_prompt` 在每次模型调用时渲染，并按 Pydantic schema 解析输出。`prompts/client/dialogue.jinja2` 仅作参考，未进入生产加载链。完整映射和接入要求见 [prompts/README.md](prompts/README.md)。
+提示词目录共 55 个提示词资产（另有 1 个 `README.md`），其中 54 个有当前文件加载链调用点：46 个 `prompts/eval` 量表，另有 8 个生成模板（`prompts/counselor/`、`prompts/simclient/`、`prompts/memory/`）以 **Jinja2 模板**存放，由 `psychsandbox/prompts.py::render_prompt` 在每次模型调用时渲染，并按 Pydantic schema 解析输出。`prompts/client/dialogue.jinja2` 仅作参考，未进入生产加载链。完整映射和接入要求见 [prompts/README.md](prompts/README.md)。
 
 ### 6.1 可选：重新下载官方数据
 
@@ -396,7 +404,7 @@ psych-sandbox report --run run-xxxxxxxxxxxx
 psych-sandbox visualize --run run-xxxxxxxxxxxx
 ```
 
-默认输出为 `runs\runtime\时间__案例ID__run-xxxxxxxxxxxx\report.html`。报告是可离线打开的单文件页面，不上传数据，包括六步运行流程、来访者状态曲线、整体督导评估、逐 session 摘要与纵向判断、逐轮技能/披露/安全记录和完整对话。`simulate` 默认自动生成该报告；如只需要 JSON/SQLite，可传 `--no-visualization`。
+默认输出为 `runs\runtime\时间__案例ID__run-xxxxxxxxxxxx\report.html`。报告是可离线打开的单文件页面，不上传数据：顶部概览页给出运行参数、整体督导评估与各会谈入口，每场会谈是可切换的独立页面，包含 E.9 临床摘要、咨询师会后自评、可折叠的逐轮规划/决策与技能查询记录、披露与安全检查结果，以及完整对话。`simulate` 默认自动生成该报告；如只需要 JSON/SQLite，可传 `--no-visualization`。纵向进度和状态差值仍写入 `result.json`、SQLite 与 `trajectory.jsonl`，当前报告不单独渲染状态曲线。
 
 开启 RFT 时，报告另含候选状态、分数、引用依据与胜出者，并链接到各候选原始 JSON。
 

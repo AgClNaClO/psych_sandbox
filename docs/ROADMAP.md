@@ -4,12 +4,13 @@
 
 - 五流派可运行：BT 43、CBT 148、HET 50、PDT 50、PMT 50，共 341 个案例。
 - 五流派技能树可运行：677 个元技能、4481 个原子技能。
+- 离线报告为单文件 HTML：概览页加每场会谈独立页，逐轮规划/决策与技能查询记录在对话上方内联折叠；状态差值、纵向判断和披露/安全记录仍保存在 `result.json`、SQLite 与 `trajectory.jsonl` 中。
 - 咨询师执行 API 规划→Action→Observation→回复，以及 session 结束后的目标自评/再规划；最终技能选择由模型结合公开依据完成；超量候选使用向量筛选，差查询最多纠错一次。
 - 来访者执行私有状态规划→受限语言生成→台词证据核验，跨 session 只继承已披露证据与会后记忆。
 - 每 session 保存 PsychEval 量表评分、规则安全门控、纵向进度和下一计划；全部 session 后运行一次 PsychEval 整体督导并写入 SQLite、JSONL 和离线 HTML。
 - 自动化测试覆盖 API 契约、五流派隔离、披露/安全边界、连续会谈、恢复和持久化。
 - 可选整场会谈多候选、统一 PsychEval 量表评分和选优已实现；仅胜出者进入会后整理及下一会谈。默认关闭，尚无训练权重更新或选优到训练导出的自动连接，详见 [会谈 RFT](SESSION_RFT.md)。
-- CLI 已读取 YAML；产物按次归档至 `runs/tests` 与 `runs/runtime`。2026-08-28 新目录的最终全量测试 383 项通过（173.23 秒），真实模型 API 与 embedding 联调仍需使用实际密钥验证。
+- CLI 已读取 YAML；产物按次归档至 `runs/tests` 与 `runs/runtime`。测试套件当前为 386 项（2026-09-22 用 `pytest --collect-only -q` 统计），最近一次记录的全量通过为 2026-08-28 的 383 项（173.23 秒）；真实模型 API 与 embedding 联调仍需使用实际密钥验证。
 - 新增按运行编号的只读预览和确认删除，关联清理文件/数据库，失败留存删除日志并可重试；新增 `runs clean-tests` 清理 `runs/tests` 测试日志，支持 `PSYCHSANDBOX_AUTO_CLEAN_TESTS=1` 在 `pytest` 结束时自动删除该次调用目录；支持 ChatECNU 同源 embedding 共用令牌；RFT 默认候选数为 3，仍默认关闭。
 
 ## 下一步：实验验收

@@ -9,7 +9,7 @@
 - 本次论文依据为 **arXiv:2604.00931v3，2026-04-28**。v1 为 2026-04-01，v2 为 2026-04-02；代码提交早于 v3，不能假定二者完全同步。[论文版本页][paper-abs]
 - 已读实际方法体，覆盖 src/rft、其继承的 src/sample 调用链、src/eval/reward.py、评分方法和 API wrapper。README 只用于辅助确认公开范围。
 - 未读取或修改本地 Psych-new；未做模型/embedding API 调用，未读取环境变量或密钥，未执行仓库启动器，未加载技能 .pt 文件；不展示任何模型隐藏思维链内容。没有介入本地 client/dialogue 模板或 audit UI。
-- 研究源码目录：D:/0test/psych_sandbox/runs/runtime/20260828T103904__psychagent-research__f74c/official。
+- 研究源码目录：D:/0test/psych_sandbox/runs/runtime/20260828T103904__psychagent-research__f74c/official（该运行目录位于当时的检出路径；当前检出目录为 `D:\study\大创\project\psych_sandbox`）。
 - 该运行目录还保存 paper_2604.00931v3.html、paper_2604.00931v3_abs.html、github_commit_469f45e.json、python_asyncio_task.html、python_asyncio_sync.html。
 - 下载的论文 HTML SHA-256：51ad94f07e36f874f817d239b8d3a696cd795cf3b234592cff83d58bd1634a2a。
 - 本笔记中的 GitHub 代码链接全部固定上述完整提交。下文“推论”表示由已读代码推导，未声称做过真实服务运行。
