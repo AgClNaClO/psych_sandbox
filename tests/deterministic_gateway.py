@@ -28,6 +28,10 @@ from psychsandbox.domain import (
 from psychsandbox.model_client import ModelGateway
 
 
+# The offline double emits no logprobs, so offline runs keep item averages.
+DISABLED_LOGPROB_SCORING = {"enabled": False}
+
+
 class DeterministicGateway(ModelGateway):
     """Offline test double for component tests; never selectable at runtime."""
 

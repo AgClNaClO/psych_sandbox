@@ -146,6 +146,7 @@ class CounselingSandbox:
             self.gateway,
             config.project_root / "prompts" / "eval",
             temperature=config.temperature_supervisor,
+            logprob_scoring=config.logprob_scoring,
         )
         self.safety = SafetyStateMachine()
         self.disclosure = DisclosureGate()
@@ -385,6 +386,7 @@ class CounselingSandbox:
                             "counselor_pipeline": "evidence_vector_retry_v2",
                             "skill_selection": self.config.skill_selection.model_dump(),
                             "rft": self.config.rft.model_dump(),
+                            "logprob_scoring": self.config.logprob_scoring.model_dump(),
                             "generation_temperature_counselor": (
                                 self.config.rft.counselor_temperature if self.config.rft.enabled
                                 else self.config.temperature_counselor
@@ -680,6 +682,7 @@ class CounselingSandbox:
                 self.gateway,
                 self.config.project_root / "prompts" / "eval",
                 temperature=self.config.rft.judge_temperature,
+                logprob_scoring=self.config.logprob_scoring,
             ),
             self.store,
             self.run_dir,

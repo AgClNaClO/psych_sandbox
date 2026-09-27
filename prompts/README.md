@@ -1,12 +1,13 @@
 # `prompts/`
 
-本目录共有 55 个提示词资产：54 个有当前运行链调用点（46 个督导量表和 8 个生成模板），另有 `client/dialogue.jinja2` 仅作来源/风格参考。生成模板由 `src/psychsandbox/prompts.py::render_prompt` 在具体调用点渲染；目录中的文件不会自动启用。
+本目录共有 56 个提示词资产：55 个有当前运行链调用点（46 个督导量表、1 个概率加权评分提示词和 8 个生成模板），另有 `client/dialogue.jinja2` 仅作来源/风格参考。生成模板由 `src/psychsandbox/prompts.py::render_prompt` 在具体调用点渲染；目录中的文件不会自动启用。
 
 ## 实际使用情况
 
 | 类别 | 文件数 | 当前状态 | 实际入口 |
 |---|---:|---|---|
 | `eval/` 中代码映射的量表 | 46 | 已使用（每 session 与整体督导共用） | `src/psychsandbox/evaluation/psycheval_supervisor.py` |
+| `eval/_scoring/instrument_rating.txt` | 1 | 已使用（可选 `logprob_scoring` 路径） | `PsychEvalSupervisor.score_instrument_rating`；`src/psychsandbox/evaluation/scoring_probe.py` |
 | `counselor/`、`simclient/`、`memory/` 生成提示词 | 8 | 已使用（Jinja2 模板） | `src/psychsandbox/prompts.py::render_prompt` |
 | `client/dialogue.jinja2` | 1 | 参考模板，未接入 | 无生产调用点 |
 
@@ -60,7 +61,7 @@
 - **`custom_dim`** 是单个咨询师侧量表，把 Ethics、Interaction、Intervention、Perception 四个 criteria 聚合为一个分数，不再拆成四个独立 ScaleScore。
 - **原始条目范围不一致**：WAI、HTAIS、`custom_dim`、EFT-TFS、MITI、IPO、PANAS 为 1–5；TES 为 1–7；PSC、CTRS 为 0–6；SCL-90、SRS、STAI、SFBT 为 0–4；BDI-II 为 0–3；CCT 为 0–2。各量表范围记录在 `Instrument.scale`，归一化按 `(均值 - 下限) / (上限 - 下限) × 10` 换算为 0–10 原始分；症状量表（SCL-90、BDI-II、IPO）不取反（越高越重），`direction` 仅作元数据。PANAS 单独按正/负情绪平衡公式 `(positive − negative + 10) / 2` 计算。
 
-完整文件名以 `psycheval_supervisor.py` 中 `Instrument.prompt_files` 为唯一映射来源，原始范围以 `Instrument.scale` 为唯一来源。部分上游文件名包含弯引号，加载器会在同一目录做规范化文件名匹配。RFT 候选评分与整体督导均不回写下一 session 计划。
+完整文件名以 `psycheval_supervisor.py` 中 `Instrument.prompt_files` 为唯一映射来源，原始范围以 `Instrument.scale` 为唯一来源。`prompts/eval/_scoring/instrument_rating.txt` 是本仓库新增的资产（不是官方 PsychEval 量表）：它把上面的官方量表文本作为评分口径，只要求评判模型输出该量表的一个整数总分，供可选的概率加权（`logprob_scoring`）路径按论文式 8 读取数值 token 分布；其中 `{{instrument}}`、`{{instrument_prompt}}`、`{{rating_low}}`、`{{rating_high}}`、`{{intake_form}}`、`{{diag}}` 六个占位符必须全部由 `PsychEvalSupervisor.score_instrument_rating` 渲染。部分上游文件名包含弯引号，加载器会在同一目录做规范化文件名匹配。RFT 候选评分与整体督导均不回写下一 session 计划。
 
 ## 维护检查
 

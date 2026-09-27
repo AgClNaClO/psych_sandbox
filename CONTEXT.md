@@ -31,3 +31,7 @@ _Avoid_: 5Ps
 **5Ps View**:
 An auditable cross-therapy causal projection of case evidence that supplements but never replaces the therapy formulation.
 _Avoid_: Canonical formulation, second profile
+
+**Session Checklist**:
+Model-selected working memory for one session: completed items, important information, methods, results and pending items.
+_Avoid_: Longitudinal memory, carried-over plan

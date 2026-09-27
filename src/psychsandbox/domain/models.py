@@ -940,7 +940,7 @@ class RFTConfig(StrictModel):
     concurrency: int = Field(default=2, ge=1, le=32)
     judge_concurrency: int = Field(default=2, ge=1, le=16)
     candidate_timeout_sec: float = Field(default=1800, gt=0, allow_inf_nan=False)
-    judge_timeout_sec: float = Field(default=180, gt=0, allow_inf_nan=False)
+    judge_timeout_sec: float = Field(default=240, gt=0, allow_inf_nan=False)
     min_eligible: int = Field(default=2, ge=2, le=32)
     counselor_temperature: float = Field(default=0.9, ge=0, le=2)
     judge_temperature: float = Field(default=0.0, ge=0, le=2)
@@ -1091,6 +1091,32 @@ class SkillSelectionConfig(StrictModel):
         return self
 
 
+class LogprobScoringConfig(StrictModel):
+    """Optional probability-weighted (logprob) scoring for PsychEval scales.
+
+    Mirrors Eq. 8 of Zhang et al., *Mechanistic control of large language
+    models as simulated participants via linear representation* (npj Artificial
+    Intelligence, DOI 10.1038/s44387-026-00160-9): the judge's numeric token
+    distribution is aggregated as ``sum(i * p_i) / sum(p_i)`` and a judgement
+    whose total in-band probability mass stays below ``mass_floor`` is reported
+    as a refusal instead of being replaced by a zero or an item average.
+
+    Default values are the paper's scoring request (temperature 0.7, max 16
+    tokens, top 20 candidates, mass floor 0.25). The path is on by default: it
+    needs an endpoint that actually returns ``logprobs``/``top_logprobs``, so
+    probe it with ``psych-sandbox probe logprob-scoring`` before a run. An
+    endpoint without the payload (or a judgement below the floor) fails loudly
+    instead of falling back to an item average, and ``enabled: false`` switches
+    the path off again.
+    """
+
+    enabled: bool = True
+    mass_floor: float = Field(default=0.25, gt=0, le=1)
+    top_logprobs: int = Field(default=20, ge=1, le=20)
+    max_tokens: int = Field(default=16, ge=1, le=64)
+    temperature: float = Field(default=0.7, ge=0, le=2)
+
+
 class SandboxConfig(StrictModel):
     project_root: Path
     seed: int = 42
@@ -1112,6 +1138,7 @@ class SandboxConfig(StrictModel):
     disclosure_leak_retry_limit: int = Field(default=1, ge=0, le=3)
     skill_selection: SkillSelectionConfig = Field(default_factory=SkillSelectionConfig)
     rft: RFTConfig = Field(default_factory=RFTConfig)
+    logprob_scoring: LogprobScoringConfig = Field(default_factory=LogprobScoringConfig)
 
     @model_validator(mode="after")
     def map_legacy_patientact_switch(self) -> SandboxConfig:

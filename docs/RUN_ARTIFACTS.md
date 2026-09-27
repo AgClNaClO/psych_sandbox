@@ -1,10 +1,10 @@
 # 测试与实际运行的文件约定
 
-不需要额外指定输出参数：原有 `pytest -q`、`psych-sandbox simulate`、`data fetch` 和 `data convert` 命令会自动使用新目录。输入资源 `data/<therapy>`、`assets/`、`prompts/` 以及虚拟环境 `.venv/` 保持原位。
+不需要额外指定输出参数：原有 `pytest -q`、`psych-sandbox simulate`、`data fetch` 和 `data convert` 命令会自动使用新目录。项目根目录的 `run_simulate.bat` 只是包装 `simulate`（按脚本顶部参数，必要时先跑一次 `probe logprob-scoring`），产物仍是下面这批目录；探测调用单独占用一个 `时间__probe-logprob-scoring__编号/` 目录，不写正式运行数据库。输入资源 `data/<therapy>`、`assets/`、`prompts/` 以及虚拟环境 `.venv/` 保持原位。
 
 ## 当前本机位置与迁移
 
-项目现位于 `D:\study\大创\project\psych_sandbox`（此前为 `D:\0test\psych_sandbox`）。相对输出规则不变；从该目录启动，默认产物会写入该项目的 `runs/`。若在别处启动 CLI，须在子命令之前指定 `--root D:\study\大创\project\psych_sandbox`。移动检出目录或 `.venv` 后应先重新安装可编辑项目，见 [README 的迁移检查](../README.md#53-迁移后的安装检查powershell)。
+项目现位于 `C:\Users\Rain\Desktop\psych_sandbox`（此前依次为 `D:\study\大创\project\psych_sandbox`、`D:\0test\psych_sandbox`）。相对输出规则不变；从该目录启动，默认产物会写入该项目的 `runs/`。若在别处启动 CLI，须在子命令之前指定 `--root C:\Users\Rain\Desktop\psych_sandbox`。移动检出目录或 `.venv` 后应先重新安装可编辑项目，见 [README 的迁移检查](../README.md#53-迁移后的安装检查powershell)。
 
 此前“清理目录后数据库没有记录”的说明有误：正式运行保存在 `experiment_runs` 表，删除文件夹不会清除这些记录。当前可用下面的 `runs list` 核对数据库、目录及删除状态；本次没有删除现有运行。目录已缺失的旧记录仍可读取已保存评分，但不能直接续跑；需要彻底清理时使用统一删除入口。
 
@@ -25,13 +25,17 @@ runs/
 └── runtime/
     ├── README.md
     ├── psychsandbox.sqlite3  所有正式运行共享，记录由 run_id 区分
+    ├── 时间__probe-logprob-scoring__唯一编号/
+    │   ├── run.json          探测命令、案例、量表、状态与结论
+    │   ├── probe.json        评分带、请求参数、完整数值 token 分布、总质量
+    │   └── diagnostics/      API 结构化输出与传输（5xx/超时）错误诊断
     ├── 时间__psycheval-cbt-001__run-编号/
     │   ├── run.json          案例、种子、状态、目标会谈数
     │   ├── result.json       本次完整结果（成功完成后）
     │   ├── trajectory.jsonl  每完成一个会谈追加一行
     │   ├── report.html       离线报告（CLI 默认生成）
     │   ├── logs/             progress.log；失败时有 errors.log
-    │   ├── diagnostics/      API 结构化输出错误诊断
+    │   ├── diagnostics/      API 结构化输出与传输（5xx/超时）错误诊断
     │   └── tmp/              标准库和子进程临时文件
     └── 时间__data-convert-cbt__唯一编号/
         ├── run.json
@@ -46,6 +50,7 @@ runs/
 ```bat
 pytest -q
 psych-sandbox simulate --case psycheval-cbt-001 --sessions 3
+psych-sandbox probe logprob-scoring --case psycheval-cbt-001 --instrument wai
 psych-sandbox visualize --run run-xxxxxxxxxxxx
 psych-sandbox evaluate --run run-xxxxxxxxxxxx
 psych-sandbox simulate --case psycheval-cbt-001 --sessions 6 --resume-run run-xxxxxxxxxxxx
@@ -53,7 +58,7 @@ psych-sandbox simulate --case psycheval-cbt-001 --sessions 6 --resume-run run-xx
 
 重复普通运行会创建新目录；`--resume-run` 从原数据库恢复到会谈边界，继续向原目录追加轨迹和日志，更新结果及报告。`visualize --output alternate.html` 也写入该运行目录；拒绝指向目录外的路径。
 
-`--json` 仍在标准输出返回 JSON，同时保存 `result.json`；`--no-visualization` 只跳过 HTML。直接调用 `CounselingSandbox` 同样按次归档，可从 `sandbox.run_dir` 获取当前运行目录。显式传入 `database_path`、`trace_dir` 的 Python 调用仍按调用者指定的位置写入；测试应使用 `tmp_path`，临时脚本应从 `runs/tests` 或 `runs/runtime` 分配目录。
+`--json` 仍在标准输出返回 JSON，同时保存 `result.json`；`--no-visualization` 只跳过 HTML。直接调用 `CounselingSandbox` 同样按次归档，可从 `sandbox.run_dir` 获取当前运行目录。显式传入 `database_path`、`trace_dir` 的 Python 调用仍按调用者指定的位置写入；测试应使用 `tmp_path`，临时脚本应从 `runs/tests` 或 `runs/runtime` 分配目录。`probe logprob-scoring` 同样一次调用一个目录，写入 `runs/runtime`（不涉及正式运行数据库）；端点不支持时退出码为 1 且记录照常保留。
 
 ## 测试隔离
 
@@ -82,7 +87,7 @@ psych-sandbox simulate --case psycheval-cbt-001 --sessions 6 --resume-run run-xx
 `runs/tests` 下的测试产物与正式运行数据库独立，可通过以下命令清理，无需模型密钥、不调用 API：
 
 ```powershell
-Set-Location -LiteralPath 'D:\study\大创\project\psych_sandbox'
+Set-Location -LiteralPath 'C:\Users\Rain\Desktop\psych_sandbox'
 .\.venv\Scripts\python.exe -B -m psychsandbox runs clean-tests
 .\.venv\Scripts\python.exe -B -m psychsandbox runs clean-tests --yes
 ```
@@ -94,7 +99,7 @@ Set-Location -LiteralPath 'D:\study\大创\project\psych_sandbox'
 此入口不需要模型密钥，不调用任何 API。`--root` 指向项目根目录；清理使用该项目 YAML 的 `database_path` 和 `trace_dir`，默认就是 `runs/runtime`。先列出并预览：
 
 ```powershell
-Set-Location -LiteralPath 'D:\study\大创\project\psych_sandbox'
+Set-Location -LiteralPath 'C:\Users\Rain\Desktop\psych_sandbox'
 .\.venv\Scripts\python.exe -B -m psychsandbox runs list
 .\.venv\Scripts\python.exe -B -m psychsandbox runs delete --run run-xxxxxxxxxxxx
 ```
@@ -121,4 +126,4 @@ Set-Location -LiteralPath 'D:\study\大创\project\psych_sandbox'
 
 ## 会谈多候选
 
-开启 RFT 后，每场会谈另有 `rollouts/s001__batch-编号/`，保留输入快照、所有候选（含失败前缀）、评分和选优结果。续跑同一未提交会谈会新建批次；只有胜出会谈进入原有正式轨迹。详见 [会谈 RFT](SESSION_RFT.md)。候选并行不改变进程级临时目录；同进程多个 `run_case` 会明确拒绝。
+开启 RFT 后，每场会谈另有 `rollouts/s001__batch-编号/`，保留输入快照、所有候选（含失败前缀）、评分和选优结果。续跑同一未提交会谈会新建批次；只有胜出会谈进入原有正式轨迹。候选目录的 `dNNN/` 保存结构化输出校验（`kind="invalid_output"`）与传输失败（`kind="api_error"`）诊断记录。详见 [会谈 RFT](SESSION_RFT.md)。候选并行不改变进程级临时目录；同进程多个 `run_case` 会明确拒绝。

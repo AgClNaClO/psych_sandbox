@@ -25,6 +25,12 @@ from .datasets import (
     merge_therapy_conversions,
 )
 from .domain import SandboxConfig
+from .evaluation import format_intake, instrument_registry
+from .evaluation.scoring_probe import (
+    PROBE_FIXTURE_DIALOGUE,
+    probe_instrument_rating,
+    write_probe_record,
+)
 from .runtime import CounselingSandbox, SQLiteStore
 from .model_client import create_gateway
 from .runtime.run_management import RunManager, available_run_dir
@@ -70,6 +76,21 @@ def build_parser() -> argparse.ArgumentParser:
     listing = case_commands.add_parser("list")
     listing.add_argument("--therapy", default="cbt")
 
+    probe = commands.add_parser("probe", help="探测接口能力；每次调用建立一个产物目录")
+    probe_commands = probe.add_subparsers(dest="probe_command", required=True)
+    logprob = probe_commands.add_parser(
+        "logprob-scoring",
+        help="用一次真实判分探测端点是否返回 logprobs，并记录概率加权期望",
+    )
+    logprob.add_argument("--case", required=True)
+    logprob.add_argument("--instrument", required=True, help="量表键，例如 wai、ctrs、bdi_ii")
+    logprob.add_argument(
+        "--dialogue-file",
+        type=Path,
+        help="可选：使用自己准备的对话文本；默认使用固定合成对话",
+    )
+    logprob.add_argument("--json", action="store_true", help="标准输出打印完整记录")
+
     simulate = commands.add_parser("simulate")
     simulate.add_argument("--case", required=True)
     simulate.add_argument("--therapy")
@@ -81,6 +102,11 @@ def build_parser() -> argparse.ArgumentParser:
     rft.add_argument("--no-rft", action="store_true", help="关闭 RFT")
     simulate.add_argument("--rollout-concurrency", type=int)
     simulate.add_argument("--judge-concurrency", type=int)
+    simulate.add_argument(
+        "--logprob-scoring",
+        action="store_true",
+        help="按论文式 8 的概率加权期望评分（默认已开启；先确认端点返回 logprobs）",
+    )
     simulate.add_argument("--resume-run")
     simulate.add_argument("--json", action="store_true")
     simulate.add_argument("--no-visualization", action="store_true")
@@ -124,6 +150,8 @@ def _config(args: argparse.Namespace) -> SandboxConfig:
         value = getattr(args, argument, None)
         if value is not None:
             rft[field] = value
+    if getattr(args, "logprob_scoring", False):
+        values["logprob_scoring"]["enabled"] = True
     return SandboxConfig.model_validate(values)
 
 
@@ -457,6 +485,81 @@ async def _convert_data(args: argparse.Namespace, root: Path) -> dict:
         raise
 
 
+async def _probe(args: argparse.Namespace, root: Path) -> int:
+    """Probe one endpoint capability and keep the record in its own directory.
+
+    Returns 0 only when the endpoint returned a usable logprob distribution that
+    passed the mass gate; an unsupported endpoint and a refused judgement both
+    exit non-zero while still writing their record.
+    """
+    if args.probe_command != "logprob-scoring":
+        raise RuntimeError(f"unsupported probe: {args.probe_command}")
+    config = default_config(root)
+    case = CaseRepository.from_project(root).get(args.case)
+    instruments = instrument_registry(case.therapy)
+    instrument = instruments.get(args.instrument.strip().lower())
+    if instrument is None:
+        available = ", ".join(sorted(instruments))
+        raise ValueError(
+            f"unknown instrument {args.instrument!r} for therapy {case.therapy!r}; "
+            f"available: {available}"
+        )
+    if args.dialogue_file:
+        dialogue = Path(args.dialogue_file).read_text(encoding="utf-8")
+        dialogue_source = f"file:{Path(args.dialogue_file)}"
+    else:
+        dialogue = PROBE_FIXTURE_DIALOGUE
+        dialogue_source = "fixture"
+    run_dir = create_artifact_dir(runtime_root(root), "probe-logprob-scoring")
+    metadata = {
+        "command": "probe logprob-scoring",
+        "status": "running",
+        "case_id": case.case_id,
+        "therapy": case.therapy,
+        "instrument": instrument.key,
+        "dialogue_source": dialogue_source,
+    }
+    record: dict = {}
+    try:
+        gateway = create_gateway(
+            diagnostic_dir=run_dir / "diagnostics", required_roles={"supervisor"}
+        )
+        with local_temp_dir(run_dir / "tmp"):
+            record = await probe_instrument_rating(
+                gateway,
+                root / "prompts" / "eval",
+                instrument=instrument,
+                intake=format_intake(case),
+                dialogue=dialogue,
+                config=config.logprob_scoring,
+                dialogue_source=dialogue_source,
+            )
+        metadata["supported"] = record["supported"]
+        metadata["accepted"] = record["accepted"]
+        metadata["status"] = "completed" if record["accepted"] else "inconclusive"
+    except BaseException:
+        metadata["status"] = "failed"
+        raise
+    finally:
+        write_json(run_dir / "run.json", metadata)
+        if record:
+            write_probe_record(run_dir, record)
+    print(f"产物目录：{run_dir}")
+    if args.json:
+        print(json.dumps(record, ensure_ascii=False, indent=2))
+    if record["accepted"]:
+        print(
+            f"端点返回 logprobs：{instrument.key} 概率加权期望 "
+            f"{record['rating']['value']:.3f}（质量 {record['mass']:.3f}）"
+        )
+        return 0
+    if record["supported"]:
+        print(f"端点返回 logprobs，但本次判分未通过质量门：{record['error']}")
+    else:
+        print(f"端点未返回可用 logprobs：{record['error']}")
+    return 1
+
+
 def main() -> int:
     # Auto-load .env from project root so MODEL_API_KEY etc. are available
     load_dotenv(Path(__file__).resolve().parents[2] / ".env")
@@ -478,6 +581,8 @@ def main() -> int:
         return 0
     if args.command == "simulate":
         return asyncio.run(_simulate(args))
+    if args.command == "probe":
+        return asyncio.run(_probe(args, root))
     if args.command == "visualize":
         return _visualize(root, args.run, args.output)
     return _evaluate(root, args.run, args.command == "report")

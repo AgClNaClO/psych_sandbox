@@ -4,6 +4,7 @@ from pathlib import Path
 
 from ..domain import (
     CounselingCase,
+    LogprobScoringConfig,
     RFTConfig,
     RewardSignal,
     RolloutReward,
@@ -106,9 +107,14 @@ class SessionRolloutEvaluator:
         gateway: ModelGateway,
         prompts_dir: Path,
         temperature: float,
+        *,
+        logprob_scoring: LogprobScoringConfig | None = None,
     ) -> None:
         self.supervisor = SessionSupervisorEvaluator(
-            gateway, prompts_dir, temperature=temperature
+            gateway,
+            prompts_dir,
+            temperature=temperature,
+            logprob_scoring=logprob_scoring,
         )
         self.safety_gate = SessionSafetyGate()
 

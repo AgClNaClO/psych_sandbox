@@ -27,9 +27,18 @@ rft:
   counselor_temperature: 0.9
   judge_temperature: 0.2  # 非零让评分校验重试有机会得到不同输出；0 会让重试完全重复
   candidate_timeout_sec: 1800
-  judge_timeout_sec: 180
+  judge_timeout_sec: 240
   judge_retries: 3  # 评分校验失败时的重试次数
   resample_limit: 2
+logprob_scoring:
+  # 按论文式 8 的概率加权期望给 PsychEval 量表打分；默认开启。
+  # 开启前先用 psych-sandbox probe logprob-scoring 确认端点返回 logprobs；
+  # 端点不支持时改为 enabled: false（或去掉 simulate --logprob-scoring）。
+  enabled: true
+  mass_floor: 0.25  # 数值 token 总概率质量低于此值判为拒答并明确失败
+  top_logprobs: 20
+  max_tokens: 16
+  temperature: 0.7  # 沿用论文的评判采样温度，便于观察分布
 client:
   policy: compact_patientact
   session_trust_retention: 0.5

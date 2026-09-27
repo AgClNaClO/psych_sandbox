@@ -19,7 +19,10 @@ from psychsandbox.domain import (
 from psychsandbox.evolution import SkillEvolutionManager
 from psychsandbox.model_client import ModelGateway
 from psychsandbox.runtime import CounselingSandbox, SQLiteStore
-from tests.deterministic_gateway import DeterministicGateway
+from tests.deterministic_gateway import (
+    DISABLED_LOGPROB_SCORING,
+    DeterministicGateway,
+)
 
 
 @pytest.fixture
@@ -27,6 +30,7 @@ def sandbox(root, tmp_path, repository):
     config = SandboxConfig(
         project_root=root,
         max_turns_per_session=2,
+        logprob_scoring=DISABLED_LOGPROB_SCORING,
         database_path=tmp_path / "test.sqlite3",
         trace_dir=tmp_path / "traces",
     )
@@ -85,6 +89,7 @@ def test_e7_e8_e9_feed_counselor_review_before_next_session(root, tmp_path, repo
     config = SandboxConfig(
         project_root=root,
         max_turns_per_session=1,
+        logprob_scoring=DISABLED_LOGPROB_SCORING,
         database_path=tmp_path / "memory-closure.sqlite3",
         trace_dir=tmp_path / "memory-closure-traces",
     )
@@ -163,6 +168,7 @@ def test_session_checklist_is_local_then_archived_into_complete_memory(
     config = SandboxConfig(
         project_root=root,
         max_turns_per_session=2,
+        logprob_scoring=DISABLED_LOGPROB_SCORING,
         database_path=tmp_path / "checklist.sqlite3",
         trace_dir=tmp_path / "checklist-traces",
     )
@@ -311,6 +317,7 @@ def test_patientact_pipeline_can_be_disabled(root, tmp_path, repository):
     config = SandboxConfig(
         project_root=root,
         max_turns_per_session=1,
+        logprob_scoring=DISABLED_LOGPROB_SCORING,
         patientact_enabled=False,
         database_path=tmp_path / "disabled.sqlite3",
         trace_dir=tmp_path / "disabled-traces",
@@ -335,6 +342,7 @@ def test_failed_run_is_persisted(root, tmp_path, repository):
     config = SandboxConfig(
         project_root=root,
         max_turns_per_session=1,
+        logprob_scoring=DISABLED_LOGPROB_SCORING,
         database_path=tmp_path / "failed.sqlite3",
         trace_dir=tmp_path / "failed-traces",
     )
@@ -435,11 +443,21 @@ def test_cli_simulate_report_and_visualize_share_artifacts(
 ):
     from psychsandbox import cli
     from psychsandbox.artifacts import find_run_dir
+    from psychsandbox.config import default_config
+    from psychsandbox.domain import LogprobScoringConfig
     from psychsandbox.runtime import orchestrator
 
     monkeypatch.setenv("PSYCHSANDBOX_RUNTIME_DIR", str(tmp_path / "artifacts"))
     monkeypatch.setattr(orchestrator, "create_gateway", lambda: DeterministicGateway())
     monkeypatch.setattr(cli.CaseRepository, "from_project", lambda _root: repository)
+    # The CLI reads the YAML default, and the offline double emits no logprobs.
+    monkeypatch.setattr(
+        cli,
+        "default_config",
+        lambda _root: default_config(root).model_copy(
+            update={"logprob_scoring": LogprobScoringConfig(enabled=False)}
+        ),
+    )
     args = cli.build_parser().parse_args([
         "--root", str(root), "simulate", "--case", "psycheval-cbt-001",
         "--sessions", "1", "--max-turns", "1", "--json",

@@ -13,7 +13,7 @@
 | `skills/` | 技能注册、硬过滤、按 ID 展开和超量候选的向量筛选 | 最终适用判断或自动晋升 |
 | `runtime/` | 会谈编排、候选隔离与选优、披露、安全、状态、记忆、计划和 SQLite | 训练基础模型 |
 | `runtime/run_management.py` | 只读预览、按编号同步删除、失败日志与重试 | 自动监视目录或删除共享案例/技能 |
-| `evaluation/` | 每 session 量表评分、规则安全门控、纵向、候选 RFT 评分和整体 PsychEval 评测 | 临床诊断或疗效判断 |
+| `evaluation/` | 每 session 量表评分、可选概率加权（logprob）评分与端点探测、规则安全门控、纵向、候选 RFT 评分和整体 PsychEval 评测 | 临床诊断或疗效判断 |
 | `visualization/` | 从已保存结果渲染离线 HTML/SVG | 修改运行状态 |
 
 ## 单轮流程
@@ -58,9 +58,9 @@ RFT 默认关闭，启用后默认 3 条候选；候选以整场会谈为单位�
 - 技能树：`assets/skills/sect/`，677 个元技能、4481 个原子技能。
 - `assets/profiles` 是保留的 sample/rft 参考资产，当前病例仓库不递归加载。
 - `data/integrative` 是未注册的保留资源，不出现在可运行 case 列表。
-- `prompts/` 共有 55 个提示词资产，其中 54 个有调用点：46 个督导量表（每 session 与整体督导共用）、8 个普通生成模板。生成提示词以 Jinja2 模板存放，由具体 agent 构造输入字典并调用 `psychsandbox/prompts.py::render_prompt`，结构化输出按 Pydantic schema 解析。额外的 `client/dialogue.jinja2` 是参考资产，没有生产调用点。
+- `prompts/` 共有 56 个提示词资产，其中 55 个有调用点：46 个督导量表（每 session 与整体督导共用）、1 个可选概率加权评分提示词（`eval/_scoring/`）、8 个普通生成模板。生成提示词以 Jinja2 模板存放，由具体 agent 构造输入字典并调用 `psychsandbox/prompts.py::render_prompt`，结构化输出按 Pydantic schema 解析。额外的 `client/dialogue.jinja2` 是参考资产，没有生产调用点。
 
-CLI 经 `default_config(root)` 加载 `configs/runtime.yaml` 后应用显式命令行参数。本机检出目录现为 `D:\study\大创\project\psych_sandbox`（此前为 `D:\0test\psych_sandbox`）；测试/运行仍按次写入 `runs/tests` 与 `runs/runtime`，虚拟环境的可编辑安装需要在移动检出目录后重新安装，见 [README](../README.md#53-迁移后的安装检查powershell)。
+CLI 经 `default_config(root)` 加载 `configs/runtime.yaml` 后应用显式命令行参数。本机检出目录现为 `C:\Users\Rain\Desktop\psych_sandbox`（此前依次为 `D:\study\大创\project\psych_sandbox`、`D:\0test\psych_sandbox`）；测试/运行仍按次写入 `runs/tests` 与 `runs/runtime`，虚拟环境的可编辑安装需要在移动检出目录后重新安装，见 [README](../README.md#53-迁移后的安装检查powershell)。
 
 跨会话记忆的分层结构、写入者、咨询师读取范围和当前限制见 [记忆结构](MEMORY.md)。
 

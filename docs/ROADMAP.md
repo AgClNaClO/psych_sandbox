@@ -9,8 +9,10 @@
 - 来访者执行私有状态规划→受限语言生成→台词证据核验，跨 session 只继承已披露证据与会后记忆。
 - 每 session 保存 PsychEval 量表评分、规则安全门控、纵向进度和下一计划；全部 session 后运行一次 PsychEval 整体督导并写入 SQLite、JSONL 和离线 HTML。
 - 自动化测试覆盖 API 契约、五流派隔离、披露/安全边界、连续会谈、恢复和持久化。
-- 可选整场会谈多候选、统一 PsychEval 量表评分和选优已实现；仅胜出者进入会后整理及下一会谈。默认关闭，尚无训练权重更新或选优到训练导出的自动连接，详见 [会谈 RFT](SESSION_RFT.md)。
-- CLI 已读取 YAML；产物按次归档至 `runs/tests` 与 `runs/runtime`。测试套件当前为 386 项（2026-09-22 用 `pytest --collect-only -q` 统计），最近一次记录的全量通过为 2026-08-28 的 383 项（173.23 秒）；真实模型 API 与 embedding 联调仍需使用实际密钥验证。
+- 可选的整场会谈多候选、统一 PsychEval 量表评分和选优已实现；仅胜出者进入会后整理及下一会谈。默认关闭，尚无训练权重更新或选优到训练导出的自动连接，详见 [会谈 RFT](SESSION_RFT.md)。
+- 新增可选的概率加权（logprob）量表评分（默认开启）：把 PsychEval 量表的条目均值替换为论文式 8 的概率加权期望，保留条目 JSON 调用作审计；数值 token 质量不足或端点不返回 `logprobs` 时明确失败，不回退均值或零分。配套 `psych-sandbox probe logprob-scoring` 端点实测入口和 `run_simulate.bat` 启动脚本，见 [借鉴说明](../notes/logprob_scoring_borrowing.md) 与 [会谈 RFT](SESSION_RFT.md)。
+- 网关瞬时重试预算统一由 `MODEL_MAX_ATTEMPTS`（默认 3）控制，聊天生成、logprob 评判与 embedding 批次共用；预算耗尽写 `kind="api_error"` 诊断记录（只含请求元数据）。RFT 单次评分时限默认由 180 秒调整为 240 秒。
+- CLI 已读取 YAML；产物按次归档至 `runs/tests` 与 `runs/runtime`。测试套件当前为 452 项（2026-09-28 用 `.venv\Scripts\python.exe -B -m pytest --collect-only -q` 统计；同日全量 `pytest -q` 为 452 passed、38.15 秒）；真实模型 API 与 embedding 联调仍需使用实际密钥验证。
 - 新增按运行编号的只读预览和确认删除，关联清理文件/数据库，失败留存删除日志并可重试；新增 `runs clean-tests` 清理 `runs/tests` 测试日志，支持 `PSYCHSANDBOX_AUTO_CLEAN_TESTS=1` 在 `pytest` 结束时自动删除该次调用目录；支持 ChatECNU 同源 embedding 共用令牌；RFT 默认候选数为 3，仍默认关闭。
 
 ## 下一步：实验验收
@@ -22,6 +24,7 @@
 5. 报告均值、标准差、置信区间、失败案例、API 失败率和安全误报/漏报。
 6. 正式实验至少覆盖 30 个 CBT 案例；安全集至少 100 条；至少两名心理学背景评审者评审 30 个公开、合成或批准脱敏的 sessions，并报告加权 Kappa。
 7. 对比单候选与会谈 RFT：记录重复率、合格率、整批失败率、耗时和费用，独立复评胜出者，避免把用于选优的同一评分器分数当作独立效果证据。远端 API 没有 seed 保证，应做重复采样。
+8. 先用 `psych-sandbox probe logprob-scoring` 留档端点能力，再对比条目均值与概率加权期望：同一批候选用两种聚合方式各跑一次，记录分数差异、评分失败率和成本（每个非复合量表多一次评判调用）。本仓库尚未做该对比，不能据此声称连续分提高选优质量。
 
 ## 后续适配器
 

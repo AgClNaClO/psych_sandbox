@@ -6,11 +6,15 @@ from types import SimpleNamespace
 
 import pytest
 from pydantic import BaseModel
+from tenacity import wait_none
 
 from psychsandbox.model_client import (
+    DEFAULT_MAX_ATTEMPTS,
+    ECNU_EMBEDDING_MAX_BATCH,
     OpenAICompatibleGateway,
     _json_object_roles,
     _lenient_parse,
+    _max_attempts_from_env,
     _structured_output_roles,
 )
 
@@ -50,6 +54,7 @@ def _gateway(tmp_path, responses: list[str]) -> tuple[
         "client", "counselor", "supervisor", "summarizer"
     }
     gateway.max_tokens = 2048
+    gateway.max_attempts = DEFAULT_MAX_ATTEMPTS
     gateway.diagnostic_dir = tmp_path / "diagnostics"
     return gateway, completions
 
@@ -106,6 +111,8 @@ def test_embedding_gateway_uses_separate_config_batches_and_response_indices(mon
     monkeypatch.setenv("EMBEDDING_API_KEY", "dummy-embedding-key")
     monkeypatch.setenv("MODEL_API_KEY", "dummy-chat-key")
     gateway = object.__new__(OpenAICompatibleGateway)
+    gateway.max_attempts = DEFAULT_MAX_ATTEMPTS
+    gateway.diagnostic_dir = None
     vectors = asyncio.run(gateway.embed_texts([str(i) for i in range(65)]))
     assert vectors == [[float(i), 1.] for i in range(65)]
     assert [len(request["input"]) for request in requests] == [64, 1]
@@ -165,7 +172,10 @@ def embedding_gateway(monkeypatch):
     monkeypatch.setenv("MODEL_API_KEY", "dummy-chat-key")
     for name in ("EMBEDDING_MODEL", "EMBEDDING_BASE_URL", "EMBEDDING_API_KEY"):
         monkeypatch.delenv(name, raising=False)
-    return object.__new__(OpenAICompatibleGateway), clients, requests
+    gateway = object.__new__(OpenAICompatibleGateway)
+    gateway.max_attempts = DEFAULT_MAX_ATTEMPTS
+    gateway.diagnostic_dir = None
+    return gateway, clients, requests
 
 
 @pytest.mark.parametrize("base_url", [
@@ -317,8 +327,9 @@ def test_embedding_identity_uses_resolved_endpoint_and_model(monkeypatch, embedd
     (["中" * 4096, "文" * 4096, "尾"], [2, 1]),
     (["a" * 8192, "🙂" * 8192], [1, 1]),
     (["中" * 3000] * 5, [2, 2, 1]),
-    ([str(i) for i in range(65)], [64, 1]),
-    (["中" * 128] * 65, [64, 1]),
+    ([str(i) for i in range(65)], [32, 32, 1]),
+    (["中" * 128] * 65, [32, 32, 1]),
+    (["短句"] * 100, [32, 32, 32, 4]),
 ])
 @pytest.mark.parametrize("explicit", [False, True])
 def test_ecnu_embedding_batches_obey_character_and_item_limits(
@@ -333,6 +344,8 @@ def test_ecnu_embedding_batches_obey_character_and_item_limits(
     vectors = asyncio.run(gateway.embed_texts(texts))
     assert vectors == [[float(len(text))] for text in texts]
     assert [len(request["input"]) for request in requests] == sizes
+    # The measured ChatECNU endpoint answers HTTP 500 from the 33rd input on.
+    assert all(len(request["input"]) <= ECNU_EMBEDDING_MAX_BATCH for request in requests)
     assert all(sum(map(len, request["input"])) <= 8192 for request in requests)
     assert [text for request in requests for text in request["input"]] == texts
     assert clients[0].closed
@@ -427,6 +440,182 @@ def test_api_gateway_retries_with_invalid_output_and_writes_diagnostic(tmp_path)
     assert len(diagnostics) == 1
     diagnostic = json.loads(diagnostics[0].read_text(encoding="utf-8"))
     assert diagnostic["raw_response"] == invalid
+
+
+class FailingTransport:
+    """Always-failing ``client.chat.completions`` double."""
+
+    def __init__(self, error: Exception):
+        self.error = error
+        self.calls: list[dict] = []
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+        raise self.error
+
+
+def _fast_transport_retries(monkeypatch):
+    """Skip the real backoff so exhausted-budget tests stay quick."""
+    monkeypatch.setattr(
+        "psychsandbox.model_client.TRANSPORT_RETRY_WAIT", wait_none()
+    )
+
+
+def _failing_gateway(tmp_path, attempts):
+    gateway, _ = _gateway(tmp_path, [])
+    gateway.max_attempts = attempts
+    transport = FailingTransport(RuntimeError("upstream 500"))
+    gateway.client.chat.completions = transport
+    return gateway, transport
+
+
+def _failing_call(gateway):
+    return asyncio.run(
+        gateway.complete_structured(
+            role="counselor",
+            system_prompt="Return JSON.",
+            input_payload={"subject": "test"},
+            output_schema=ExampleOutput,
+            temperature=0.4,
+        )
+    )
+
+
+def test_transport_budget_defaults_to_three_attempts(tmp_path, monkeypatch):
+    _fast_transport_retries(monkeypatch)
+    monkeypatch.delenv("MODEL_MAX_ATTEMPTS", raising=False)
+    gateway, transport = _failing_gateway(tmp_path, _max_attempts_from_env())
+
+    with pytest.raises(RuntimeError, match="upstream 500"):
+        _failing_call(gateway)
+
+    assert DEFAULT_MAX_ATTEMPTS == 3
+    assert len(transport.calls) == 3
+    assert list(gateway.diagnostic_dir.glob("*.json"))
+
+
+def test_transport_budget_follows_model_max_attempts(tmp_path, monkeypatch):
+    _fast_transport_retries(monkeypatch)
+    monkeypatch.setenv("MODEL_MAX_ATTEMPTS", "5")
+    gateway, transport = _failing_gateway(tmp_path, _max_attempts_from_env())
+
+    with pytest.raises(RuntimeError, match="upstream 500"):
+        _failing_call(gateway)
+
+    assert len(transport.calls) == 5
+
+
+def test_exhausted_transport_archives_request_metadata_only(tmp_path, monkeypatch):
+    _fast_transport_retries(monkeypatch)
+    gateway, _ = _failing_gateway(tmp_path, 2)
+
+    with pytest.raises(RuntimeError, match="upstream 500"):
+        _failing_call(gateway)
+
+    records = list(gateway.diagnostic_dir.glob("*.json"))
+    assert len(records) == 1
+    record = json.loads(records[0].read_text(encoding="utf-8"))
+    assert record["kind"] == "api_error"
+    assert (record["role"], record["model"]) == ("counselor", "ecnu-plus")
+    assert record["output_schema"] == "ExampleOutput"
+    assert (record["attempt"], record["max_attempts"]) == (2, 2)
+    assert record["error_type"] == "RuntimeError"
+    assert record["request"] == {"temperature": 0.4, "response_format": "json_schema"}
+    # Prompts and credentials must never reach the diagnostic record.
+    assert set(record) == {
+        "kind", "timestamp", "role", "model", "output_schema", "attempt",
+        "max_attempts", "error_type", "status_code", "request_id", "error", "request",
+    }
+
+
+class FlakyEmbeddings:
+    """Embedding transport double: fail ``failures`` calls, then answer."""
+
+    def __init__(self, error: Exception, failures: int):
+        self.error = error
+        self.failures = failures
+        self.calls: list[dict] = []
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if len(self.calls) <= self.failures:
+            raise self.error
+        rows = [
+            SimpleNamespace(index=index, embedding=[float(len(text))])
+            for index, text in enumerate(kwargs["input"])
+        ]
+        return SimpleNamespace(data=rows)
+
+
+def _flaky_embedding_gateway(monkeypatch, tmp_path, transport, attempts):
+    """Bare gateway whose embedding endpoint is ``transport``."""
+    import openai
+
+    class EmbeddingOnlyClient:
+        def __init__(self, **kwargs):
+            self.embeddings = transport
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+    monkeypatch.setattr(openai, "AsyncOpenAI", EmbeddingOnlyClient)
+    monkeypatch.setenv("EMBEDDING_MODEL", "test-embedding")
+    monkeypatch.setenv("EMBEDDING_BASE_URL", "https://embedding.example.test/v1")
+    monkeypatch.setenv("EMBEDDING_API_KEY", "dummy-embedding-key")
+    gateway = object.__new__(OpenAICompatibleGateway)
+    gateway.max_attempts = attempts
+    gateway.diagnostic_dir = tmp_path / "diagnostics"
+    return gateway
+
+
+def test_embedding_transient_failure_recovers_within_budget(tmp_path, monkeypatch):
+    _fast_transport_retries(monkeypatch)
+    transport = FlakyEmbeddings(RuntimeError("embedding 500"), failures=1)
+    gateway = _flaky_embedding_gateway(monkeypatch, tmp_path, transport, attempts=3)
+
+    assert asyncio.run(gateway.embed_texts(["公开话语", "短句"])) == [[4.], [2.]]
+
+    assert len(transport.calls) == 2
+    assert not gateway.diagnostic_dir.exists()
+
+
+def test_exhausted_embedding_transport_archives_request_metadata_only(tmp_path, monkeypatch):
+    _fast_transport_retries(monkeypatch)
+    transport = FlakyEmbeddings(RuntimeError("embedding 500"), failures=9)
+    gateway = _flaky_embedding_gateway(monkeypatch, tmp_path, transport, attempts=2)
+
+    with pytest.raises(RuntimeError, match="embedding 500"):
+        asyncio.run(gateway.embed_texts(["公开话语"]))
+
+    assert len(transport.calls) == 2
+    records = list(gateway.diagnostic_dir.glob("*.json"))
+    assert len(records) == 1
+    record = json.loads(records[0].read_text(encoding="utf-8"))
+    assert record["kind"] == "api_error"
+    assert (record["role"], record["model"]) == ("embedding", "test-embedding")
+    assert record["output_schema"] == "Embedding"
+    assert (record["attempt"], record["max_attempts"]) == (2, 2)
+    assert record["error_type"] == "RuntimeError"
+    assert record["request"] == {
+        "response_format": "embeddings", "model": "test-embedding",
+        "batch_index": 0, "batch_size": 1,
+    }
+    # Prompts, skill texts and credentials must never reach the record.
+    assert set(record) == {
+        "kind", "timestamp", "role", "model", "output_schema", "attempt",
+        "max_attempts", "error_type", "status_code", "request_id", "error", "request",
+    }
+
+
+@pytest.mark.parametrize("value", ["0", "-2", "many"])
+def test_model_max_attempts_rejects_a_non_positive_integer(monkeypatch, value):
+    monkeypatch.setenv("MODEL_MAX_ATTEMPTS", value)
+
+    with pytest.raises(RuntimeError, match="MODEL_MAX_ATTEMPTS"):
+        _max_attempts_from_env()
 
 
 def test_parallel_api_diagnostics_keep_candidate_scope_and_request_metadata(tmp_path):

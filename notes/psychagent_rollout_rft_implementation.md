@@ -9,7 +9,7 @@
 - 本次论文依据为 **arXiv:2604.00931v3，2026-04-28**。v1 为 2026-04-01，v2 为 2026-04-02；代码提交早于 v3，不能假定二者完全同步。[论文版本页][paper-abs]
 - 已读实际方法体，覆盖 src/rft、其继承的 src/sample 调用链、src/eval/reward.py、评分方法和 API wrapper。README 只用于辅助确认公开范围。
 - 未读取或修改本地 Psych-new；未做模型/embedding API 调用，未读取环境变量或密钥，未执行仓库启动器，未加载技能 .pt 文件；不展示任何模型隐藏思维链内容。没有介入本地 client/dialogue 模板或 audit UI。
-- 研究源码目录：D:/0test/psych_sandbox/runs/runtime/20260828T103904__psychagent-research__f74c/official（该运行目录位于当时的检出路径；当前检出目录为 `D:\study\大创\project\psych_sandbox`）。
+- 研究源码目录：D:/0test/psych_sandbox/runs/runtime/20260828T103904__psychagent-research__f74c/official（该运行目录位于当时的检出路径；当前检出目录为 `C:\Users\Rain\Desktop\psych_sandbox`）。
 - 该运行目录还保存 paper_2604.00931v3.html、paper_2604.00931v3_abs.html、github_commit_469f45e.json、python_asyncio_task.html、python_asyncio_sync.html。
 - 下载的论文 HTML SHA-256：51ad94f07e36f874f817d239b8d3a696cd795cf3b234592cff83d58bd1634a2a。
 - 本笔记中的 GitHub 代码链接全部固定上述完整提交。下文“推论”表示由已读代码推导，未声称做过真实服务运行。
@@ -256,8 +256,8 @@ compute_rollout_reward 的计算为：
 | `max_counselor_turns: 45` | 虽加载并允许 runtime 覆盖，但实际对话循环读 `runtime.psychagent_max_turns`，包含咨询师开场白 | `max_turns_per_session` / `--max-turns`，默认 8，允许 1..50 |
 | `end_token: "</end>"` | runner 检查文本标记并移除；不是 API 请求中的 `stop` 参数 | 无字符串哨兵；结构化 `decision.end_session` 和安全/轮数规则 |
 | `timeout_sec: 120` | 一次后端尝试的等待时间；不是整个会谈或所有重试的总时限 | `MODEL_TIMEOUT_SECONDS`，源码默认 90，本机 `.env` 为 90，示例文件为 180 |
-| `max_retries: 16` | 后端 RetryPolicy 解释为额外 16 次，即至多 17 次尝试；SDK 自带重试关闭。runner 另有 `psychagent_max_retries`，层次不同 | Tenacity 至多 3 次尝试；本地 OpenAI SDK 默认另有 2 次额外重试；JSON 修复最多两次生成，选技纠错最多额外一次，预算互不等价 |
-| `retry_sleep_sec: 1.0` | 后端指数退避基数 1 秒，上限 2 秒，再加 0..0.2 秒抖动；不代表每次固定 1 秒 | Tenacity 指数退避 min=1/max=8，未开放同名配置 |
+| `max_retries: 16` | 后端 RetryPolicy 解释为额外 16 次，即至多 17 次尝试；SDK 自带重试关闭。runner 另有 `psychagent_max_retries`，层次不同 | Tenacity 默认 3 次尝试，可用 `MODEL_MAX_ATTEMPTS` 调高（预算耗尽写 `api_error` 诊断）；本地 OpenAI SDK 默认另有 2 次额外重试；JSON 修复最多两次生成，选技纠错最多额外一次，预算互不等价 |
+| `retry_sleep_sec: 1.0` | 后端指数退避基数 1 秒，上限 2 秒，再加 0..0.2 秒抖动；不代表每次固定 1 秒 | Tenacity 指数退避 min=1/max=8（退避参数固定，未开放同名配置） |
 
 官方依据：[baseline 配置][cfg-baseline]、[对话循环][dialogue]、[公共记忆构造][public-memory]、 [后端 API][sample-api]、[重试实现][retry-policy]、[配置覆盖][baseline-overrides]。 `memory_mode` 结论来自固定提交 `src/` 全文引用检查，不能推断其他历史版本也无实现。
 

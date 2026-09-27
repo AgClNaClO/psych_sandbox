@@ -13,7 +13,10 @@ from psychsandbox.evaluation.psycheval_supervisor import (
 from psychsandbox.runtime import CounselingSandbox
 from psychsandbox.therapies import get_therapy_profile, list_therapy_profiles
 from psychsandbox.visualization import generate_run_report
-from tests.deterministic_gateway import DeterministicGateway
+from tests.deterministic_gateway import (
+    DISABLED_LOGPROB_SCORING,
+    DeterministicGateway,
+)
 
 
 def _sandbox(root, tmp_path, repository, *, max_turns: int = 2) -> CounselingSandbox:
@@ -21,6 +24,7 @@ def _sandbox(root, tmp_path, repository, *, max_turns: int = 2) -> CounselingSan
         SandboxConfig(
             project_root=root,
             max_turns_per_session=max_turns,
+            logprob_scoring=DISABLED_LOGPROB_SCORING,
             database_path=tmp_path / "phase1.sqlite3",
             trace_dir=tmp_path / "traces",
         ),

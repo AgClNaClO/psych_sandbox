@@ -6,7 +6,7 @@
 
 ## 快速开始
 
-本机检出目录为 `D:\study\大创\project\psych_sandbox`（2026-09 从 `D:\0test\psych_sandbox` 移动到此路径；移动检出目录后须重做可编辑安装检查）。已有项目无需重新 clone；先阅读 [迁移后的安装检查](#53-迁移后的安装检查powershell)。后文安装与运行示例除另有标注外使用 CMD。
+本机检出目录为 `C:\Users\Rain\Desktop\psych_sandbox`（2026-09 由 `D:\study\大创\project\psych_sandbox` 移入，该路径之前为 `D:\0test\psych_sandbox`；移动检出目录后须重做可编辑安装检查）。已有项目无需重新 clone；先阅读 [迁移后的安装检查](#53-迁移后的安装检查powershell)。后文安装与运行示例除另有标注外使用 CMD。
 
 以下命令适用于 Windows CMD。运行前请先根据 `.env.example` 配置 API 密钥、接口地址和各角色模型：
 
@@ -50,7 +50,8 @@ psych-sandbox visualize --run run-xxxxxxxxxxxx
 
 - HTML 报告改为“概览页 + 每场会谈独立页”：逐轮规划/决策、技能查询记录、来访者模拟决策摘要和会后自评改为对话上方可折叠的内联卡片；原先独立的“运行过程 / 来访者状态趋势 / 纵向判断”板块不再渲染，这些数据仍保存在 `result.json`、SQLite 和 `trajectory.jsonl` 中。
 - 新增 [记忆结构说明](docs/MEMORY.md)，记录当前咨询师记忆的三层结构、写入者、咨询师读取范围与已知限制。
-- 本机检出目录由 `D:\0test\psych_sandbox` 移至 `D:\study\大创\project\psych_sandbox`，本文档与 `docs/` 下的路径、安装检查和提示词/测试计数同步更新。
+- 新增可选的概率加权（logprob）量表评分，借鉴 Zhang et al.（npj Artificial Intelligence, DOI 10.1038/s44387-026-00160-9）式 8 的连续评分与拒答质量门：默认开启，端点不返回 logprobs 或质量不足时明确失败，不静默回退；配套 `psych-sandbox probe logprob-scoring` 端点实测入口，详见 [借鉴说明](notes/logprob_scoring_borrowing.md)。
+- 本机检出目录由 `D:\0test\psych_sandbox` 经 `D:\study\大创\project\psych_sandbox` 移至 `C:\Users\Rain\Desktop\psych_sandbox`，本文档与 `docs/` 下的路径、安装检查和提示词/测试计数同步更新。
 
 ## 1. 项目要解决什么问题
 
@@ -99,7 +100,7 @@ SQLite、JSONL 轨迹和后续经验池
 - 每次 CLI 仿真自动生成单文件 HTML 报告：一个概览页加每场会谈的独立页面，页内对话上方可折叠查看该轮的规划与决策、技能查询记录、会后自评和 E.9 临床摘要，并汇总整体督导评估、披露/安全记录和完整对话。
 - 生产运行统一使用 OpenAI-compatible API，不提供离线或本地模型后端。
 - 自动化测试覆盖 API 契约和主要控制流程。
-- 测试套件当前为 386 项（2026-09-22 用 `pytest --collect-only -q` 统计）。最近一次记录的全量通过为 2026-08-28 的 383 项（173.23 秒），覆盖统一删除与 ChatECNU 配置；本次路径与文档更新只做了收集计数和两个记忆相关单测，未重跑全量套件，也未调用真实模型 API，因此不据此声称模型质量或真实接口联调通过。
+- 测试套件当前为 452 项（2026-09-28 用 `.venv\Scripts\python.exe -B -m pytest --collect-only -q` 统计）。同日在当前检出目录全量运行 `pytest -q` 为 452 passed（38.15 秒），覆盖概率加权评分与启动脚本、统一删除和 ChatECNU 配置等；全量测试不调用真实模型 API，因此不据此声称模型质量或真实接口联调通过。
 - 三随机种子、30 案例正式实验和人工评审仍需要在后续实验阶段完成。
 
 ## 3. 项目中的三个智能体
@@ -217,7 +218,7 @@ src/psychsandbox/
 先打开 CMD，进入项目目录：
 
 ```bat
-cd /d D:\study\大创\project\psych_sandbox
+cd /d C:\Users\Rain\Desktop\psych_sandbox
 ```
 
 确认 Python 和 Git：
@@ -239,7 +240,7 @@ python -m pip install -e ".[dev]"
 以后每次重新打开 CMD，只需要执行：
 
 ```bat
-cd /d D:\study\大创\project\psych_sandbox
+cd /d C:\Users\Rain\Desktop\psych_sandbox
 call .venv\Scripts\activate.bat
 ```
 
@@ -260,15 +261,15 @@ python -m psychsandbox --help
 复制或移动 `.venv` 不保证环境可移植；此前遇到过可编辑安装的 `.pth` 仍指向旧目录的问题。当前检出目录下，`pytest` 依据 `pyproject.toml` 的 `pythonpath = ["src"]` 直接收集并运行测试（收集计数见第 2 节），`.venv\Scripts\` 中已有 `psych-sandbox.exe`；直接用未安装本项目的解释器执行 `python -m psychsandbox` 会报 `No module named psychsandbox`，此时先完成可编辑安装。新环境或再次移动检出目录时，重新安装并核对实际导入位置：
 
 ```powershell
-Set-Location -LiteralPath 'D:\study\大创\project\psych_sandbox'
+Set-Location -LiteralPath 'C:\Users\Rain\Desktop\psych_sandbox'
 .\.venv\Scripts\python.exe -B -m pip install -e '.[dev]'
 .\.venv\Scripts\python.exe -B -c "import psychsandbox; print(psychsandbox.__file__)"
 .\.venv\Scripts\python.exe -B -m psychsandbox --help
 ```
 
-导入位置应在 `D:\study\大创\project\psych_sandbox\src` 下。安装需要可用的依赖源；若缺少构建依赖，不要用 `--no-build-isolation` 跳过准备。若解释器本身不能启动，应使用本机 Python 3.11+ 重建环境并重新安装依赖。旧 `pip.exe`、`pytest.exe`、激活脚本可能保留原路径，移动目录后优先直接使用 `.venv\Scripts\python.exe -m pip/pytest/psychsandbox`，不依赖这些旧入口。
+导入位置应在 `C:\Users\Rain\Desktop\psych_sandbox\src` 下。安装需要可用的依赖源；若缺少构建依赖，不要用 `--no-build-isolation` 跳过准备。若解释器本身不能启动，应使用本机 Python 3.11+ 重建环境并重新安装依赖。旧 `pip.exe`、`pytest.exe`、激活脚本可能保留原路径，移动目录后优先直接使用 `.venv\Scripts\python.exe -m pip/pytest/psychsandbox`，不依赖这些旧入口。
 
-CLI 默认以当前目录作为项目根目录；在其他目录调用时，将 `--root D:\study\大创\project\psych_sandbox` 放在 `simulate`、`cases` 等子命令之前。清理过的运行编号不再可查，后续运行会在当前项目的 `runs/runtime/` 下建立新目录。仅手动删除文件夹不会清除数据库，需用统一删除入口同步清理。
+CLI 默认以当前目录作为项目根目录；在其他目录调用时，将 `--root C:\Users\Rain\Desktop\psych_sandbox` 放在 `simulate`、`cases` 等子命令之前。清理过的运行编号不再可查，后续运行会在当前项目的 `runs/runtime/` 下建立新目录。仅手动删除文件夹不会清除数据库，需用统一删除入口同步清理。
 
 ## 6. 数据资源与可选刷新
 
@@ -291,7 +292,7 @@ prompts\client\           dialogue.jinja2 参考模板，未接入生产
 
 当前运行时注册 BT、CBT、HET、PDT、PMT 五个适配器。`data\integrative` 仍作为资源保留，但在具有独立技能树和评估标准之前不会冒充其中任一流派。
 
-提示词目录共 55 个提示词资产（另有 1 个 `README.md`），其中 54 个有当前文件加载链调用点：46 个 `prompts/eval` 量表，另有 8 个生成模板（`prompts/counselor/`、`prompts/simclient/`、`prompts/memory/`）以 **Jinja2 模板**存放，由 `psychsandbox/prompts.py::render_prompt` 在每次模型调用时渲染，并按 Pydantic schema 解析输出。`prompts/client/dialogue.jinja2` 仅作参考，未进入生产加载链。完整映射和接入要求见 [prompts/README.md](prompts/README.md)。
+提示词目录共 56 个提示词资产（另有 1 个 `README.md`），其中 55 个有当前文件加载链调用点：46 个 `prompts/eval` 量表、1 个 `prompts/eval/_scoring/` 概率加权评分提示词（可选 `logprob_scoring` 路径），另有 8 个生成模板（`prompts/counselor/`、`prompts/simclient/`、`prompts/memory/`）以 **Jinja2 模板**存放，由 `psychsandbox/prompts.py::render_prompt` 在每次模型调用时渲染，并按 Pydantic schema 解析输出。`prompts/client/dialogue.jinja2` 仅作参考，未进入生产加载链。完整映射和接入要求见 [prompts/README.md](prompts/README.md)。
 
 ### 6.1 可选：重新下载官方数据
 
@@ -384,6 +385,17 @@ psych-sandbox simulate --case psycheval-cbt-001 --sessions 3 --rollouts 3 --roll
 
 每个 session 从相同会前状态生成完整候选会谈，经安全检查、去重和 PsychEval 量表评分后，只将胜出会谈推进记忆与下一会谈。默认关闭，避免普通仿真自动增加调用成本；`--no-rft` 或 `--rollouts 1` 可关闭。启用后的默认候选数为 3，生成/评分并发仍为 2，至少 2 个不同合格候选才能选优。 CLI 现在会读取 `configs/runtime.yaml`，显式命令行参数再覆盖 YAML。评分规则、失败处理和目录结构见 [会谈 RFT](docs/SESSION_RFT.md)。这里只实现采样、评分与选优，没有权重训练。
 
+### 可选：概率加权（logprob）量表评分
+
+```bat
+psych-sandbox probe logprob-scoring --case psycheval-cbt-001 --instrument wai
+psych-sandbox simulate --case psycheval-cbt-001 --sessions 3 --logprob-scoring
+```
+
+先探测端点，再开启评分：端点必须返回 `logprobs`/`top_logprobs`，否则该路径明确报错（RFT 记为评分失败并按既有补采规则处理），不会回退到条目均值或零分。第 10 节有配置与产物说明，方法学来源与实测记录见 [借鉴说明](notes/logprob_scoring_borrowing.md)。
+
+也可以直接双击项目根目录的 `run_simulate.bat`：它激活虚拟环境后按脚本顶部的可调参数（案例、会话数、每场轮数上限 `TURNS`、候选数、并发、`LOGPROB_SCORING`、`PROBE_LOGPROB`、`PROBE_INSTRUMENT`、`MODEL_MAX_ATTEMPTS`）跑一次真实仿真，默认 `LOGPROB_SCORING=1` 与 `MODEL_MAX_ATTEMPTS=6`（脚本 `set` 出的进程环境变量优先于 `.env` 与代码默认值 3），并在仿真前先用探测量表确认端点返回 logprobs（`PROBE_LOGPROB=0` 可跳过，失败时脚本明确中止，不会让整批评分白跑）。`run_simulate.bat probe` 只做一次端点 logprobs 探测并打印完整记录。该脚本必须保持纯 ASCII 且不调用 `chcp`：cmd 会在更换代码页后丢掉批处理的行位置，把注释行碎片当成命令执行；脚本自身的中文提示因此由 Python Unicode 转义输出，改动说明见[借鉴说明的启动脚本一节](notes/logprob_scoring_borrowing.md#windows-启动脚本)，回归约束见 `tests/test_launcher_script.py`。
+
 ## 8. 查看评测和完整报告
 
 查看每个 session 的 PsychEval 量表评分：
@@ -462,11 +474,14 @@ set SUPERVISOR_MODEL=督导师模型名称
 set MODEL_TIMEOUT_SECONDS=90
 set MODEL_STRUCTURED_OUTPUT=auto
 set MODEL_MAX_TOKENS=4096
+set MODEL_MAX_ATTEMPTS=3
 ```
 
 不要把真实密钥写入 README、代码、测试或提交到 Git。CLI 自动读取项目根目录 `.env`，已有进程环境变量优先；示例中的模型名称和地址不是服务当前可用性的保证。
 
-展开原子技能超过 24 项时调用 embedding 并保留 12 项。聊天与 embedding 都使用官方 ChatECNU 端点时，可以共用 `MODEL_API_KEY`，默认向量模型为 `ecnu-embedding-small`；显式 `EMBEDDING_MODEL`、`EMBEDDING_BASE_URL`、`EMBEDDING_API_KEY` 优先。其他端点仍需独立配置，不会跨主机/端口/路径转发聊天密钥。超时由 `EMBEDDING_TIMEOUT_SECONDS` 控制（默认 60 秒），缺配置时在触发筛选处明确报错。详见 [技能筛选配置](docs/SKILL_SELECTION.md)。
+`MODEL_MAX_ATTEMPTS`（默认 3，`.env.example` 与 `run_simulate.bat` 的示例值为 6）控制单个模型调用的瞬时重试预算，默认值等于此前的 tenacity 三次尝试；调高可让候选在一次 5xx 风暴中继续存活。OpenAI SDK 自身仍有 2 次内置重试，因此单个调用的 HTTP 尝试上限约为 `MODEL_MAX_ATTEMPTS × 3`，且受 `MODEL_TIMEOUT_SECONDS` 与 RFT 候选 1800 秒总时限约束。预算耗尽的请求元数据（角色、模型、状态码、尝试次数，不含提示词与密钥）写入该候选的 `dNNN/api_error` 诊断记录。
+
+展开原子技能超过 24 项时调用 embedding 并保留 12 项。聊天与 embedding 都使用官方 ChatECNU 端点时，可以共用 `MODEL_API_KEY`，默认向量模型为 `ecnu-embedding-small`；显式 `EMBEDDING_MODEL`、`EMBEDDING_BASE_URL`、`EMBEDDING_API_KEY` 优先。其他端点仍需独立配置，不会跨主机/端口/路径转发聊天密钥。超时由 `EMBEDDING_TIMEOUT_SECONDS` 控制（默认 60 秒），缺配置时在触发筛选处明确报错。该调用与聊天、评判调用共用 `MODEL_MAX_ATTEMPTS` 瞬时重试预算，预算耗尽写 `api_error` 诊断。详见 [技能筛选配置](docs/SKILL_SELECTION.md)。
 
 `SUPERVISOR_MODEL` 未设置时会回退到 `COUNSELOR_MODEL`，用于每个 session 的量表评分、多会话结束后的整体督导，以及开启 RFT 后的候选会谈评分；三处使用同一套 `prompts/eval` 量表提示词与分值定义。 `SUMMARY_MODEL` 未设置时同样回退到 `COUNSELOR_MODEL`，用于 E.7/E.8/E.9 记忆流水线（对话信息提取、档案合并与临床摘要）。
 
@@ -481,6 +496,14 @@ set MODEL_STRUCTURED_OUTPUT=auto
 set MODEL_TIMEOUT_SECONDS=180
 set MODEL_MAX_TOKENS=4096
 ```
+
+`logprob_scoring`（默认开启，可用 `enabled: false` 关闭）不再解析整数文本，而是按论文式 8 取评判模型数值 token 的概率加权期望 `score = sum(i * p_i) / sum(p_i)`；数值 token 总概率质量低于 `mass_floor`（默认 0.25）判为拒答并明确失败，不用零分或条目均值代替。端点必须返回 `logprobs`，换模型或供应商后应重新实测：
+
+```bat
+psych-sandbox probe logprob-scoring --case psycheval-cbt-001 --instrument wai
+```
+
+该命令一次调用建立一个 `runs\runtime\时间__probe-logprob-scoring__编号` 目录，`probe.json` 记录评分带、请求参数、完整分布、总质量与结论；端点未返回 logprobs 或未通过质量门时退出码为 1，记录照常保留。该路径默认开启（`configs/runtime.yaml` 的 `logprob_scoring.enabled: true`；`simulate --logprob-scoring` 仍可显式打开）；探测不通过或只想保留条目均值时，把该值改为 `false`。该路径每个非复合量表多一次评判调用，RRO 与 PANAS 仍用官方公式，详见 [借鉴说明](notes/logprob_scoring_borrowing.md)。
 
 运行真实 API：
 

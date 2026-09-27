@@ -7,13 +7,21 @@ from typing import Literal, cast
 from ..domain import (
     CounselingCase,
     HolisticEvaluationReport,
+    LogprobScoringConfig,
     RunResult,
     ScaleItems,
     ScaleScore,
     SessionEvaluationReport,
     SessionRecord,
 )
+from ..logprob import NumericRating, build_rating_prompt, logprob_band
 from ..model_client import ModelGateway
+
+
+# Project-added prompt asset (not an official PsychEval scale): asks the judge
+# for one overall integer rating on the instrument's own raw scale so that the
+# rating can be read from the numeric token distribution (paper Eq. 8).
+LOGPROB_RATING_PROMPT = "_scoring/instrument_rating.txt"
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +210,15 @@ class PsychEvalSupervisor:
     final holistic score share one instrument set. The supervisor only scores;
     it never plans the next session (planning is a separate consolidation
     concern, per PsychAgent §3.3 / PsychEval §5).
+
+    With ``logprob_scoring`` enabled, every non-composite instrument gets one
+    extra judge call whose overall integer rating is read from the model's
+    numeric token distribution and weighted by probability (paper Eq. 8); the
+    item-level JSON call still runs so that ``item_scores`` stays auditable.
+    RRO and PANAS keep their official composite formulas. The optional path adds
+    one judge call per instrument and requires an endpoint that returns
+    ``logprobs``/``top_logprobs``; probe it first with
+    ``psych-sandbox probe logprob-scoring``.
     """
 
     def __init__(
@@ -210,16 +227,25 @@ class PsychEvalSupervisor:
         prompts_dir: Path,
         *,
         temperature: float = 0.1,
+        logprob_scoring: LogprobScoringConfig | None = None,
     ):
         self.gateway = gateway
         self.prompts_dir = Path(prompts_dir)
         self.temperature = temperature
+        # Optional probability-weighted scoring (paper Eq. 8). ``None`` keeps the
+        # official item-average path; a disabled config behaves the same so that
+        # runs can record the block without changing their scores.
+        self.logprob_scoring = (
+            logprob_scoring
+            if logprob_scoring is not None and logprob_scoring.enabled
+            else None
+        )
 
     async def evaluate(
         self, result: RunResult, case: CounselingCase
     ) -> HolisticEvaluationReport:
         dialogue = self._format_dialogue(result)
-        intake = self._format_intake(case)
+        intake = format_intake(case)
         counselor_shared, counselor_specific, client_shared, client_specific = (
             await self._score_instruments(result.therapy, intake, dialogue)
         )
@@ -247,7 +273,7 @@ class PsychEvalSupervisor:
         ranking signal, not the clinical supervisor itself.
         """
         dialogue = self._format_session_dialogue(session)
-        intake = self._format_intake(case)
+        intake = format_intake(case)
         counselor_shared, counselor_specific, client_shared, client_specific = (
             await self._score_instruments(session.plan.therapy, intake, dialogue)
         )
@@ -322,6 +348,80 @@ class PsychEvalSupervisor:
             if item.item.strip()
         ]
 
+    def _instrument_prompt_text(self, instrument: Instrument) -> str:
+        """Concatenate the official rubric text that defines one instrument.
+
+        The official scale prompts carry their own ``{{intake_form}}`` /
+        ``{{diag}}`` placeholders. The rating prompt supplies the materials once
+        in its own section, so those placeholders are neutralized here instead
+        of being filled a second time.
+        """
+        parts: list[str] = []
+        for relative in instrument.prompt_files:
+            path = self._resolve_prompt(relative)
+            if path is None:
+                continue
+            text = path.read_text(encoding="utf-8")
+            for placeholder in ("{{intake_form}}", "{{diag}}"):
+                text = text.replace(placeholder, "")
+            parts.append(text.rstrip())
+        if not parts:
+            raise FileNotFoundError(
+                f"no prompt asset resolved for instrument {instrument.key!r}"
+            )
+        return "\n\n".join(parts)
+
+    async def score_instrument_rating(
+        self, instrument: Instrument, intake: str, dialogue: str
+    ) -> NumericRating:
+        """Score one instrument from the judge's numeric token distribution.
+
+        Used by the optional ``logprob_scoring`` path and by the endpoint probe.
+        The judge is asked for a single overall integer on the instrument's own
+        raw scale, so the first generated token carries the whole distribution
+        over ratings; the score is the probability-weighted expectation (paper
+        Eq. 8) and a judgement whose in-band mass is below ``mass_floor`` is a
+        refusal. Nothing here substitutes a discrete score: an endpoint without
+        logprobs raises
+        :class:`~psychsandbox.logprob.LogprobScoringUnsupported` and a refusal
+        raises :class:`~psychsandbox.logprob.LogprobRefusalError`.
+        """
+        config = self.logprob_scoring
+        if config is None:
+            raise RuntimeError("logprob scoring is not enabled for this supervisor")
+        band = logprob_band(instrument.scale)
+        template = self._resolve_prompt(LOGPROB_RATING_PROMPT)
+        if template is None:
+            raise FileNotFoundError(
+                f"missing logprob rating prompt asset: {LOGPROB_RATING_PROMPT}"
+            )
+        system_prompt = build_rating_prompt(
+            template.read_text(encoding="utf-8"),
+            instrument=instrument.key,
+            instrument_prompt=self._instrument_prompt_text(instrument),
+            band=band,
+            intake=intake,
+            dialogue=dialogue,
+        )
+        if not _has_intake_and_dialogue(system_prompt):
+            system_prompt = (
+                system_prompt
+                + f"\n\n[来访者背景信息]：\n{intake}\n\n[咨询对话]：\n{dialogue}"
+            )
+        return await self.gateway.complete_numeric_rating(
+            role="supervisor",
+            system_prompt=system_prompt,
+            user_prompt=(
+                f"请给出来访者与咨询师本次会谈在“{instrument.key}”上的总体评分，"
+                "只输出一个整数。"
+            ),
+            band=band,
+            temperature=config.temperature,
+            top_logprobs=config.top_logprobs,
+            max_tokens=config.max_tokens,
+            mass_floor=config.mass_floor,
+        )
+
     async def _score(
         self,
         instrument: Instrument,
@@ -336,6 +436,13 @@ class PsychEvalSupervisor:
             for label, score in await self._collect_items(relative, intake, dialogue):
                 values.append(score)
                 item_scores.setdefault(label, score)
+        if self.logprob_scoring is not None:
+            # Item ratings stay on the scale for audit, but the reported score
+            # comes from the continuous logprob judgement instead of the item
+            # average. A missing logprobs payload or a low-mass refusal raises
+            # here rather than falling back to ``values``.
+            rating = await self.score_instrument_rating(instrument, intake, dialogue)
+            values = [rating.value]
         return ScaleScore(
             name=instrument.key,
             level=instrument.level,
@@ -494,6 +601,10 @@ class PsychEvalSupervisor:
         return "\n".join(parts)
 
     @staticmethod
+    def _format_intake(case: CounselingCase) -> str:
+        return format_intake(case)
+
+    @staticmethod
     def _format_session_dialogue(session: SessionRecord) -> str:
         parts: list[str] = []
         for message in session.messages:
@@ -529,6 +640,43 @@ def _has_intake_and_dialogue(prompt: str) -> bool:
     return "来访者背景信息" in prompt and "咨询对话" in prompt
 
 
+def instrument_registry(therapy: str) -> dict[str, Instrument]:
+    """All PsychEval instruments one therapy code can be scored with.
+
+    Shared and therapy-specific instruments of both levels, keyed by
+    ``Instrument.key``. The composite RRO and PANAS indices are not part of this
+    registry because they are not single-item-average ratings.
+    """
+    return {
+        **_shared_counselor_instruments(),
+        **_specific_counselor_instruments(therapy),
+        **_shared_client_instruments(),
+        **_specific_client_instruments(therapy),
+    }
+
+
+def format_intake(case: CounselingCase) -> str:
+    """Render the visitor background block used by every PsychEval judgement."""
+    profile = case.profile
+    traits = profile.static_traits
+    lines = [
+        f"姓名：{traits.name or '来访者'}",
+        f"年龄：{traits.age}",
+        f"性别：{traits.gender}",
+        f"职业：{traits.occupation}",
+        f"教育背景：{traits.educational_background}",
+        f"婚姻状况：{traits.marital_status}",
+        f"家庭状况：{traits.family_status}",
+        f"社会状况：{traits.social_status}",
+        f"主诉：{profile.main_problem}",
+        f"咨询主题：{profile.topic}",
+        f"核心诉求：{profile.core_demands}",
+    ]
+    if profile.growth_experiences:
+        lines.append("成长经历：" + "；".join(profile.growth_experiences))
+    return "\n".join(line for line in lines if line)
+
+
 def _normalize_quote(name: str) -> str:
     return (
         name.replace("\u2018", "'")
@@ -538,4 +686,4 @@ def _normalize_quote(name: str) -> str:
     )
 
 
-__all__ = ["PsychEvalSupervisor"]
+__all__ = ["PsychEvalSupervisor", "format_intake", "instrument_registry"]

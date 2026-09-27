@@ -11,7 +11,10 @@ from psychsandbox.domain import (
     UnlockedClientInfo,
 )
 from psychsandbox.runtime import CounselingSandbox, DialogueLoopGuard, DisclosureGate
-from tests.deterministic_gateway import DeterministicGateway
+from tests.deterministic_gateway import (
+    DISABLED_LOGPROB_SCORING,
+    DeterministicGateway,
+)
 
 
 def _memory_for(sample_case) -> SessionMemory:
@@ -112,6 +115,7 @@ def test_original_case_does_not_enter_refusal_loop(root, tmp_path, repository):
         SandboxConfig(
             project_root=root,
             max_turns_per_session=4,
+            logprob_scoring=DISABLED_LOGPROB_SCORING,
             database_path=tmp_path / "dialogue-loop.sqlite3",
             trace_dir=tmp_path / "dialogue-loop-traces",
         ),

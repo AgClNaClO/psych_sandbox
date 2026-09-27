@@ -402,9 +402,17 @@ async def test_new_run_checks_deletion_between_directory_creation_and_lock(
     root, tmp_path, sample_case, repository, monkeypatch
 ):
     from psychsandbox.runtime import CounselingSandbox, orchestrator
-    from tests.deterministic_gateway import DeterministicGateway
+    from tests.deterministic_gateway import (
+        DISABLED_LOGPROB_SCORING,
+        DeterministicGateway,
+    )
 
-    config = SandboxConfig(project_root=root, trace_dir=tmp_path / "runtime", database_path=tmp_path / "db.sqlite3")
+    config = SandboxConfig(
+        project_root=root,
+        trace_dir=tmp_path / "runtime",
+        database_path=tmp_path / "db.sqlite3",
+        logprob_scoring=DISABLED_LOGPROB_SCORING,
+    )
     sandbox = CounselingSandbox(
         config, gateway=DeterministicGateway(), repository=repository
     )
