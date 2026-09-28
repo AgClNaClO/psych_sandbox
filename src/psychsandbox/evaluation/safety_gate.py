@@ -43,7 +43,7 @@ class SessionSafetyGate:
     ) -> list[str]:
         """Facts the counselor referenced before the client disclosed them."""
         allowed_before = {
-            item.fact_id for item in memory_before.unlocked_client_info.facts
+            item.fact_id for item in memory_before.known_background.facts
         }
         counselor_messages = [
             item for item in session.messages if item.role == "counselor"

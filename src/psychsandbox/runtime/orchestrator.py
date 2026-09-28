@@ -140,6 +140,7 @@ class CounselingSandbox:
             self.skill_catalog,
             config.temperature_counselor,
             skill_selection=config.skill_selection,
+            memory_view=config.memory_view,
         )
         self.safety_gate = SessionSafetyGate()
         self.holistic_supervisor = PsychEvalSupervisor(
@@ -229,8 +230,8 @@ class CounselingSandbox:
             raise ValueError("The saved course is already closed")
         if memory is not None:
             if any("legacy unlocked_profile" in item for item in memory.migration_warnings):
-                legacy_facts = list(memory.unlocked_client_info.facts)
-                memory.unlocked_client_info = UnlockedClientInfo(
+                legacy_facts = list(memory.known_background.facts)
+                memory.known_background = UnlockedClientInfo(
                     client_id=case.profile.client_id
                 )
                 for previous in previous_sessions:
@@ -239,8 +240,8 @@ class CounselingSandbox:
                         _therapy_codes(case.therapy),
                         previous.session_index,
                     )
-                    memory.unlocked_client_info = await self.client_merger.merge(
-                        memory.unlocked_client_info,
+                    memory.known_background = await self.client_merger.merge(
+                        memory.known_background,
                         extracted,
                         case.profile,
                         _therapy_codes(case.therapy),
@@ -258,7 +259,7 @@ class CounselingSandbox:
                 migrated, warnings = self.client_simulator.migrate_legacy_unlocked(
                     case.profile, evidenced
                 )
-                memory.unlocked_client_info.facts = migrated
+                memory.known_background.facts = migrated
                 memory.migration_warnings.extend(warnings)
         run_id = resume_run_id or f"run-{uuid.uuid4().hex[:12]}"
         self.run_dir = (
@@ -349,9 +350,15 @@ class CounselingSandbox:
                     await self._consolidate_memory_pipeline(
                         case, session, plan, memory
                     )
+                    consolidation_notes: list[str] = []
                     memory = self.consolidator.consolidate(
-                        memory, session, next_index=session_index + 1
+                        memory,
+                        session,
+                        next_index=session_index + 1,
+                        warnings=consolidation_notes,
                     )
+                    for note in consolidation_notes:
+                        notify(f"记忆整合提示：{note}")
                     baseline_next = self._baseline_next_plan(
                         case, session, session_index + 1
                     )
@@ -385,6 +392,7 @@ class CounselingSandbox:
                             "temperature_counselor": self.config.temperature_counselor,
                             "counselor_pipeline": "evidence_vector_retry_v2",
                             "skill_selection": self.config.skill_selection.model_dump(),
+                            "memory_view": self.config.memory_view.model_dump(),
                             "rft": self.config.rft.model_dump(),
                             "logprob_scoring": self.config.logprob_scoring.model_dump(),
                             "generation_temperature_counselor": (
@@ -397,7 +405,7 @@ class CounselingSandbox:
                                 if self.config.patientact_enabled
                                 else "direct_generation_v1"
                             ),
-                            "trace_schema_version": 4,
+                            "trace_schema_version": 5,
                         },
                         memory_before=memory_before,
                         plan=plan,
@@ -560,7 +568,7 @@ class CounselingSandbox:
                     state=state,
                     counselor_turn=counselor_turn,
                     recent_messages=messages,
-                    unlocked_facts=memory.unlocked_client_info.facts,
+                    unlocked_facts=memory.known_background.facts,
                     recent_signals=recent_signals,
                     session_index=plan.session_index,
                     turn_index=turn_index,
@@ -571,8 +579,8 @@ class CounselingSandbox:
             signal = client_turn.signal
             client_generation = client_turn.generation
             leakage = client_turn.leakage
-            memory.unlocked_client_info.facts = client_simulator.merge_unlocked(
-                memory.unlocked_client_info.facts, client_turn.newly_unlocked
+            memory.known_background.facts = client_simulator.merge_unlocked(
+                memory.known_background.facts, client_turn.newly_unlocked
             )
             new_fact_ids.extend(
                 item.fact_id for item in client_turn.newly_unlocked
@@ -654,6 +662,7 @@ class CounselingSandbox:
             counselor = CounselorAgent(
                 self.gateway, self.skill_catalog, self.config.rft.counselor_temperature,
                 skill_selection=self.config.skill_selection,
+                memory_view=self.config.memory_view,
             )
             client = ClientAgent(
                 self.gateway, self.config.temperature_client,
@@ -697,7 +706,7 @@ class CounselingSandbox:
         profile = case.profile
         return SessionMemory(
             case_id=case.case_id,
-            unlocked_client_info=UnlockedClientInfo(client_id=profile.client_id),
+            known_background=UnlockedClientInfo(client_id=profile.client_id),
         )
 
     def _plan_for(
@@ -752,8 +761,8 @@ class CounselingSandbox:
             therapy_codes,
             session.session_index,
         )
-        memory.unlocked_client_info = await self.client_merger.merge(
-            memory.unlocked_client_info,
+        memory.known_background = await self.client_merger.merge(
+            memory.known_background,
             extracted,
             case.profile,
             therapy_codes,
@@ -768,7 +777,30 @@ class CounselingSandbox:
                 if session.turn_records
                 else {}
             ),
+            memory_items=self._memory_items(memory),
         )
+
+    @staticmethod
+    def _memory_items(memory: SessionMemory) -> dict:
+        """The id-addressed ledger E.9 may retire, so rewording cannot orphan it."""
+
+        return {
+            "open_homework": [
+                item.model_dump(mode="json")
+                for item in memory.last_homework
+                if item.status == "open"
+            ],
+            "open_topics": [
+                item.model_dump(mode="json")
+                for item in memory.checklist.open_items
+                if item.status == "open"
+            ],
+            "pending_verification": [
+                item.model_dump(mode="json")
+                for item in memory.checklist.pending_verification
+                if item.status == "open"
+            ],
+        }
 
     def _sync_jsonl(self, run_id: str) -> None:
         """SQLite is authoritative if interruption happened between commit and export."""

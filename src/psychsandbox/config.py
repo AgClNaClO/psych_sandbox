@@ -82,6 +82,7 @@ def default_config(root: Path = PROJECT_ROOT) -> SandboxConfig:
         skill_selection=raw.get("skill_selection", {}),
         rft=raw.get("rft", {}),
         logprob_scoring=raw.get("logprob_scoring", {}),
+        memory_view=raw.get("memory_view", {}),
     )
 
 

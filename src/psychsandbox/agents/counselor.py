@@ -10,6 +10,7 @@ from ..domain import (
     CounselorPlanning,
     CounselorSessionReview,
     CounselorTurn,
+    MemoryViewConfig,
     RiskAssessment,
     RiskLevel,
     SessionChecklist,
@@ -23,6 +24,7 @@ from ..domain import (
 from ..model_client import ModelGateway
 from ..prompts import render_prompt
 from ..runtime.dialogue_guard import DialogueLoopGuard
+from ..runtime.memory_view import MemoryViewBuilder
 from ..skills import SkillCatalog, SkillRegistry
 from ..skills.selection import SkillCandidateFilter
 from ..therapies import get_therapy_profile
@@ -43,6 +45,7 @@ class CounselorAgent:
         temperature: float = 0.4,
         dialogue_guard: DialogueLoopGuard | None = None,
         skill_selection: SkillSelectionConfig | None = None,
+        memory_view: MemoryViewConfig | None = None,
     ) -> None:
         self.gateway = gateway
         self.skill_catalog = skill_catalog or SkillCatalog(SkillRegistry())
@@ -51,6 +54,7 @@ class CounselorAgent:
         self.candidate_filter = SkillCandidateFilter(
             gateway, skill_selection or SkillSelectionConfig()
         )
+        self.memory_view = MemoryViewBuilder(memory_view or MemoryViewConfig())
 
     def reset_run_state(self) -> None:
         self.candidate_filter.reset()
@@ -80,12 +84,12 @@ class CounselorAgent:
             "strategy_from_previous_review": plan.strategy,
             "target_meta_skill_ids": plan.target_meta_skill_ids,
             "forbidden_actions": plan.forbidden_actions,
-            "unlocked_client_info": allowed_memory.pop("unlocked_client_info"),
+            "known_background": allowed_memory.pop("known_background"),
             "session_agenda": {
                 "objectives": plan.objectives,
                 "instruction": (
                     "后台目标，不代表咨询师已经知道相关事实；若目标信息尚未出现在 "
-                    "unlocked_client_info，必须用开放式探索，不得按已知事实发问。"
+                    "known_background，必须用开放式探索，不得按已知事实发问。"
                 ),
             },
             "session_memory": allowed_memory,
@@ -321,7 +325,7 @@ class CounselorAgent:
             message.get("content", "") for message in context.get("recent_messages", [])
             if message.get("role") == "client"
         )
-        profile = context.get("unlocked_client_info", {})
+        profile = context.get("known_background", {})
         for key in (
             "static_traits", "main_problem", "topic", "core_demands",
             "growth_experiences", "theory",
@@ -354,6 +358,7 @@ class CounselorAgent:
     @staticmethod
     def _vector_query(context: dict, planning: CounselorPlanning) -> str:
         memory = context.get("session_memory", {})
+        recaps = memory.get("session_recaps", [])
         payload = {
             "current_client_message": str(context.get("client_message", ""))[:2000],
             "current_goal": planning.current_goal[:300],
@@ -364,7 +369,7 @@ class CounselorAgent:
                 for item in context.get("recent_messages", [])[-6:]
                 if item.get("role") == "client"
             ],
-            "recent_summary": [str(item)[:500] for item in memory.get("summaries", [])[-1:]],
+            "recent_summary": [str(recaps[-1].get("summary", ""))[:500]] if recaps else [],
         }
         return json.dumps(payload, ensure_ascii=False)
 
@@ -440,17 +445,17 @@ class CounselorAgent:
                 )[:8]
         return review
 
-    @staticmethod
-    def _allowed_memory_payload(memory: SessionMemory) -> dict:
-        """Return all counselor-visible longitudinal memory and no private profile."""
+    def _allowed_memory_payload(self, memory: SessionMemory) -> dict:
+        """Return the bounded counselor-visible memory view.
 
-        return memory.model_dump(
-            mode="json",
-            exclude={
-                "migration_warnings": True,
-                "unlocked_client_info": {"static_traits": {"language_features"}},
-            },
-        )
+        The view keeps disclosed evidence and allowed memory only: the private
+        profile never enters it, ``language_features`` is always masked, and the
+        audit-only recap logs (rule-gate reasons, simulator trust deltas) stay out
+        of the model input. See ``runtime/memory_view.py`` for the
+        ``full``/``recap_window`` budget modes.
+        """
+
+        return self.memory_view.build(memory)
 
     @staticmethod
     def _safe_plan_payload(plan: SessionPlan) -> dict:

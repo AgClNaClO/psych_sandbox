@@ -20,7 +20,7 @@ from tests.deterministic_gateway import (
 def _memory_for(sample_case) -> SessionMemory:
     return SessionMemory(
         case_id=sample_case.case_id,
-        unlocked_client_info=UnlockedClientInfo(
+        known_background=UnlockedClientInfo(
             client_id=sample_case.profile.client_id
         ),
     )

@@ -238,7 +238,7 @@ def test_high_risk_catalog_returns_no_skills(root, sample_case):
 def test_counselor_payload_has_no_full_profile(sample_case):
     memory = SessionMemory(
         case_id=sample_case.case_id,
-        unlocked_client_info=UnlockedClientInfo(client_id=sample_case.profile.client_id),
+        known_background=UnlockedClientInfo(client_id=sample_case.profile.client_id),
     )
     payload = CounselorAgent(DeterministicGateway()).build_context_payload(
         memory=memory,
@@ -251,8 +251,8 @@ def test_counselor_payload_has_no_full_profile(sample_case):
     dumped = str(payload)
     assert "full_client_profile" not in payload
     assert "unlocked_profile" not in payload
-    assert "unlocked_client_info" in payload
-    assert "language_features" not in payload["unlocked_client_info"]["static_traits"]
+    assert "known_background" in payload
+    assert "language_features" not in payload["known_background"]["static_traits"]
     assert sample_case.profile.static_traits.language_features not in dumped
     assert sample_case.profile.core_demands not in dumped
     for fact in sample_case.profile.disclosure_items:
@@ -282,24 +282,30 @@ def test_session_checklist_merges_model_updates_without_losing_prior_items():
     assert updated.pending_items == ["讨论睡眠影响"]
 
 
-def test_counselor_payload_contains_current_checklist_and_complete_memory(sample_case):
+def test_counselor_payload_carries_checklist_and_four_field_memory(sample_case):
     clinical_summaries = [
         ClinicalSummary(
             session_index=index,
+            session_summary_abstract=f"第{index}次会谈摘要",
             important_information=[f"第{index}次会谈的重要信息"],
+            pending_items=[f"待办{index}"],
         )
         for index in range(1, 5)
     ]
-    memory = SessionMemory(
-        case_id=sample_case.case_id,
-        summaries=[f"摘要{index}" for index in range(1, 5)],
-        clinical_summaries=clinical_summaries,
-        unlocked_client_info=UnlockedClientInfo(client_id=sample_case.profile.client_id),
-        homework=["记录一次压力事件"],
-        interventions_used=["skill-1"],
-        relationship_events=["session=1,trust_change=increased"],
-        last_client_closing="我愿意试试看",
-    )
+    memory = SessionMemory.model_validate({
+        "case_id": sample_case.case_id,
+        "summaries": [f"摘要{index}" for index in range(1, 5)],
+        "clinical_summaries": [
+            item.model_dump(mode="json") for item in clinical_summaries
+        ],
+        "unlocked_client_info": {"client_id": sample_case.profile.client_id},
+        "homework": ["记录一次压力事件"],
+        "interventions_used": ["skill-1"],
+        "relationship_events": ["session=1,trust_change=increased"],
+        "supervisor_feedback": ["安全/披露：unauthorized_fact:x"],
+        "unresolved_topics": ["复核睡眠安排"],
+        "last_client_closing": "我愿意试试看",
+    })
     checklist = SessionChecklist(pending_items=["确认希望的称呼"])
 
     payload = CounselorAgent(DeterministicGateway()).build_context_payload(
@@ -312,13 +318,33 @@ def test_counselor_payload_contains_current_checklist_and_complete_memory(sample
         session_checklist=checklist,
     )
 
+    view = payload["session_memory"]
     assert payload["session_checklist"] == checklist.model_dump(mode="json")
-    assert payload["session_memory"]["summaries"] == memory.summaries
-    assert len(payload["session_memory"]["clinical_summaries"]) == 4
-    assert payload["session_memory"]["homework"] == ["记录一次压力事件"]
-    assert payload["session_memory"]["interventions_used"] == ["skill-1"]
-    assert payload["session_memory"]["relationship_events"]
-    assert payload["session_memory"]["last_client_closing"] == "我愿意试试看"
+    assert payload["known_background"]["client_id"] == sample_case.profile.client_id
+    assert [item["summary"] for item in view["session_recaps"]] == [
+        f"摘要{index}" for index in range(1, 5)
+    ]
+    assert [item["clinical_summary"] for item in view["session_recaps"]] == [
+        f"第{index}次会谈摘要" for index in range(1, 5)
+    ]
+    assert [item["text"] for item in view["last_homework"]] == ["记录一次压力事件"]
+    # Legacy open topics become the cross-session ledger; per-session pending
+    # items stay archived in the session record they belong to.
+    assert [item["text"] for item in view["checklist"]["open_items"]] == ["复核睡眠安排"]
+    assert [item["pending_items"] for item in view["checklist"]["per_session"]] == [
+        [f"待办{index}"] for index in range(1, 5)
+    ]
+    assert [item["important_information"] for item in view["checklist"]["per_session"]] == [
+        [f"第{index}次会谈的重要信息"] for index in range(1, 5)
+    ]
+    assert view["session_recaps"][-1]["client_closing"] == "我愿意试试看"
+    assert "skill-1" in view["session_recaps"][-1]["interventions_used"]
+    # Audit-only logs (rule-gate reasons, simulator trust deltas) stay out.
+    assert all(
+        "safety_notes" not in item and "relationship_events" not in item
+        for item in view["session_recaps"]
+    )
+    assert "view_budget" not in view
 
 
 def test_e8_cannot_backfill_unspoken_core_demands_from_global_truth():
@@ -354,16 +380,16 @@ def test_legacy_memory_drops_preloaded_style_and_demands_before_replay():
         "evolving_profile": {"core_demands": "未由对话证实的核心诉求"},
     })
 
-    assert memory.unlocked_client_info.main_problem == ""
-    assert memory.unlocked_client_info.core_demands == ""
-    assert memory.unlocked_client_info.static_traits.language_features == ""
+    assert memory.known_background.main_problem == ""
+    assert memory.known_background.core_demands == ""
+    assert memory.known_background.static_traits.language_features == ""
     assert any("dialogue replay" in item for item in memory.migration_warnings)
 
 
 def test_counselor_uses_plan_then_react_observation(root, sample_case):
     memory = SessionMemory(
         case_id=sample_case.case_id,
-        unlocked_client_info=UnlockedClientInfo(client_id=sample_case.profile.client_id),
+        known_background=UnlockedClientInfo(client_id=sample_case.profile.client_id),
     )
     gateway = CountingDeterministicGateway()
     result = asyncio.run(CounselorAgent(
@@ -464,7 +490,7 @@ def _run_skill_query(gateway, catalog, sample_case, config=None):
         ).respond(
             memory=SessionMemory(
                 case_id=sample_case.case_id,
-                unlocked_client_info=UnlockedClientInfo(
+                known_background=UnlockedClientInfo(
                     client_id=sample_case.profile.client_id
                 ),
             ),

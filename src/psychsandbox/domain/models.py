@@ -613,12 +613,111 @@ class ClientStateAnalysis(StrictModel):
     target_behavior: str = ""
 
 
+class MemoryItemUpdate(StrictModel):
+    """One evidence-bound status change for an already tracked memory item.
+
+    ``item_updates`` lets E.9 retire or keep an open homework/topic item by its
+    stable id instead of re-typing its wording, so a paraphrase cannot orphan an
+    item. A ``done`` update is only accepted when ``evidence`` really appears in
+    the current session dialogue (enforced in ``runtime/memory.py``).
+    """
+
+    item_id: str
+    status: Literal["open", "done", "dropped"] = "done"
+    evidence: str = ""
+
+
+class HomeworkItem(StrictModel):
+    """One assignment with an explicit open/done lifecycle.
+
+    ``last_homework`` keeps the assignment the client still has to work on (the
+    one just handed out plus anything from earlier sessions that is not done
+    yet); retired items stay in ``SessionRecap.homework`` as immutable history.
+    """
+
+    item_id: str
+    text: str
+    source_session: int = Field(ge=1)
+    status: Literal["open", "done", "dropped", "replaced"] = "open"
+    completion_evidence: str = ""
+    carried_sessions: int = Field(default=0, ge=0)
+
+
+class ChecklistRecord(StrictModel):
+    """The archived working-memory checklist of one finished session."""
+
+    session_index: int = Field(ge=1)
+    completed_items: list[str] = Field(default_factory=list)
+    important_information: list[str] = Field(default_factory=list)
+    important_methods: list[str] = Field(default_factory=list)
+    important_results: list[str] = Field(default_factory=list)
+    pending_items: list[str] = Field(default_factory=list)
+
+
+class OpenItem(StrictModel):
+    """A cross-session item the counselor still has to follow up.
+
+    ``needs_verification`` marks an item that only a session boundary implies
+    (for example "the turn budget ran out"), so the read view can ask the next
+    session to verify it instead of asserting the client did not finish it.
+    """
+
+    item_id: str
+    kind: Literal["topic", "goal"] = "topic"
+    text: str
+    source_session: int = Field(ge=1)
+    status: Literal["open", "done", "dropped"] = "open"
+    needs_verification: bool = False
+    evidence: str = ""
+    carried_to_session: int | None = None
+
+
+class ChecklistMemory(StrictModel):
+    """Per-session checklist archive plus the still-open follow-up items."""
+
+    per_session: list[ChecklistRecord] = Field(default_factory=list)
+    open_items: list[OpenItem] = Field(default_factory=list)
+    pending_verification: list[OpenItem] = Field(default_factory=list)
+
+
+class RecapRisk(StrictModel):
+    """Session-scoped audit record of a non-low risk judgement."""
+
+    session_index: int = Field(ge=1)
+    level: RiskLevel = RiskLevel.LOW
+    categories: list[str] = Field(default_factory=list)
+    evidence: list[str] = Field(default_factory=list)
+
+
+class SessionRecap(StrictModel):
+    """Everything the counselor keeps about one finished session (PsychAgent recap).
+
+    It replaces the historical ``summaries`` + ``clinical_summaries`` pair with a
+    single entry per session, and nests the low-signal audit material (risk,
+    safety/disclosure reasons, trust deltas) inside the session it belongs to
+    instead of accumulating global flat lists.
+    """
+
+    session_index: int = Field(ge=1)
+    summary: str = ""
+    clinical_summary: str = ""
+    goal_assessment: GoalAssessment = Field(default_factory=GoalAssessment)
+    client_state_analysis: ClientStateAnalysis = Field(default_factory=ClientStateAnalysis)
+    homework: list[str] = Field(default_factory=list)
+    interventions_used: list[str] = Field(default_factory=list)
+    risk: RecapRisk | None = None
+    safety_notes: list[str] = Field(default_factory=list)
+    relationship_events: list[str] = Field(default_factory=list)
+    client_closing: str = ""
+
+
 class ClinicalSummary(StrictModel):
     """Structured clinical summary bridging consecutive sessions (E.9).
 
-    This is the counselor's long-term memory written by an external clinical
-    supervisor.  Every field must be grounded in the current session dialogue;
-    forward-looking diagnostic conclusions are forbidden.
+    This is the per-session clinical record produced after every session. Every
+    field must be grounded in the current session dialogue; forward-looking
+    diagnostic conclusions are forbidden. ``item_updates`` carries the
+    evidence-bound retirement decisions for items the counselor already tracks.
     """
 
     session_index: int = Field(ge=1)
@@ -631,48 +730,300 @@ class ClinicalSummary(StrictModel):
     important_results: list[str] = Field(default_factory=list)
     completed_items: list[str] = Field(default_factory=list)
     pending_items: list[str] = Field(default_factory=list)
+    item_updates: list[MemoryItemUpdate] = Field(default_factory=list)
+
+
+_LEGACY_MEMORY_KEYS = frozenset({
+    "unlocked_client_info",
+    "unlocked_profile",
+    "summaries",
+    "clinical_summaries",
+    "completed_sessions",
+    "unresolved_topics",
+    "homework",
+    "interventions_used",
+    "risk_history",
+    "supervisor_feedback",
+    "relationship_events",
+    "between_session_context",
+    "last_client_closing",
+    "confirmed_goals",
+    "evolving_profile",
+})
+
+_LEGACY_AUDIT_KEYS = (
+    "homework",
+    "unresolved_topics",
+    "interventions_used",
+    "risk_history",
+    "supervisor_feedback",
+    "relationship_events",
+    "last_client_closing",
+)
+
+_RISK_ORDER = {
+    RiskLevel.LOW: 0,
+    RiskLevel.MEDIUM: 1,
+    RiskLevel.HIGH: 2,
+    RiskLevel.IMMINENT: 3,
+}
+
+
+def _legacy_session_number(value: dict[str, Any]) -> int:
+    try:
+        return max(1, int(value.get("completed_sessions") or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _legacy_clinical_by_index(value: dict[str, Any]) -> dict[int, dict[str, Any]]:
+    """Map each legacy E.9 summary to its session index (positional fallback)."""
+
+    by_index: dict[int, dict[str, Any]] = {}
+    for position, raw in enumerate(value.get("clinical_summaries") or [], start=1):
+        if not isinstance(raw, dict):
+            continue
+        index = raw.get("session_index")
+        by_index[int(index) if isinstance(index, int) and index >= 1 else position] = raw
+    return by_index
+
+
+def _legacy_session_recaps(
+    value: dict[str, Any], clinical: dict[int, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Fold the flat ``summaries`` + ``clinical_summaries`` pair into recaps."""
+
+    summaries = [str(item) for item in (value.get("summaries") or [])]
+    count = max(len(summaries), max(clinical, default=0), _legacy_session_number(value))
+    recaps: list[dict[str, Any]] = []
+    for index in range(1, count + 1):
+        payload = clinical.get(index)
+        recap: dict[str, Any] = {
+            "session_index": index,
+            "summary": summaries[index - 1] if index - 1 < len(summaries) else "",
+        }
+        if isinstance(payload, dict):
+            recap.update({
+                "clinical_summary": str(payload.get("session_summary_abstract") or ""),
+                "goal_assessment": payload.get("goal_assessment") or {},
+                "client_state_analysis": payload.get("client_state_analysis") or {},
+                "homework": [str(item) for item in (payload.get("homework") or [])],
+            })
+        recaps.append(recap)
+    return recaps
+
+
+def _legacy_homework(value: dict[str, Any]) -> list[dict[str, Any]]:
+    session = _legacy_session_number(value)
+    items: list[dict[str, Any]] = []
+    for position, raw in enumerate(value.get("homework") or [], start=1):
+        text = str(raw).strip()
+        if not text:
+            continue
+        items.append({
+            "item_id": f"homework-s{session}-{position}",
+            "text": text,
+            "source_session": session,
+            "status": "open",
+            "carried_sessions": 0,
+        })
+    return items
+
+
+def _legacy_checklist(
+    value: dict[str, Any], clinical: dict[int, dict[str, Any]]
+) -> dict[str, Any]:
+    """Archive legacy E.9 checklist fields and keep legacy topics as open items."""
+
+    session = _legacy_session_number(value)
+    fields = (
+        "completed_items",
+        "important_information",
+        "important_methods",
+        "important_results",
+        "pending_items",
+    )
+    per_session = [
+        {
+            "session_index": index,
+            **{
+                field: [str(item) for item in (payload.get(field) or [])]
+                for field in fields
+            },
+        }
+        for index, payload in sorted(clinical.items())
+    ]
+    open_items = [
+        {
+            "item_id": f"topic-{position}",
+            "kind": "topic",
+            "text": str(raw),
+            "source_session": session,
+            "status": "open",
+            "needs_verification": True,
+        }
+        for position, raw in enumerate(value.get("unresolved_topics") or [], start=1)
+        if str(raw).strip()
+    ]
+    return {
+        "per_session": per_session,
+        "open_items": open_items,
+        "pending_verification": [],
+    }
+
+
+def _legacy_risk_level(levels: list[str]) -> RiskLevel:
+    best = RiskLevel.LOW
+    for raw in levels:
+        try:
+            candidate = RiskLevel(raw)
+        except ValueError:
+            continue
+        if _RISK_ORDER[candidate] > _RISK_ORDER[best]:
+            best = candidate
+    return best
+
+
+def _fold_legacy_audit(
+    value: dict[str, Any], recaps: list[dict[str, Any]]
+) -> list[str]:
+    """Attach unattributed legacy audit lists to the newest recap."""
+
+    levels = [str(item) for item in (value.get("risk_history") or [])]
+    feedback = [str(item) for item in (value.get("supervisor_feedback") or [])]
+    events = [str(item) for item in (value.get("relationship_events") or [])]
+    interventions = [str(item) for item in (value.get("interventions_used") or [])]
+    closing = str(value.get("last_client_closing") or "")
+    if not recaps:
+        return []
+    last = recaps[-1]
+    if levels:
+        last["risk"] = {
+            "session_index": last["session_index"],
+            "level": _legacy_risk_level(levels),
+            "categories": [],
+            "evidence": [f"legacy risk_history: {'、'.join(levels)}"],
+        }
+    if feedback:
+        last["safety_notes"] = list(last.get("safety_notes") or []) + feedback
+    if events:
+        last["relationship_events"] = list(last.get("relationship_events") or []) + events
+    if interventions:
+        last["interventions_used"] = list(dict.fromkeys(
+            list(last.get("interventions_used") or []) + interventions
+        ))
+    if closing:
+        last["client_closing"] = closing
+    if levels or feedback or events or interventions:
+        return [
+            "legacy flat lists (interventions_used/risk_history/supervisor_feedback/"
+            "relationship_events) carried no session index; attached to session "
+            f"{last['session_index']}"
+        ]
+    return []
+
+
+def _fold_legacy_memory(value: dict[str, Any]) -> dict[str, Any]:
+    """Convert one legacy flat memory payload into the four-field structure."""
+
+    value = dict(value)
+    warnings = [str(item) for item in (value.get("migration_warnings") or [])]
+    if "known_background" not in value:
+        legacy_profile = value.get("unlocked_profile")
+        if "unlocked_client_info" in value:
+            value["known_background"] = value["unlocked_client_info"]
+        elif isinstance(legacy_profile, dict):
+            value["known_background"] = {
+                "client_id": legacy_profile.get("client_id", ""),
+                "facts": legacy_profile.get("facts", []),
+                "updated_session": value.get("completed_sessions", 0),
+            }
+            warnings.append(
+                "legacy unlocked_profile detected; preloaded background, language "
+                "style and core demands were discarded and dialogue replay is required"
+            )
+    if {"session_recaps", "last_homework", "checklist"}.issubset(value):
+        leftover = sorted(set(value) & set(_LEGACY_AUDIT_KEYS))
+        if leftover:
+            warnings.append(
+                "legacy flat keys coexisted with the four-field layout and were "
+                "dropped: " + ",".join(leftover)
+            )
+    else:
+        clinical = _legacy_clinical_by_index(value)
+        recaps = _legacy_session_recaps(value, clinical)
+        warnings.extend(_fold_legacy_audit(value, recaps))
+        value.setdefault("session_recaps", recaps)
+        value.setdefault("last_homework", _legacy_homework(value))
+        value.setdefault("checklist", _legacy_checklist(value, clinical))
+    for key in _LEGACY_MEMORY_KEYS | {"migration_warnings"}:
+        value.pop(key, None)
+    if warnings:
+        value["migration_warnings"] = list(dict.fromkeys(warnings))
+    return value
+
+
 
 
 class SessionMemory(StrictModel):
+    """Cross-session counselor memory.
+
+    Four memory-content fields mirror PsychAgent's thin ``PublicMemory``:
+    ``known_background`` (已知背景), ``session_recaps`` (每场回顾),
+    ``last_homework`` (上轮作业) and the archived per-session ``checklist``
+    (事项清单). ``case_id`` and ``migration_warnings`` are management
+    information that never reaches the model.
+
+    ``migrate_legacy_memory_layout`` folds the historical flat layout (14 keys,
+    including ``summaries``/``clinical_summaries``/``unresolved_topics``) into
+    this structure, so old runs keep loading, resuming and re-rendering.
+    """
+
     case_id: str
-    completed_sessions: int = Field(default=0, ge=0)
-    summaries: list[str] = Field(default_factory=list)
-    clinical_summaries: list[ClinicalSummary] = Field(default_factory=list)
-    unlocked_client_info: UnlockedClientInfo
-    unresolved_topics: list[str] = Field(default_factory=list)
-    homework: list[str] = Field(default_factory=list)
-    interventions_used: list[str] = Field(default_factory=list)
-    risk_history: list[str] = Field(default_factory=list)
-    supervisor_feedback: list[str] = Field(default_factory=list)
-    relationship_events: list[str] = Field(default_factory=list)
-    between_session_context: list[str] = Field(default_factory=list)
-    last_client_closing: str = ""
+    known_background: UnlockedClientInfo
+    session_recaps: list[SessionRecap] = Field(default_factory=list)
+    last_homework: list[HomeworkItem] = Field(default_factory=list)
+    checklist: ChecklistMemory = Field(default_factory=ChecklistMemory)
     migration_warnings: list[str] = Field(default_factory=list)
+
+    @property
+    def completed_sessions(self) -> int:
+        """Derived progress: one committed recap per finished session."""
+
+        return len(self.session_recaps)
+
+    @property
+    def interventions_used(self) -> list[str]:
+        """Derived union of the per-session skill IDs, in session order."""
+
+        return list(dict.fromkeys(
+            item for recap in self.session_recaps for item in recap.interventions_used
+        ))
+
+    @property
+    def last_client_closing(self) -> str:
+        return self.session_recaps[-1].client_closing if self.session_recaps else ""
+
+    @property
+    def homework(self) -> list[str]:
+        """Still-open assignments, in the order they were handed out."""
+
+        return [item.text for item in self.last_homework if item.status == "open"]
+
+    @property
+    def unresolved_topics(self) -> list[str]:
+        """Still-open follow-up items (verified topics and goals)."""
+
+        return [item.text for item in self.checklist.open_items if item.status == "open"]
 
     @model_validator(mode="before")
     @classmethod
-    def migrate_legacy_unlocked_profile(cls, value: Any) -> Any:
-        if not isinstance(value, dict) or "unlocked_client_info" in value:
+    def migrate_legacy_memory_layout(cls, value: Any) -> Any:
+        """Fold the pre-4-field flat layout into recaps/homework/checklist."""
+
+        if not isinstance(value, dict) or not (set(value) & _LEGACY_MEMORY_KEYS):
             return value
-        legacy = value.get("unlocked_profile")
-        if not isinstance(legacy, dict):
-            return value
-        value = dict(value)
-        value["unlocked_client_info"] = {
-            "client_id": legacy.get("client_id", ""),
-            "facts": legacy.get("facts", []),
-            "updated_session": value.get("completed_sessions", 0),
-        }
-        warnings = list(value.get("migration_warnings", []) or [])
-        warnings.append(
-            "legacy unlocked_profile detected; preloaded background, language style "
-            "and core demands were discarded and dialogue replay is required"
-        )
-        value["migration_warnings"] = warnings
-        value.pop("unlocked_profile", None)
-        value.pop("confirmed_goals", None)
-        value.pop("evolving_profile", None)
-        return value
+        return _fold_legacy_memory(value)
 
 
 class Message(StrictModel):
@@ -1117,6 +1468,25 @@ class LogprobScoringConfig(StrictModel):
     temperature: float = Field(default=0.7, ge=0, le=2)
 
 
+class MemoryViewConfig(StrictModel):
+    """How much longitudinal memory the counselor actually reads per turn.
+
+    ``full`` keeps the current behaviour: the whole four-field memory minus the
+    management fields. ``recap_window`` injects the current focus plus the newest
+    ``recent_sessions`` recaps and one archive line per older session, and always
+    stays within ``max_chars``, so a 100-session course cannot grow the per-turn
+    prompt without bound. It mirrors PsychAgent's switchable ``memory_mode`` so
+    the two strategies can be compared without code changes.
+    """
+
+    mode: Literal["full", "recap_window"] = "full"
+    recent_sessions: int = Field(default=3, ge=1, le=100)
+    max_chars: int = Field(default=8000, ge=500, le=200000)
+    per_field_chars: int = Field(default=240, ge=20, le=4000)
+    archive_line_chars: int = Field(default=80, ge=10, le=1000)
+    focus_items_max: int = Field(default=12, ge=1, le=200)
+
+
 class SandboxConfig(StrictModel):
     project_root: Path
     seed: int = 42
@@ -1139,6 +1509,7 @@ class SandboxConfig(StrictModel):
     skill_selection: SkillSelectionConfig = Field(default_factory=SkillSelectionConfig)
     rft: RFTConfig = Field(default_factory=RFTConfig)
     logprob_scoring: LogprobScoringConfig = Field(default_factory=LogprobScoringConfig)
+    memory_view: MemoryViewConfig = Field(default_factory=MemoryViewConfig)
 
     @model_validator(mode="after")
     def map_legacy_patientact_switch(self) -> SandboxConfig:

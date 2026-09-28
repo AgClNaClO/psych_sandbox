@@ -39,6 +39,16 @@ logprob_scoring:
   top_logprobs: 20
   max_tokens: 16
   temperature: 0.7  # 沿用论文的评判采样温度，便于观察分布
+memory_view:
+  # full = 与历史行为一致（整份记忆，去掉管理字段与审计日志）；
+  # recap_window = 只注入当前焦点 + 最近 recent_sessions 场回顾 + 更早场次一行归档，
+  #                并始终受 max_chars 约束，用于“全量投喂 vs 窗口投喂”的消融对比。
+  mode: full
+  recent_sessions: 3
+  max_chars: 8000
+  per_field_chars: 240
+  archive_line_chars: 80
+  focus_items_max: 12
 client:
   policy: compact_patientact
   session_trust_retention: 0.5

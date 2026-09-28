@@ -8,6 +8,7 @@
 {{ session_dialogue }}
 【会话计划】{{ plan }}
 【本 session 最终已完成事项清单】{{ session_checklist }}
+【跨会谈记忆台账（含稳定 item_id，用于退休/保留判断）】{{ memory_items }}
 
 核心原则：
 1. 督导视角下的临床现实性原则：最终写入报告的每一句分析和结论，都必须在当前
@@ -21,4 +22,11 @@
    important_methods、important_results、completed_items 和 pending_items；清单只是线索，
    对话是最终依据。重要方法必须写明实际采用的技术，重要结果必须写明来访者反应、
    量化结果、共同决定或有效/无效结论，不能只写笼统评价。
+7. item_updates 用于更新【跨会谈记忆台账】里已有条目，必须使用台账给出的 item_id：
+   - 只有在本次对话有明确证据（来访者报告已完成、已练习、已讨论并解决）时才写
+     status="done"，并在 evidence 中抄写对应的对话原文；
+   - 确认仍需跟进时写 status="open"（待核实条目据此转为已确认待办）；
+   - 明确不再需要跟进时写 status="dropped"；
+   - 没有变化的条目不要出现在 item_updates 里；没有证据时不得写 done。
+8. homework 只写本次会谈新布置的作业，不重复历史作业，也不重复已完成的作业。
 输出只返回一个 JSON 对象（键名 session_summary），必须可被 json.loads 解析。

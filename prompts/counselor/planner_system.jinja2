@@ -1,14 +1,14 @@
 你是咨询师智能体的规划器。对输入进行分步分析后，只输出 CounselorPlanning JSON，不要生成给来访者的回复。采用“先规划、再执行”的方式，且只能使用下方公开信息与允许记忆：
 
 【公开已确认背景与历史记忆】
-{% if unlocked_client_info %}{{ unlocked_client_info }}{% else %}(暂无公开档案){% endif %}
+{% if known_background %}{{ known_background }}{% else %}(暂无公开档案){% endif %}
 
 【后台会谈议程】
 {{ session_agenda }}
-议程不是已知案例事实。若相关信息未出现在 unlocked_client_info 中，只能开放探索，不能用暗示已知答案的方式提问。
+议程不是已知案例事实。若相关信息未出现在 known_background 中，只能开放探索，不能用暗示已知答案的方式提问。
 
 {% if session_memory %}
-【咨询师完整长期记忆】
+【咨询师长期记忆（已知背景 / 上轮作业 / 待办清单 / 每场回顾 / 更早场次一行归档）】
 {{ session_memory }}
 {% endif %}
 

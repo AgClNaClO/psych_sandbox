@@ -49,7 +49,7 @@ psych-sandbox visualize --run run-xxxxxxxxxxxx
 ## v0.3.0 之后的更新
 
 - HTML 报告改为“概览页 + 每场会谈独立页”：逐轮规划/决策、技能查询记录、来访者模拟决策摘要和会后自评改为对话上方可折叠的内联卡片；原先独立的“运行过程 / 来访者状态趋势 / 纵向判断”板块不再渲染，这些数据仍保存在 `result.json`、SQLite 和 `trajectory.jsonl` 中。
-- 新增 [记忆结构说明](docs/MEMORY.md)，记录当前咨询师记忆的三层结构、写入者、咨询师读取范围与已知限制。
+- 新增 [记忆结构说明](docs/MEMORY.md)，记录当前咨询师记忆的四字段结构、写入者、分层的读取视图与输入预算、退休语义与已知限制。
 - 新增可选的概率加权（logprob）量表评分，借鉴 Zhang et al.（npj Artificial Intelligence, DOI 10.1038/s44387-026-00160-9）式 8 的连续评分与拒答质量门：默认开启，端点不返回 logprobs 或质量不足时明确失败，不静默回退；配套 `psych-sandbox probe logprob-scoring` 端点实测入口，详见 [借鉴说明](notes/logprob_scoring_borrowing.md)。
 - 本机检出目录由 `D:\0test\psych_sandbox` 经 `D:\study\大创\project\psych_sandbox` 移至 `C:\Users\Rain\Desktop\psych_sandbox`，本文档与 `docs/` 下的路径、安装检查和提示词/测试计数同步更新。
 
@@ -167,7 +167,7 @@ src/psychsandbox/
 └── cli.py           可选数据刷新、案例、仿真和报告命令
 ```
 
-跨会话记忆的分层结构、写入者、咨询师读取范围与当前限制见 [记忆结构](docs/MEMORY.md)。
+跨会话记忆的四字段结构与分层读取视图（`full` / `recap_window` 及输入预算）、写入者、退休语义与当前限制见 [记忆结构](docs/MEMORY.md)。
 
 ### `src` 与 `tests` 分别负责什么
 
@@ -197,7 +197,7 @@ src/psychsandbox/
     - 运行规则安全/披露门控（`SessionSafetyGate`），只做准入与安全标记、不评分。
     - 计算状态差值、相邻会谈趋势和阶段动作。
     - 运行 E.7/E.8/E.9 记忆流水线：提取实际披露信息、门控合并演化档案并生成有证据的摘要。
-    - 整理跨 session 记忆：追加本场摘要与临床摘要，更新作业、未尽议题、风险与关系记录、已使用技能和末段来访者话语。
+    - 整理跨 session 记忆：把本场并入四字段记忆（已知背景 / 每场回顾 / 上轮作业 / 事项清单），按 `item_id` 与对话证据退休作业和待办，并把审计日志（风险、安全/披露理由、信任变化）归档到本场回顾。详见 [记忆结构](docs/MEMORY.md)。
     - 咨询师模型评测本次目标是否达到（读取刚合并的记忆）；未达到时生成改进项、修订策略、下次目标和元技能方向。
     - 将咨询师再规划与纵向阶段动作合并为下一次计划，不依赖督导评分。
     - 保存 SQLite 和 JSONL 轨迹：`memories` 保存该会谈结束后的记忆，轨迹另存会话前的记忆副本 `Trajectory.memory_before`。

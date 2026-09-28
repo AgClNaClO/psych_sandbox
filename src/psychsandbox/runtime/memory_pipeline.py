@@ -110,6 +110,8 @@ class DialogueSummaryAgent:
         plan: SessionPlan,
         theory_select: list[str],
         session_checklist: SessionChecklist | None = None,
+        *,
+        memory_items: dict[str, Any] | None = None,
     ) -> ClinicalSummary:
         checklist = session_checklist or SessionChecklist()
         summary_payload = {
@@ -122,6 +124,7 @@ class DialogueSummaryAgent:
             "session_dialogue": _format_dialogue(dialogue),
             "plan": plan.model_dump(mode="json"),
             "session_checklist": checklist.model_dump(mode="json"),
+            "memory_items": memory_items or {},
         }
         result = await self.gateway.complete_structured(
             role="summarizer",

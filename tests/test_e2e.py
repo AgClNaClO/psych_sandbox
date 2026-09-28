@@ -47,10 +47,10 @@ def test_three_session_end_to_end(sandbox):
 def test_first_session_is_counselor_first_and_initial_memory_is_empty(sandbox):
     case = sandbox.repository.get("psycheval-cbt-001")
     initial = sandbox._initial_memory(case)
-    assert initial.unlocked_client_info.client_id == case.profile.client_id
-    assert initial.unlocked_client_info.main_problem == ""
-    assert initial.unlocked_client_info.core_demands == ""
-    assert initial.unlocked_client_info.facts == []
+    assert initial.known_background.client_id == case.profile.client_id
+    assert initial.known_background.main_problem == ""
+    assert initial.known_background.core_demands == ""
+    assert initial.known_background.facts == []
 
     result = asyncio.run(sandbox.run_case(case.case_id, session_count=1))
     assert result.sessions[0].messages[0].role == "counselor"
@@ -103,24 +103,24 @@ def test_e7_e8_e9_feed_counselor_review_before_next_session(root, tmp_path, repo
         if name == "CounselorSessionReview"
     )
     assert (
-        first_review["allowed_memory"]["unlocked_client_info"]["main_problem"]
+        first_review["allowed_memory"]["known_background"]["main_problem"]
         == "最近总担心自己出错"
     )
-    assert first_review["allowed_memory"]["clinical_summaries"]
+    assert first_review["allowed_memory"]["session_recaps"]
     planning_payloads = [
         payload for name, payload in gateway.calls if name == "CounselorPlanning"
     ]
     second_session_planning = planning_payloads[1]
     assert (
-        second_session_planning["unlocked_client_info"]["main_problem"]
+        second_session_planning["known_background"]["main_problem"]
         == "最近总担心自己出错"
     )
-    assert second_session_planning["session_memory"]["clinical_summaries"]
+    assert second_session_planning["session_memory"]["session_recaps"]
     assert result.sessions[1].messages[0].role == "counselor"
     persisted = sandbox.store.load_memory(result.run_id)
     assert persisted is not None
-    assert persisted.unlocked_client_info.main_problem == "最近总担心自己出错"
-    assert len(persisted.clinical_summaries) == 2
+    assert persisted.known_background.main_problem == "最近总担心自己出错"
+    assert len(persisted.session_recaps) == 2
 
 
 def test_session_checklist_is_local_then_archived_into_complete_memory(
@@ -198,7 +198,7 @@ def test_session_checklist_is_local_then_archived_into_complete_memory(
     assert first_summary["completed_items"] == ["确认希望的称呼"]
     assert first_summary["pending_items"] == ["讨论压力对睡眠的影响"]
 
-    archived = result.final_memory.clinical_summaries[0]
+    archived = result.final_memory.checklist.per_session[0]
     assert archived.important_information == ["来访者希望称呼为明山"]
     assert archived.important_methods == ["使用开放式问题确认称呼"]
     assert archived.important_results == ["双方确认后续使用明山这一称呼"]
@@ -206,7 +206,7 @@ def test_session_checklist_is_local_then_archived_into_complete_memory(
     assert archived.pending_items == ["讨论压力对睡眠的影响"]
     assert "讨论压力对睡眠的影响" in result.final_memory.unresolved_topics
     assert "记录一次压力事件" in result.final_memory.homework
-    assert second_session_payloads[0]["session_memory"]["clinical_summaries"][0][
+    assert second_session_payloads[0]["session_memory"]["checklist"]["per_session"][0][
         "important_information"
     ] == ["来访者希望称呼为明山"]
 

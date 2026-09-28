@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from psychsandbox.domain import (
-    Message, RFTConfig, ScaleItem, ScaleItems, ScaleScore,
+    Message, OpenItem, RFTConfig, ScaleItem, ScaleItems, ScaleScore,
     SessionEvaluationReport, SessionRecord, SessionSafetyVerdict,
     CounselorActorOutput, CounselorSessionReview, SandboxConfig,
 )
@@ -102,7 +102,11 @@ def test_parallel_candidates_are_isolated_and_only_winner_memory_returns(setup):
         assert branch_memory.model_dump() == original
         active += 1
         peak = max(peak, active)
-        branch_memory.unresolved_topics.append(f"private-branch-{index}")
+        branch_memory.checklist.open_items.append(OpenItem(
+            item_id=f"topic-branch-{index}",
+            text=f"private-branch-{index}",
+            source_session=1,
+        ))
         branch_state.trust = index / 10
         checkpoint({"prefix": f"branch {index}"})
         await asyncio.sleep(0.01)
