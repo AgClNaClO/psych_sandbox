@@ -66,6 +66,7 @@ class ClientAgent:
     ) -> ClientTurnSignal:
         input_payload = {
             "private_client_profile": profile.model_dump(mode="json"),
+            "private_simulation_modifiers": profile.simulation_config.modifiers(),
             "simulation_state": state.model_dump(mode="json"),
             "counselor_message": counselor_message,
             "recent_messages": [
@@ -215,6 +216,10 @@ class ClientAgent:
         payload: dict[str, Any] = {
             "client_identity": {"client_id": profile.client_id},
             "expression_style": profile.expression_style.model_dump(mode="json"),
+            "expression_modifiers": {
+                key: value for key, value in profile.simulation_config.modifiers().items()
+                if key in {"expression_length", "interaction_initiation", "abstract_reflection", "conflict_softening"}
+            },
             "simulation_state": state.model_dump(mode="json"),
             "counselor_message": counselor_message,
             "recent_messages": [
@@ -234,7 +239,10 @@ class ClientAgent:
                 item.model_dump(mode="json") for item in disclosure.blocked
             ],
             "ambiguous_fact_ids": disclosure.ambiguous_fact_ids,
-            "turn_signal": signal.model_dump(mode="json"),
+            "turn_signal": signal.model_dump(
+                mode="json", exclude={"rationale", "trust_change"}
+            ),
+            "use_pipeline": signal.policy != "simple",
             "turn_index": turn_index,
         }
         if repair_instruction:

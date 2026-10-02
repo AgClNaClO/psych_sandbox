@@ -62,10 +62,10 @@ def test_faithful_policy_runs_conditional_resistance_stage(sample_case):
         FaithfulPatientActPolicy(ClientAgent(gateway)).plan_turn(_input(sample_case))
     )
 
-    assert gateway.steps == ["reaction", "behavior", "resistance", "trust"]
+    assert gateway.steps == ["reaction", "behavior", "resistance"]
     assert signal.resistance_pattern is ResistancePatternType.DEFENSIVENESS
     assert signal.policy == "faithful_patientact"
-    assert signal.planning_model_calls == 4
+    assert signal.planning_model_calls == 3
 
 
 def test_faithful_policy_skips_resistance_stage_for_other_behaviors(sample_case):
@@ -74,6 +74,6 @@ def test_faithful_policy_skips_resistance_stage_for_other_behaviors(sample_case)
         FaithfulPatientActPolicy(ClientAgent(gateway)).plan_turn(_input(sample_case))
     )
 
-    assert gateway.steps == ["reaction", "behavior", "trust"]
+    assert gateway.steps == ["reaction", "behavior"]
     assert signal.resistance_pattern is None
-    assert signal.planning_model_calls == 3
+    assert signal.planning_model_calls == 2

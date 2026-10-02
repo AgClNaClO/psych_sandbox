@@ -80,6 +80,9 @@ def default_config(root: Path = PROJECT_ROOT) -> SandboxConfig:
             "disclosure_leak_retry_limit", 1
         ),
         skill_selection=raw.get("skill_selection", {}),
+        client_use_memory=client.get("use_memory", True),
+        client_use_pipeline=client.get("use_pipeline", True),
+        client_use_trust_gating=client.get("use_trust_gating", True),
         rft=raw.get("rft", {}),
         logprob_scoring=raw.get("logprob_scoring", {}),
         memory_view=raw.get("memory_view", {}),

@@ -7,6 +7,7 @@ from pydantic import Field
 
 from ..domain import (
     ClientBehaviorType,
+    ClientGeneration,
     ClientProfile,
     ClientReactionType,
     ClientState,
@@ -66,7 +67,10 @@ class SimpleClientPolicy:
 
     async def plan_turn(self, turn: ClientPolicyInput) -> ClientTurnSignal:
         return ClientTurnSignal(
-            behavior=ClientBehaviorType.RECOUNTING,
+            behavior=(
+                ClientBehaviorType.REQUEST if turn.disclosure.ambiguous_fact_ids
+                else ClientBehaviorType.RECOUNTING
+            ),
             retrieved_fact_ids=[item.item_id for item in turn.disclosure.retrieved],
             blocked_fact_ids=[item.item_id for item in turn.disclosure.blocked],
             rationale="PATIENTACT internal planning disabled by configuration.",
@@ -101,6 +105,8 @@ class TrustDecision(StrictModel):
 FAITHFUL_PROMPT = """你是模拟来访者的内部决策器。只完成 input_payload 指定的 decision_step。
 私有画像只用于一致性；只有 disclosure_decision.retrieved 中的 item 可以选择披露。
 blocked 只有元数据，不得在 rationale 中推测或复述正文。普通同理不应自动提高信任。
+private_simulation_modifiers 只轻微调节表达偏好，不能决定合作、阻抗或事实披露。
+trust 步骤必须结合 accepted_client_response 判断这次真实完成的互动，不能根据未来预期回应更新。
 只输出给定 schema 的 JSON，不生成来访者台词。"""
 
 
@@ -115,6 +121,7 @@ class FaithfulPatientActPolicy:
     async def plan_turn(self, turn: ClientPolicyInput) -> ClientTurnSignal:
         base = {
             "private_client_profile": turn.profile.model_dump(mode="json"),
+            "private_simulation_modifiers": turn.profile.simulation_config.modifiers(),
             "simulation_state": turn.state.model_dump(mode="json"),
             "counselor_message": turn.counselor_message,
             "recent_messages": [
@@ -143,18 +150,6 @@ class FaithfulPatientActPolicy:
                 "resistance",
                 ResistanceDecision,
             )
-        trust = await self._decide(
-            {
-                **base,
-                "reaction_decision": reaction.model_dump(mode="json"),
-                "behavior_decision": behavior.model_dump(mode="json"),
-                "resistance_decision": (
-                    resistance.model_dump(mode="json") if resistance else None
-                ),
-            },
-            "trust",
-            TrustDecision,
-        )
         retrieved = {item.item_id for item in turn.disclosure.retrieved}
         blocked = {item.item_id for item in turn.disclosure.blocked}
         signal = ClientTurnSignal(
@@ -169,19 +164,39 @@ class FaithfulPatientActPolicy:
             blocked_fact_ids=[
                 item for item in behavior.blocked_fact_ids if item in blocked
             ],
-            trust_change=trust.trust_change,
             rationale=" ".join(
                 part for part in (
                     reaction.rationale,
                     behavior.rationale,
                     resistance.rationale if resistance else "",
-                    trust.rationale,
                 ) if part
             ),
             policy=self.name,
-            planning_model_calls=4 if resistance else 3,
+            planning_model_calls=3 if resistance else 2,
         )
         return self.agent._apply_pullback(signal, turn.state, turn.recent_signals)
+
+    async def finalize_turn(
+        self, turn: ClientPolicyInput, signal: ClientTurnSignal, generation: ClientGeneration
+    ) -> ClientTurnSignal:
+        trust = await self._decide(
+            {
+                "simulation_state": turn.state.model_dump(mode="json"),
+                "interaction_prior": turn.profile.interaction_prior.model_dump(mode="json"),
+                "counselor_message": turn.counselor_message,
+                "recent_messages": [
+                    item.model_dump(mode="json") for item in turn.recent_messages[-8:]
+                ],
+                "accepted_client_response": generation.utterance,
+                "turn_signal": signal.model_dump(mode="json", exclude={"rationale"}),
+            },
+            "trust", TrustDecision,
+        )
+        return signal.model_copy(update={
+            "trust_change": trust.trust_change,
+            "rationale": " ".join([signal.rationale, trust.rationale]).strip(),
+            "planning_model_calls": signal.planning_model_calls + 1,
+        })
 
     async def _decide(self, base: dict, step: str, schema: type[StrictModel]):
         payload = {**base, "decision_step": step}

@@ -102,7 +102,8 @@ def test_disclosure_returns_blocked_signal_without_content(sample_case):
 def test_unlock_records_evidence(sample_case):
     fact = sample_case.profile.disclosure_items[0]
     unlocked = DisclosureGate().unlock(
-        sample_case.profile, [fact.item_id], session_index=2, turn_index=3
+        sample_case.profile, [fact.item_id], session_index=2, turn_index=3,
+        retrieved_facts=[fact], evidence_by_fact_id={fact.item_id: fact.content},
     )
     assert unlocked[0].evidence_session == 2
     assert unlocked[0].evidence_turn == 3
@@ -648,7 +649,7 @@ def test_vector_filter_rejects_invalid_embeddings(selection_catalog, sample_case
 
 
 def test_client_prompts_are_versioned_and_reexported():
-    assert CLIENT_PROMPT_VERSION == "psycheval_patientact_v5"
+    assert CLIENT_PROMPT_VERSION == "psycheval_patientact_v6"
     assert CLIENT_PROMPT_VERSION == CANONICAL_CLIENT_PROMPT_VERSION
     assert CLIENT_PLANNER_TEMPLATE == "simclient/planner_system.jinja2"
     assert CLIENT_UTTERANCE_TEMPLATE == "simclient/utterance_system.jinja2"

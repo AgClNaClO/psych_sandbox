@@ -157,6 +157,9 @@ class CounselingSandbox:
             self.disclosure,
             self.state_updater,
             policy=create_client_policy(config.client_policy, self.client),
+            use_memory=config.client_use_memory,
+            use_pipeline=config.client_use_pipeline,
+            use_trust_gating=config.client_use_trust_gating,
         )
         self.consolidator = MemoryConsolidator()
         self.longitudinal = LongitudinalEvaluator()
@@ -389,6 +392,12 @@ class CounselingSandbox:
                             "seed": seed,
                             "temperature_client": self.config.temperature_client,
                             "temperature_client_planner": self.config.temperature_client_planner,
+                            "client_policy": self.config.client_policy,
+                            "client_ablation": {
+                                "use_memory": self.config.client_use_memory,
+                                "use_pipeline": self.config.client_use_pipeline,
+                                "use_trust_gating": self.config.client_use_trust_gating,
+                            },
                             "temperature_counselor": self.config.temperature_counselor,
                             "counselor_pipeline": "evidence_vector_retry_v2",
                             "skill_selection": self.config.skill_selection.model_dump(),
@@ -573,6 +582,9 @@ class CounselingSandbox:
                     session_index=plan.session_index,
                     turn_index=turn_index,
                     patientact_enabled=self.config.patientact_enabled,
+                    use_memory=self.config.client_use_memory,
+                    use_pipeline=self.config.client_use_pipeline,
+                    use_trust_gating=self.config.client_use_trust_gating,
                 )
             )
             disclosure = client_turn.disclosure

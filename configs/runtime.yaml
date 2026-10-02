@@ -52,3 +52,6 @@ memory_view:
 client:
   policy: compact_patientact
   session_trust_retention: 0.5
+  use_memory: true
+  use_pipeline: true
+  use_trust_gating: true

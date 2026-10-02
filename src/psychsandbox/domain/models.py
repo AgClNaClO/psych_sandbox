@@ -142,6 +142,31 @@ class BigFive(StrictModel):
     neuroticism: float = Field(default=0.5, ge=0, le=1)
 
 
+class ClientSimulationConfig(StrictModel):
+    """Private synthetic controls, never case evidence or counselor memory."""
+
+    schema_version: Literal["1"] = "1"
+    traits: BigFive = Field(default_factory=BigFive)
+    origin: Literal["neutral_default", "synthetic_configuration"] = "neutral_default"
+    source_ids: list[str] = Field(default_factory=list)
+    uncertainty: float = Field(default=1.0, ge=0, le=1)
+
+    def modifiers(self) -> dict[str, float]:
+        weight = 1.0 - self.uncertainty
+        centered = {
+            key: (value - 0.5) * weight
+            for key, value in self.traits.model_dump().items()
+        }
+        return {
+            "expression_length": round(0.2 * centered["extraversion"], 4),
+            "interaction_initiation": round(0.2 * centered["extraversion"], 4),
+            "abstract_reflection": round(0.2 * centered["openness"], 4),
+            "conflict_softening": round(0.2 * centered["agreeableness"], 4),
+            "threat_sensitivity": round(0.1 * centered["neuroticism"], 4),
+            "recovery_rate": round(-0.1 * centered["neuroticism"], 4),
+        }
+
+
 class ClientRelationalProfile(StrictModel):
     """Theory-grounded simulation parameters, never clinical diagnoses."""
 
@@ -286,6 +311,7 @@ class DisclosureItem(StrictModel):
     activation_examples: list[str] = Field(default_factory=list)
     trust_tier: TrustTier = TrustTier.MODERATE
     generates_discomfort: bool = False
+    emotional_cost: float = Field(default=0.0, ge=0, le=1)
     session_scope: list[int] = Field(default_factory=list)
     depends_on: list[str] = Field(default_factory=list)
 
@@ -442,6 +468,7 @@ class ClientProfile(StrictModel):
     interaction_prior: InteractionPrior = Field(default_factory=InteractionPrior)
     expression_style: ClientExpressionStyle = Field(default_factory=ClientExpressionStyle)
     personality: BigFive = Field(default_factory=BigFive, exclude=True)
+    simulation_config: ClientSimulationConfig = Field(default_factory=ClientSimulationConfig)
     relational: ClientRelationalProfile = Field(
         default_factory=ClientRelationalProfile, exclude=True
     )
@@ -1506,6 +1533,9 @@ class SandboxConfig(StrictModel):
     session_trust_retention: float = Field(default=0.5, ge=0, le=1)
     client_pullback_after: int = Field(default=2, ge=1, le=10)
     disclosure_leak_retry_limit: int = Field(default=1, ge=0, le=3)
+    client_use_memory: bool = True
+    client_use_pipeline: bool = True
+    client_use_trust_gating: bool = True
     skill_selection: SkillSelectionConfig = Field(default_factory=SkillSelectionConfig)
     rft: RFTConfig = Field(default_factory=RFTConfig)
     logprob_scoring: LogprobScoringConfig = Field(default_factory=LogprobScoringConfig)

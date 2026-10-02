@@ -5,7 +5,6 @@ from time import perf_counter
 from typing import TYPE_CHECKING, Any
 
 from ..domain import (
-    ClientBehaviorType,
     ClientGeneration,
     ClientProfile,
     ClientState,
@@ -40,6 +39,9 @@ class ClientTurnInput:
     session_index: int
     turn_index: int
     patientact_enabled: bool = True
+    use_memory: bool = True
+    use_pipeline: bool = True
+    use_trust_gating: bool = True
 
 
 @dataclass(slots=True)
@@ -69,34 +71,48 @@ class ClientSimulator:
         disclosure: DisclosureGate | None = None,
         state_updater: StateUpdater | None = None,
         policy: ClientPolicy | None = None,
+        *,
+        use_memory: bool = True,
+        use_pipeline: bool = True,
+        use_trust_gating: bool = True,
     ):
         self.agent = agent
         self.disclosure = disclosure or DisclosureGate()
         self.state_updater = state_updater or StateUpdater()
         self.policy = policy or CompactPatientActPolicy(agent)
+        self.use_memory = use_memory
+        self.use_pipeline = use_pipeline
+        self.use_trust_gating = use_trust_gating
 
     async def respond(self, turn: ClientTurnInput) -> ClientTurnResult:
         started = perf_counter()
         disclosed_ids = self.disclosed_ids(turn.unlocked_facts)
-        disclosure = self.disclosure.evaluate(
-            turn.profile,
-            turn.state,
-            turn.counselor_turn.response,
-            disclosed_ids,
-            session_index=turn.session_index,
-        )
-        policy = self.policy if turn.patientact_enabled else SimpleClientPolicy()
-        signal = await policy.plan_turn(
-            ClientPolicyInput(
-                profile=turn.profile,
-                state=turn.state,
-                counselor_message=turn.counselor_turn.response,
-                recent_messages=turn.recent_messages,
-                disclosure=disclosure,
-                recent_signals=turn.recent_signals,
-                turn_index=turn.turn_index,
+        disclosure = (
+            self.disclosure.evaluate(
+                turn.profile,
+                turn.state,
+                turn.counselor_turn.response,
+                disclosed_ids,
+                session_index=turn.session_index,
+                use_trust_gating=turn.use_trust_gating and self.use_trust_gating,
             )
+            if turn.use_memory and self.use_memory else DisclosureDecision()
         )
+        policy = (
+            self.policy
+            if turn.patientact_enabled and turn.use_pipeline and self.use_pipeline
+            else SimpleClientPolicy()
+        )
+        policy_input = ClientPolicyInput(
+            profile=turn.profile,
+            state=turn.state,
+            counselor_message=turn.counselor_turn.response,
+            recent_messages=turn.recent_messages,
+            disclosure=disclosure,
+            recent_signals=turn.recent_signals,
+            turn_index=turn.turn_index,
+        )
+        signal = await policy.plan_turn(policy_input)
         generation, leakage = await self.agent.generate_utterance(
             profile=turn.profile,
             state=turn.state,
@@ -109,6 +125,9 @@ class ClientSimulator:
             known_memories=turn.unlocked_facts,
             turn_index=turn.turn_index,
         )
+        finalize = getattr(policy, "finalize_turn", None)
+        if finalize is not None:
+            signal = await finalize(policy_input, signal, generation)
         leakage["policy"] = signal.policy or getattr(policy, "name", "unknown")
         leakage["client_model_calls"] = (
             signal.planning_model_calls + 1 + int(leakage.get("retry_count", 0))
@@ -208,7 +227,7 @@ class ClientSimulator:
             update={
                 "trust": round(max(0.0, min(1.0, retained_trust)), 4),
                 "resistance": baseline.resistance,
-                "rupture_state": baseline.rupture_state,
+                "rupture_state": state.rupture_state,
                 "fatigue": round(
                     max(0.1, state.fatigue - ClientSimulator.SESSION_FATIGUE_RECOVERY),
                     4,

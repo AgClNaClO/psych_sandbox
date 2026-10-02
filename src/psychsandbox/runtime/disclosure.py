@@ -60,6 +60,7 @@ class DisclosureGate:
         disclosed: set[str] | Mapping[str, int],
         *,
         session_index: int | None = None,
+        use_trust_gating: bool = True,
     ) -> DisclosureDecision:
         disclosed_ids = set(disclosed)
         retrieved: list[DisclosureItem] = []
@@ -87,7 +88,7 @@ class DisclosureGate:
         for item, matched in candidates:
             activated.append(item.item_id)
             evidence[item.item_id] = matched
-            trust_ready = state.trust >= item.trust_tier.threshold
+            trust_ready = not use_trust_gating or state.trust >= item.trust_tier.threshold
             if trust_ready:
                 retrieved.append(item)
             elif item.generates_discomfort:
@@ -198,12 +199,11 @@ class DisclosureGate:
             UnlockedFact(
                 fact_id=fact_id,
                 content=(
-                    evidence.get(fact_id)
-                    or active.get(fact_id, index[fact_id]).content
+                    evidence[fact_id]
                 ),
                 evidence_session=session_index,
                 evidence_turn=turn_index,
             )
             for fact_id in dict.fromkeys(fact_ids)
-            if fact_id in index
+            if fact_id in index and fact_id in active and evidence.get(fact_id, "").strip()
         ]
