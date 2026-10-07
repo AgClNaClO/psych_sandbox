@@ -8,4 +8,4 @@
 
 完整删除请用 `psych-sandbox runs delete --run <编号>` 先预览，再加 `--yes` 确认。它同时清理目录和数据库关联记录；`.deletions/<编号>/deletion.json` 留存删除状态与错误，中断后可重试。直接删除文件夹不会自动同步数据库。详见 [清理约定](../../docs/RUN_ARTIFACTS.md)。
 
-数据命令按次保存为 `时间__data-fetch或data-convert-流派__编号/`。 `external-latest.json`、`processed-latest.json` 指向最近一次成功的数据产物。 `*__migration.json` 是旧文件迁移清单；`*__legacy-unassigned__*/` 保留无法明确归属的旧产物。
+`data fetch` 按次保存为 `时间__data-fetch__编号/`（内含 `external/psycheval/`），成功后由 `external-latest.json` 指向最近一次可用产物。`data convert` 不建立按次目录，而是原子重建 `data/processed/psycheval`（不在 `runs/` 下，也没有 `processed-latest.json`）。 `*__migration.json` 是旧文件迁移清单；`*__legacy-unassigned__*/` 保留无法明确归属的旧产物。

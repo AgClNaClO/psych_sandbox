@@ -27,6 +27,7 @@ Read this file when changing simulation flow, information permissions, therapy a
 | `skills/` | skill registry, exact-ID catalog observation and conditional vector narrowing |
 | `runtime/` | orchestration, isolated session candidates, disclosure, safety, state, memory and storage |
 | `runtime/run_management.py` | read-only deletion previews, confirmed run cleanup and retry journals |
+| `runtime/progress.py` | live CLI progress labels and the rendering contract for candidate and scoring bars |
 | `evaluation/` | rule, longitudinal, independent session RFT and holistic evaluation |
 | `visualization/` | read-only HTML/SVG reporting from normalized results |
 
@@ -42,4 +43,6 @@ Read this file when changing simulation flow, information permissions, therapy a
 8. `ClientProfile.schema_version="4"` versions the private client case contract. `trace_schema_version=5` independently versions persisted trajectory/memory structure (bumped when `SessionMemory` moved to its four-field layout); matching numbers do not make them the same schema.
 9. The session checklist never carries over as active state. E.9 reconciles it with the full dialogue, then it is archived into `checklist.per_session` as counselor-visible longitudinal memory.
 10. Memory retirement is evidence-bound: an item only leaves `last_homework`/`checklist.open_items` through an id-addressed `item_updates` entry whose `done` evidence occurs in that session's dialogue (or through a normalized/fuzzy match with the session's `completed_items`).
-10. Optional probability-weighted (logprob) scoring changes only how a PsychEval scale total is aggregated. An endpoint without a logprob payload, or a judgement whose numeric mass falls below the floor, fails loudly and is never replaced by an item average or zero. See `../../notes/logprob_scoring_borrowing.md`.
+11. Optional probability-weighted (logprob) scoring changes only how a PsychEval scale total is aggregated. An endpoint without a logprob payload, or a judgement whose numeric mass falls below the floor, fails loudly and is never replaced by an item average or zero. See `../../notes/logprob_scoring_borrowing.md`.
+12. Client idling detection is counselor-side engineering evidence read only from the visible dialogue and previous `ClientTurnSignal` behaviours. It needs at least three observed client turns and two of three cues (repeated content, consecutive `simple_response`, minimal-answer density); the thresholds are hypotheses, not clinical cut-offs, and a detected idle turn replaces one skill-based counselor turn.
+13. Attachment conditioning is prompt-level guidance for the planned `trust_change` only, and only when the profile carries a conditioned pattern whose `source_fact_ids` resolve to existing evidence nodes at sufficient confidence. It is never case evidence, never a disclosure permission and never counselor memory; without that evidence it stays absent rather than inferred from the case.

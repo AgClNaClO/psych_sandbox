@@ -38,8 +38,10 @@ set SESSIONS=3
 rem Max counselor turns per session (1..50); 8 matches the runtime default
 set TURNS=8
 set ROLLOUTS=3
-set ROLLOUT_CONCURRENCY=2
-set JUDGE_CONCURRENCY=2
+rem Candidate generation/scoring concurrency. Leave empty to follow ROLLOUTS
+rem (no trailing wave with fewer candidates than slots); a number caps the load.
+set ROLLOUT_CONCURRENCY=
+set JUDGE_CONCURRENCY=
 rem 1 = probability-weighted (logprob) scoring ON (default); 0 = item average
 set LOGPROB_SCORING=1
 rem 1 = probe the endpoint and keep the record before simulating (default);
@@ -75,14 +77,18 @@ rem Step 2: assemble the logprob scoring switch
 set LOGPROB_ARG=
 if "%LOGPROB_SCORING%"=="1" set LOGPROB_ARG=--logprob-scoring
 
+rem Step 2b: pass concurrency overrides only when they were set above
+set CONCURRENCY_ARGS=
+if not "%ROLLOUT_CONCURRENCY%"=="" set CONCURRENCY_ARGS=%CONCURRENCY_ARGS% --rollout-concurrency %ROLLOUT_CONCURRENCY%
+if not "%JUDGE_CONCURRENCY%"=="" set CONCURRENCY_ARGS=%CONCURRENCY_ARGS% --judge-concurrency %JUDGE_CONCURRENCY%
+
 rem Step 3: run the simulation (session candidates and weighted scoring)
 psych-sandbox simulate ^
   --case %CASE_ID% ^
   --sessions %SESSIONS% ^
   --max-turns %TURNS% ^
   --rollouts %ROLLOUTS% ^
-  --rollout-concurrency %ROLLOUT_CONCURRENCY% ^
-  --judge-concurrency %JUDGE_CONCURRENCY% ^
+  %CONCURRENCY_ARGS% ^
   %LOGPROB_ARG%
 
 :done

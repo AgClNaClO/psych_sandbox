@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from ..domain import (
@@ -123,10 +124,16 @@ class SessionRolloutEvaluator:
         session: SessionRecord,
         case: CounselingCase,
         memory_before: SessionMemory,
+        *,
+        on_step: Callable[[int, int, str], None] | None = None,
     ) -> SessionEvaluationReport:
-        report = await self.supervisor.evaluate(session, case)
+        report = await self.supervisor.evaluate(session, case, on_step=on_step)
         session.safety_verdict = self.safety_gate.evaluate(session, case, memory_before)
         return report
+
+    def instrument_count(self, session: SessionRecord) -> int:
+        """Judge steps :meth:`evaluate` runs for one candidate session."""
+        return self.supervisor.session_instrument_count(session.plan.therapy)
 
 
 def compute_rollout_reward(

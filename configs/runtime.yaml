@@ -21,8 +21,10 @@ rft:
   # Enable candidate selection with simulate --rollouts 3.
   enabled: false
   candidates: 3
-  concurrency: 2
-  judge_concurrency: 2
+  # null 表示与 candidates 相同：3 个候选就同时生成 3 条，不留「2 + 1」的尾轮。
+  # 需要限流时再显式填数字（或 simulate --rollout-concurrency / --judge-concurrency）。
+  concurrency: null
+  judge_concurrency: null
   min_eligible: 2
   counselor_temperature: 0.9
   judge_temperature: 0.2  # 非零让评分校验重试有机会得到不同输出；0 会让重试完全重复
@@ -55,3 +57,6 @@ client:
   use_memory: true
   use_pipeline: true
   use_trust_gating: true
+  # tags = 可审计的本地标签匹配（默认）；semantic = 本地字符 n-gram 近似（消融对比用，
+  # 仍不额外调用模型 API）。见 docs/CLIENT_SIMULATION.md。
+  topic_matcher: tags

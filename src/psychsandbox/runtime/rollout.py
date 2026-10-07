@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -17,18 +18,77 @@ from ..domain import (
 )
 from ..evaluation.rollout import SessionRolloutEvaluator, compute_rollout_reward
 from ..model_client import model_diagnostic_scope
+from .progress import ScoringProgress
 from .safety import SafetyStateMachine
 from .storage import SQLiteStore
 
 
 Progress = Callable[[dict[str, Any]], None]
 GenerateSession = Callable[[int, SessionMemory, ClientState, Progress], Awaitable[SessionRecord]]
+JudgeProgress = Callable[[ScoringProgress | None], None]
 
 
 class RolloutSelectionError(RuntimeError):
     def __init__(self, selection: RolloutSelection):
         self.selection = selection
         super().__init__(f"RFT {selection.status}: {selection.reason} ({selection.batch_id})")
+
+
+@dataclass
+class _ScoringTicks:
+    """Aggregate scoring progress across every candidate of one batch.
+
+    ``start_candidate`` books the judge steps the candidate will run, and
+    ``step`` counts each of them once (a judge retry replays the same steps and
+    must not inflate the bar). Candidates resampled after a scoring failure add
+    to the total, so the bar reflects the extra work instead of jumping to done.
+    """
+
+    session_index: int
+    callback: JudgeProgress | None
+    instruments_total: int = 0
+    instruments_done: int = 0
+    candidates_total: int = 0
+    candidates_done: int = 0
+    last_instrument: str = ""
+    started_at: float = field(default_factory=time.monotonic)
+    _counted: set[tuple[int, str]] = field(default_factory=set)
+
+    def start_candidate(self, index: int, instruments: int) -> None:
+        self.candidates_total += 1
+        self.instruments_total += max(0, instruments)
+        self.emit()
+
+    def step(self, index: int, name: str) -> None:
+        key = (index, name)
+        if key in self._counted:
+            return
+        self._counted.add(key)
+        self.instruments_done += 1
+        self.last_instrument = name
+        self.emit()
+
+    def finish_candidate(self) -> None:
+        self.candidates_done += 1
+        self.emit()
+
+    def emit(self) -> None:
+        if self.callback is None:
+            return
+        elapsed = time.monotonic() - self.started_at
+        done = self.instruments_done if self.instruments_total else self.candidates_done
+        total = self.instruments_total if self.instruments_total else self.candidates_total
+        eta = elapsed / done * (total - done) if done > 0 else 0.0
+        self.callback(ScoringProgress(
+            session_index=self.session_index,
+            instruments_done=self.instruments_done,
+            instruments_total=self.instruments_total,
+            candidates_scored=self.candidates_done,
+            candidates_total=self.candidates_total,
+            elapsed=elapsed,
+            eta=eta,
+            last_instrument=self.last_instrument,
+        ))
 
 
 @dataclass
@@ -96,6 +156,7 @@ class SessionRolloutRunner:
         self, *, run_id: str, plan: SessionPlan, memory: SessionMemory,
         state: ClientState, case: CounselingCase, previous: SessionRecord | None,
         generate: GenerateSession, notify: Callable[[str], None],
+        judge_progress: JudgeProgress | None = None,
     ) -> tuple[SessionRecord, SessionMemory]:
         batch_id = f"batch-{uuid.uuid4().hex[:12]}"
         directory = self.run_dir / "rollouts" / f"s{plan.session_index:03d}__{batch_id}"
@@ -146,8 +207,14 @@ class SessionRolloutRunner:
         save_batch()
         for candidate in candidates:
             save_candidate(candidate)
-        generation_limit = asyncio.Semaphore(self.config.concurrency)
-        judge_limit = asyncio.Semaphore(self.config.judge_concurrency)
+        generation_limit = asyncio.Semaphore(self.config.effective_concurrency)
+        judge_limit = asyncio.Semaphore(self.config.effective_judge_concurrency)
+        scoring = _ScoringTicks(session_index=plan.session_index, callback=judge_progress)
+        notify(
+            f"Session {plan.session_index} 批次 {batch_id}：{len(candidates)} 个候选，"
+            f"生成并发 {self.config.effective_concurrency}，"
+            f"评分并发 {self.config.effective_judge_concurrency}"
+        )
 
         async def sample(candidate: _Candidate) -> None:
             try:
@@ -199,13 +266,20 @@ class SessionRolloutRunner:
                 async with judge_limit:
                     notify(f"Session {plan.session_index} 候选 {candidate.summary.index}: 开始评分")
                     diagnostics = directory / f"d{candidate.summary.index:03d}"
+                    instrument_total = self._instrument_count(candidate)
+                    scoring.start_candidate(candidate.summary.index, instrument_total)
+
+                    def on_step(done: int, total: int, name: str) -> None:
+                        scoring.step(candidate.summary.index, name)
+
                     attempt = 0
                     while True:
                         try:
                             with model_diagnostic_scope(diagnostics):
                                 async with asyncio.timeout(self.config.judge_timeout_sec):
-                                    report = await self.evaluator.evaluate(
-                                        candidate.session, case, memory
+                                    report = await self._evaluate(
+                                        candidate, case, memory, on_step,
+                                        with_progress=judge_progress is not None,
                                     )
                             break
                         except ValueError:
@@ -237,6 +311,7 @@ class SessionRolloutRunner:
             finally:
                 save_candidate(candidate)
                 save_batch()
+                scoring.finish_candidate()
 
                 notify(f"Session {plan.session_index} 候选 {candidate.summary.index}: {candidate.summary.status}")
 
@@ -361,6 +436,34 @@ class SessionRolloutRunner:
                 selection.reason = f"{type(exc).__name__}: {exc}"[:1200]
             save_batch()
             raise
+
+    def _instrument_count(self, candidate: _Candidate) -> int:
+        """Judge steps the evaluator will run, used only to size the bar.
+
+        Custom evaluators (test doubles included) may not expose a count; the
+        progress bar then falls back to candidate-level steps.
+        """
+        if candidate.session is None:
+            return 0
+        counter = getattr(self.evaluator, "instrument_count", None)
+        if not callable(counter):
+            return 0
+        return int(counter(candidate.session))
+
+    async def _evaluate(
+        self, candidate: _Candidate, case, memory, on_step, *, with_progress: bool,
+    ) -> Any:
+        """Score one candidate, adding the tick hook only when it is in use.
+
+        The extra keyword is passed conditionally so evaluators that keep the
+        three-argument ``evaluate(session, case, memory)`` contract (for
+        example test doubles) keep working without a progress bar.
+        """
+        if not with_progress:
+            return await self.evaluator.evaluate(candidate.session, case, memory)
+        return await self.evaluator.evaluate(
+            candidate.session, case, memory, on_step=on_step,
+        )
 
 
 async def _gather_and_drain(coroutines: list[Awaitable[None]]) -> None:

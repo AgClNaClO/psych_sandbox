@@ -1,6 +1,6 @@
 # 测试与实际运行的文件约定
 
-不需要额外指定输出参数：原有 `pytest -q`、`psych-sandbox simulate`、`data fetch` 和 `data convert` 命令会自动使用新目录。项目根目录的 `run_simulate.bat` 只是包装 `simulate`（按脚本顶部参数，必要时先跑一次 `probe logprob-scoring`），产物仍是下面这批目录；探测调用单独占用一个 `时间__probe-logprob-scoring__编号/` 目录，不写正式运行数据库。输入资源 `data/<therapy>`、`assets/`、`prompts/` 以及虚拟环境 `.venv/` 保持原位。
+不需要额外指定输出参数：`pytest -q`、`psych-sandbox simulate`、`data fetch` 和 `probe logprob-scoring` 会自动使用新目录；`data convert` 例外，它不建立按次目录，而是原子重建 `data/processed/psycheval`（见下文“下载、转换与历史迁移”）。项目根目录的 `run_simulate.bat` 只是包装 `simulate`（按脚本顶部参数，必要时先跑一次 `probe logprob-scoring`），产物仍是下面这批目录；探测调用单独占用一个 `时间__probe-logprob-scoring__编号/` 目录，不写正式运行数据库。输入资源 `data/<therapy>`、`assets/`、`prompts/` 以及虚拟环境 `.venv/` 保持原位。
 
 ## 当前本机位置与迁移
 
@@ -37,11 +37,13 @@ runs/
     │   ├── logs/             progress.log；失败时有 errors.log
     │   ├── diagnostics/      API 结构化输出与传输（5xx/超时）错误诊断
     │   └── tmp/              标准库和子进程临时文件
-    └── 时间__data-convert-cbt__唯一编号/
-        ├── run.json
-        ├── tmp/
-        └── processed/psycheval/
+    ├── external-latest.json    最近一次成功 data fetch 目录的相对路径
+    └── 时间__data-fetch__唯一编号/
+        ├── run.json          下载命令与状态
+        └── external/psycheval/   官方 PsychEval 检出
 ```
+
+`data convert` 不在此结构下建立目录：它使用 `data/processed/.psycheval-staging-<hex>/` 暂存，成功后原子替换 `data/processed/psycheval`，`data/processed/psycheval` 因此仍是唯一会被仿真读取的运行时缓存。
 
 ## 查找与续跑
 
@@ -64,11 +66,11 @@ psych-sandbox simulate --case psycheval-cbt-001 --sessions 6 --resume-run run-xx
 
 `tests/conftest.py` 为每次 pytest 建立独立目录，配置 `tmp_path`、标准库 `tempfile`、 `TEMP/TMP/TMPDIR`、JUnit 和日志。`PSYCHSANDBOX_RUNTIME_DIR` 在测试期间指向本次 `artifacts/`，子进程自动继承，结束后恢复。该环境变量是内部隔离接口，正常运行无需设置。 pytest 的 `--basetemp`、`--junitxml`、`--log-file` 由本仓库约定统一接管，避免写到外部或清空旧目录。 pytest 缓存插件保持禁用；测试主体禁用 Python 字节码写入。
 
-文件不会在测试结束后自动删除；失败、取消和异常时可查看已保存的部分输出。硬终止进程时 `run.json` 可能仍为 `running`，不应将它当成成功。同一个 `CounselingSandbox` 实例应顺序运行；运行期临时目录使用进程环境，并行实验请使用独立进程，不在同一进程中并发修改临时目录。
+本次调用目录在 `pytest` 会话结束时默认被删除；设置 `PSYCHSANDBOX_KEEP_TESTS=1` 可在失败、取消或异常时保留已保存的部分输出。硬终止进程时 `run.json` 可能仍为 `running`，不应将它当成成功。同一个 `CounselingSandbox` 实例应顺序运行；运行期临时目录使用进程环境，并行实验请使用独立进程，不在同一进程中并发修改临时目录。
 
 ## 下载、转换与历史迁移
 
-数据命令每次建立独立目录。成功后才更新 `external-latest.json` 或 `processed-latest.json`；失败不会替换上一份可用缓存。旧目录仍完整保留，正常仿真继续直接读取仓库中的原始病例。
+`data fetch` 每次建立独立目录，成功后才更新 `runs/runtime/external-latest.json` 指针；失败不会替换上一份可用缓存。`data convert` 不建立按次目录，而是用暂存目录原子重建 `data/processed/psycheval`，失败也不会替换已有缓存。旧下载目录仍完整保留，正常仿真继续直接读取仓库中的原始病例。
 
 仓库已有的扁平 `runs/*.jsonl`、HTML、数据库和可归属诊断可用以下 PowerShell 脚本迁移：
 
@@ -80,7 +82,7 @@ psych-sandbox simulate --case psycheval-cbt-001 --sessions 6 --resume-run run-xx
 
 ## 保留与清理
 
-测试产物可在进程退出后按次删除；原有完成后自动删除临时目录的行为已取消，因此空间占用会增长。正式运行的目录与共享 SQLite 数据库应一起备份。只删除报告目录不会删除数据库记录，也不要只删除数据库，否则评估、重新生成报告和续跑将失去来源。诊断、轨迹和报告可能含有案例内容；全部被 Git 忽略，不提交、不自动上传。
+测试产物可在进程退出后按次删除；`pytest` 会话结束默认删除本次调用目录，因此不设置 `PSYCHSANDBOX_KEEP_TESTS=1` 时不会持续占用空间。正式运行的目录与共享 SQLite 数据库应一起备份。只删除报告目录不会删除数据库记录，也不要只删除数据库，否则评估、重新生成报告和续跑将失去来源。诊断、轨迹和报告可能含有案例内容；全部被 Git 忽略，不提交、不自动上传。
 
 ### 清理测试日志（runs clean-tests）
 

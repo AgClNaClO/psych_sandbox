@@ -24,6 +24,10 @@ _Avoid_: Full profile, private case
 An evidence-backed expectation or coping tendency used to plan client reactions; it is a simulation prior, not a diagnosis or independently discloseable fact.
 _Avoid_: Personality diagnosis, attachment label
 
+**Attachment Conditioning**:
+An evidence-gated prompt prior that only adjusts the planned `trust_change`; it is absent unless the profile carries a conditioned attachment pattern whose source facts resolve to existing evidence nodes at sufficient confidence.
+_Avoid_: Attachment diagnosis, disclosed attachment fact
+
 **Therapy Formulation**:
 The native BT, CBT, HET, PDT, or PMT conceptualization supplied by PsychEval.
 _Avoid_: 5Ps

@@ -12,8 +12,9 @@
 - 可选的整场会谈多候选、统一 PsychEval 量表评分和选优已实现；仅胜出者进入会后整理及下一会谈。默认关闭，尚无训练权重更新或选优到训练导出的自动连接，详见 [会谈 RFT](SESSION_RFT.md)。
 - 新增可选的概率加权（logprob）量表评分（默认开启）：把 PsychEval 量表的条目均值替换为论文式 8 的概率加权期望，保留条目 JSON 调用作审计；数值 token 质量不足或端点不返回 `logprobs` 时明确失败，不回退均值或零分。配套 `psych-sandbox probe logprob-scoring` 端点实测入口和 `run_simulate.bat` 启动脚本，见 [借鉴说明](../notes/logprob_scoring_borrowing.md) 与 [会谈 RFT](SESSION_RFT.md)。
 - 网关瞬时重试预算统一由 `MODEL_MAX_ATTEMPTS`（默认 3）控制，聊天生成、logprob 评判与 embedding 批次共用；预算耗尽写 `kind="api_error"` 诊断记录（只含请求元数据）。RFT 单次评分时限默认由 180 秒调整为 240 秒。
-- CLI 已读取 YAML；产物按次归档至 `runs/tests` 与 `runs/runtime`。测试套件当前为 452 项（2026-09-28 用 `.venv\Scripts\python.exe -B -m pytest --collect-only -q` 统计；同日全量 `pytest -q` 为 452 passed、38.15 秒）；真实模型 API 与 embedding 联调仍需使用实际密钥验证。
-- 新增按运行编号的只读预览和确认删除，关联清理文件/数据库，失败留存删除日志并可重试；新增 `runs clean-tests` 清理 `runs/tests` 测试日志，支持 `PSYCHSANDBOX_AUTO_CLEAN_TESTS=1` 在 `pytest` 结束时自动删除该次调用目录；支持 ChatECNU 同源 embedding 共用令牌；RFT 默认候选数为 3，仍默认关闭。
+- CLI 已读取 YAML；产物按次归档至 `runs/tests` 与 `runs/runtime`。测试套件当前为 500 项（2026-10-07 用 `.venv\Scripts\python.exe -B -m pytest --collect-only -q` 统计；同日全量 `pytest -q` 为 500 passed、42.55 秒，与 [README](../README.md) 记录同口径）；真实模型 API 与 embedding 联调仍需使用实际密钥验证。
+- 新增按运行编号的只读预览和确认删除，关联清理文件/数据库，失败留存删除日志并可重试；新增 `runs clean-tests` 清理 `runs/tests` 测试日志，`pytest` 结束时默认自动删除该次调用目录（`PSYCHSANDBOX_KEEP_TESTS=1` 可保留）；支持 ChatECNU 同源 embedding 共用令牌；RFT 默认候选数为 3，仍默认关闭。
+- 会谈 RFT 的生成/评分并发默认跟随候选数（`rft.concurrency` / `rft.judge_concurrency` 为 `null` 时等于 `candidates`），3 个候选不再拆成「2 + 1」的尾轮，显式传入 `--rollout-concurrency` / `--judge-concurrency` 才限流；CLI 在生成阶段逐候选、评分阶段按整批候选各绘制一条实时进度条（量表 x/y、候选 x/y、已用与预计剩余）。
 
 ## 下一步：实验验收
 

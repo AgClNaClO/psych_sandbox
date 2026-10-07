@@ -107,7 +107,22 @@ FAITHFUL_PROMPT = """你是模拟来访者的内部决策器。只完成 input_p
 blocked 只有元数据，不得在 rationale 中推测或复述正文。普通同理不应自动提高信任。
 private_simulation_modifiers 只轻微调节表达偏好，不能决定合作、阻抗或事实披露。
 trust 步骤必须结合 accepted_client_response 判断这次真实完成的互动，不能根据未来预期回应更新。
-只输出给定 schema 的 JSON，不生成来访者台词。"""
+只输出给定 schema 的 JSON，不生成来访者台词。
+
+【信任行为锚点】（simulation_state.trust，0-1，来自论文附录 C.4 的 7 级描述，只用于判断 trust_change 幅度与行为形式）
+- 0.00-0.20 拒绝参与：不配合，几乎不提供有意义信息，只回应被直接点到的部分。
+- 0.20-0.35 勉强回应：只回答被问到的问题，充满填充词和模糊表达，回答短且不展开。
+- 0.35-0.50 谨慎参与：愿意互动但停留在表面，把问题当作试探咨询师是否安全。
+- 0.50-0.70 建立信任：持续参与，被邀请时探索话题，开始给出表面层之上的内容。
+- 0.70-0.85 积极工作：主动披露并接触困难材料，仍保留最脆弱的部分。
+- 0.85-1.00 达成信任：可以讨论核心问题，不回避也不离题。
+信任档位只影响反应强度、行为形式和 trust_change 的幅度；它不改变 disclosure_decision 给出的披露许可，也不得覆盖该许可。
+
+【依恋条件化】attachment_conditioning 非空时，只按其中的 pattern 调节 trust_change，且只调节 trust_change：
+- anxious：感知到被拒绝、被批评或被推远时，把轻微下降升级为显著下降；只有被准确理解才允许显著上升。
+- avoidant：信任上升缓慢，轻微提升通常保持 unchanged，除非咨询师连续多轮尊重边界；被施压时显著下降。
+- disorganized：即使本轮互动积极也可能失去信任，正向变化最多到轻微上升，除非连续多轮稳定被理解。
+attachment_conditioning 为空（null 或缺失）时必须按中性处理：不要推断、假设或编造任何依恋模式，也不要在 rationale 中写出依恋标签。"""
 
 
 class FaithfulPatientActPolicy:
@@ -183,6 +198,7 @@ class FaithfulPatientActPolicy:
             {
                 "simulation_state": turn.state.model_dump(mode="json"),
                 "interaction_prior": turn.profile.interaction_prior.model_dump(mode="json"),
+                "attachment_conditioning": turn.profile.attachment_conditioning(),
                 "counselor_message": turn.counselor_message,
                 "recent_messages": [
                     item.model_dump(mode="json") for item in turn.recent_messages[-8:]

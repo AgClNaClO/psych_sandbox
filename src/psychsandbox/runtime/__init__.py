@@ -1,5 +1,5 @@
-from .disclosure import DisclosureGate
-from .dialogue_guard import BoundarySignal, DialogueLoopGuard
+from .disclosure import DisclosureGate, SemanticActivationMatcher
+from .dialogue_guard import BoundarySignal, ClientIdleSignal, DialogueLoopGuard
 from .leakage import PrematureDisclosureGuard
 from .planning import PlanBuilder
 from .safety import SafetyStateMachine
@@ -9,11 +9,13 @@ from .storage import SQLiteStore
 __all__ = [
     "CounselingSandbox",
     "BoundarySignal",
+    "ClientIdleSignal",
     "DisclosureGate",
     "DialogueLoopGuard",
     "PlanBuilder",
     "PrematureDisclosureGuard",
     "SafetyStateMachine",
+    "SemanticActivationMatcher",
     "SQLiteStore",
     "StateUpdater",
 ]

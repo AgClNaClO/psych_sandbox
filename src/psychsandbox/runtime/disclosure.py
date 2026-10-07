@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from collections.abc import Mapping
 from typing import Protocol
 
@@ -18,16 +19,32 @@ def normalize_activation_text(value: str) -> str:
     return re.sub(r"[\W_]+", "", value.casefold(), flags=re.UNICODE)
 
 
+LOW_INFORMATION_TAGS = frozenset({"影响", "关系", "事情", "感觉", "问题"})
+
+
+def _keep_informative_matches(matched: list[str]) -> list[str]:
+    """Reject a single low-information tag such as “影响” or “关系”.
+
+    One generic tag is too weak to justify activating a hidden memory. A
+    specific tag, or several generic tags occurring together, remains valid and
+    auditable.
+    """
+    strong = [
+        tag
+        for tag in matched
+        if normalize_activation_text(tag) not in LOW_INFORMATION_TAGS
+    ]
+    return matched if strong or len(matched) >= 2 else []
+
+
 class ActivationMatcher(Protocol):
     def match(self, text: str, item: DisclosureItem) -> list[str]: ...
 
 
 class TagActivationMatcher:
-    """Auditable tag matcher; replaceable by a semantic matcher later."""
+    """Auditable tag matcher; the default and a no-API-call implementation."""
 
-    LOW_INFORMATION_TAGS = frozenset(
-        {"影响", "关系", "事情", "感觉", "问题"}
-    )
+    LOW_INFORMATION_TAGS = LOW_INFORMATION_TAGS
 
     def match(self, text: str, item: DisclosureItem) -> list[str]:
         normalized = normalize_activation_text(text)
@@ -37,15 +54,86 @@ class TagActivationMatcher:
             if normalize_activation_text(tag)
             and normalize_activation_text(tag) in normalized
         ]
-        # A single low-information tag such as “影响” or “关系” is too generic
-        # to justify activating a hidden memory. A specific tag, or multiple
-        # generic tags occurring together, remains valid and auditable.
-        strong = [
-            tag
-            for tag in matched
-            if normalize_activation_text(tag) not in self.LOW_INFORMATION_TAGS
+        return _keep_informative_matches(matched)
+
+
+class SemanticActivationMatcher:
+    """Optional local character n-gram matcher used for the topic ablation.
+
+    The reference extracts topics with an additional structured model call.
+    This implementation keeps the ``ActivationMatcher`` seam but approximates
+    that step locally with character n-gram overlap, so an ablation run adds no
+    API call, no extra transport failure mode and no unauditable model
+    rationale. The bounded claim is deliberate: it catches morphological
+    variation of a tag that is actually present in the counselor's words
+    ("睡眠" → "睡眠情况", "同事" → "同事关系"), and it cannot resolve paraphrase,
+    negation, quotation or cross-language surface gaps. The tag matcher remains
+    the default and this one is only selected by configuration.
+    """
+
+    NGRAM_SIZE = 2
+    # Engineering hypothesis in the spirit of the skill vector threshold: tuned
+    # on the auditable boundary cases, never validated as a clinical rule.
+    # Overlap below this level is treated as no topic match at all.
+    DEFAULT_THRESHOLD = 0.4
+
+    def __init__(self, *, threshold: float | None = None):
+        self.threshold = self.DEFAULT_THRESHOLD if threshold is None else threshold
+
+    def match(self, text: str, item: DisclosureItem) -> list[str]:
+        haystack = _ngram_counts(normalize_activation_text(text))
+        if not haystack:
+            return []
+        scored: list[tuple[float, str]] = []
+        for tag in item.activation_tags:
+            normalized = normalize_activation_text(tag)
+            # A one-character tag would match on a single shared character; the
+            # exact tag matcher already covers those, so they stay out of the
+            # approximate path.
+            if len(normalized) < self.NGRAM_SIZE:
+                continue
+            score = _overlap_score(haystack, _ngram_counts(normalized))
+            if score >= self.threshold:
+                scored.append((score, tag))
+        matched = [
+            tag for _, tag in sorted(scored, key=lambda pair: (-pair[0], pair[1]))
         ]
-        return matched if strong or len(matched) >= 2 else []
+        return _keep_informative_matches(matched)
+
+
+def create_activation_matcher(name: str) -> ActivationMatcher:
+    """Return the configured topic matcher; ``tags`` is the auditable default."""
+    if name == "tags":
+        return TagActivationMatcher()
+    if name == "semantic":
+        return SemanticActivationMatcher()
+    raise ValueError(f"Unknown activation matcher: {name}")
+
+
+def _ngram_counts(value: str) -> Counter[str]:
+    """Character unigrams plus bigrams; unigrams keep short tags reachable."""
+    if not value:
+        return Counter()
+    grams = Counter(value)
+    size = SemanticActivationMatcher.NGRAM_SIZE
+    if len(value) >= size:
+        grams.update(
+            value[index : index + size] for index in range(len(value) - size + 1)
+        )
+    return grams
+
+
+def _overlap_score(text_grams: Counter[str], tag_grams: Counter[str]) -> float:
+    """Fraction of the tag's character n-grams that also occur in the text.
+
+    Tag recall rather than a symmetric similarity: an unmatched tag character or
+    bigram lowers the score, so a shared function word cannot activate a hidden
+    memory on its own.
+    """
+    if not tag_grams:
+        return 0.0
+    covered = sum(1 for gram in tag_grams if gram in text_grams)
+    return covered / len(tag_grams)
 
 
 class DisclosureGate:

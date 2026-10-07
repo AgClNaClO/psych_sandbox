@@ -63,6 +63,24 @@ def test_default_candidate_count_is_three_in_domain_and_project_yaml(root):
     assert default_config(root).rft.enabled is False
 
 
+def test_rft_concurrency_defaults_follow_the_candidate_count(root):
+    # An unset budget must not split three candidates into a 2 + 1 wave.
+    assert RFTConfig().concurrency is None
+    assert RFTConfig().judge_concurrency is None
+    assert RFTConfig().effective_concurrency == 3
+    assert RFTConfig().effective_judge_concurrency == 3
+    assert RFTConfig(candidates=8).effective_concurrency == 8
+    assert RFTConfig(candidates=8).effective_judge_concurrency == 8
+    explicit = RFTConfig(candidates=8, concurrency=2, judge_concurrency=1)
+    assert explicit.effective_concurrency == 2
+    assert explicit.effective_judge_concurrency == 1
+    # The project YAML relies on that default instead of pinning a budget.
+    project_rft = default_config(root).rft
+    assert project_rft.concurrency is None
+    assert project_rft.judge_concurrency is None
+    assert project_rft.effective_concurrency == project_rft.candidates
+
+
 def test_pytest_keeps_stdlib_temp_and_default_runtime_in_test_session(root, tmp_path):
     import tempfile
 

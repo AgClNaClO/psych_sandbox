@@ -1,8 +1,31 @@
 # Client simulation audit and implementation
 
-Audited on 2026-10-02 against the local source at `D:/PatientHub-master`.
-That directory has no Git metadata, so this comparison identifies files rather
-than claiming a verified upstream revision or paper reproduction.
+Reference checkout re-verified on 2026-10-07 at
+`C:\Users\Rain\Desktop\PatientHub-master`; the `D:/PatientHub-master` path used
+by the first audit no longer exists. That directory still has **no** `.git`
+metadata, so this comparison identifies files and their content fingerprints
+rather than claiming an upstream revision or a paper reproduction. Its
+`README.md` identifies *PatientHub: A Unified Framework for Patient Simulation*
+(EMNLP 2026 Demo) and *PatientAct: Theory-Grounded Mental Health Client
+Simulation* (EMNLP 2026 Findings).
+
+Audited files, recorded as SHA-256 prefixes (12 hex characters) with byte size:
+
+| Reference file | SHA-256 prefix (bytes) |
+| --- | --- |
+| `patienthub/clients/patientAct.py` | `c63902e99430` (13650) |
+| `patienthub/schemas/patientAct.py` | `3c055fb277bd` (15660) |
+| `patienthub/generators/patientAct.py` | `a0628351877b` (19087) |
+| `data/prompts/client/patientAct.yaml` | `2f7ea07f6184` (12150) |
+| `data/prompts/generator/patientAct.yaml` | `0b6aa9b57a7d` (10049) |
+| `docs/docs/components/clients/patientact.md` | `a0d7ac27eec1` (10839) |
+| `patienthub/evaluators/conv.py` | `dcb064aaaf79` (2031) |
+| `data/prompts/evaluator/client_conv.yaml` | `600613ddba82` (2909) |
+| `data/characters/patientAct.json` | `2eb0f5c428c5` (1178154) |
+
+The reference checkout is **not** part of this repository, so the `patienthub/...`
+files named below cannot be re-verified from this checkout and only the
+sandbox-side behaviour is reproducible here.
 
 ## Baseline audit
 
@@ -98,13 +121,15 @@ No counselor, supervisor, skill-tree, model-selection, RFT ranking or memory
 consolidation implementation is changed. No new package dependency is added.
 Appraisal is recorded in existing private turn audit, not counselor memory.
 New profile fields are optional defaults, keeping old v4 profiles loadable;
-the existing profile/trace versions remain 4/5. Prompt behavior is versioned v6.
+the existing profile/trace versions remain 4/5. Prompt behavior is versioned v7.
 
 ## Research configuration
 
 The YAML `client` block supports `policy: compact_patientact` or
-`faithful_patientact`, plus `use_memory`, `use_pipeline`, `use_trust_gating`.
-All three switches default to true. Direct Python configuration uses the
+`faithful_patientact`, plus `use_memory`, `use_pipeline`, `use_trust_gating` and
+`topic_matcher` (`tags` by default, `semantic` for the local n-gram ablation).
+All three switches default to true, and `topic_matcher` keeps the auditable
+`tags` default. Direct Python configuration uses the
 corresponding `SandboxConfig.client_use_*` fields.
 
 - `use_memory=false`: no dynamic retrieval or newly authorized facts; previously
@@ -121,6 +146,8 @@ Legacy `patientact.enabled=false` continues selecting the simple policy.
 Compact makes one planning call and applies its provisional trust direction only
 after generation. Faithful uses two planning calls, a conditional resistance
 call, one generation call (plus retries), and one post-response trust call.
+`client.topic_matcher` selects `tags` (default) or `semantic`; the choice is
+recorded in the trajectory snapshot.
 
 `profile.simulation_config` is private, persisted simulation configuration.
 Traits are never automatically inferred from PsychEval. Uncertainty 1.0 makes
@@ -129,6 +156,66 @@ or 0.05 threat/recovery adjustment. Expression is prompt-level guidance;
 threat/recovery actually scale state deltas. Legacy excluded personality is not
 silently promoted. No personality-based disclosure-threshold offset is added.
 
+## Second borrowing round (PatientAct checklist)
+
+Three checklist items were implemented in this round. All of them are additive:
+the default runtime path keeps the auditable tag matcher, and the client prompt
+version moves to `psycheval_patientact_v7`.
+
+### Client content-exhaustion (idling) detection
+
+`DialogueLoopGuard.inspect_client_idling` reads only the counselor-visible
+dialogue plus the previous `ClientTurnSignal` behaviours. It counts three cues
+over the last `IDLE_WINDOW = 4` client turns: repeated client content,
+consecutive `simple_response` behaviours (`>= IDLE_MIN_SIMPLE_RESPONSES = 2`) and
+minimal-answer marker density (`>= IDLE_MIN_WITHDRAWALS = 2`). At least
+`IDLE_MIN_SIGNALS = 2` cues must agree after at least `IDLE_MIN_CLIENT_TURNS = 3`
+observed client turns, so one short answer never triggers a repair. A detected
+signal makes `CounselorAgent` answer with a direction-change repair
+(`IDLE_REPAIR`, then `IDLE_HANDOVER` when a repair was already sent) instead of
+repeating the probe; the detected reasons and the observed turn count are written
+into the counselor decision for audit. The client's own planning, state and
+disclosure permission are untouched. The thresholds are engineering hypotheses
+and are configurable through the guard constructor.
+
+### Trust anchors and evidence-gated attachment conditioning
+
+Both trust decision sites (`prompts/simclient/planner_system.jinja2` step 4 and
+`FAITHFUL_PROMPT`) now carry the appendix C.4 trust-level anchors mapped onto the
+sandbox 0-1 trust, plus an explicit rule that a trust level changes amplitude and
+form only and never the disclosure permission.
+`ClientProfile.attachment_conditioning()` returns pattern guidance only when the
+pattern is `anxious`, `avoidant` or `disorganized` **and**
+`ClientRelationalProfile.source_fact_ids` is non-empty, resolves to existing
+evidence nodes, and `confidence >= 0.5`. Otherwise the planner payload carries
+`null` and both prompts require neutral handling. The PsychEval compiler leaves
+`attachment_pattern` at `unspecified`, so this branch is inert in current
+production runs and activates only for explicitly sourced profiles. The
+conditioning is prompt-level guidance for `trust_change` only: it is not case
+evidence, does not alter disclosure permission and never enters counselor memory.
+
+### Optional local semantic topic matcher
+
+`SemanticActivationMatcher` is a second `ActivationMatcher` implementation,
+selected by `client.topic_matcher: semantic` (default `tags`). It scores the
+fraction of a tag's character unigrams and bigrams that occur in the counselor's
+message (`DEFAULT_THRESHOLD = 0.4`), which recovers morphological variants such
+as "同事关系" from "我和同事之间的关系" that the exact tag matcher misses. It is
+deliberately local: no extra API call, no transport failure mode and no
+unauditable model rationale, but also no paraphrase, negation or cross-language
+resolution. Trust gating, session scope, dependencies, ambiguity handling and the
+single-low-information-tag guard are unchanged, and the selected value is
+recorded in the trajectory snapshot. The reference's LLM topic extraction is
+therefore approximated rather than reproduced; a model-based matcher still needs
+its own audit trail and cost accounting.
+
+| Files | Change / purpose | Verification |
+| --- | --- | --- |
+| `runtime/dialogue_guard.py`, `agents/counselor.py`, `runtime/orchestrator.py` | Client idling cues, direction-change repair and hand-over, previous turn signals passed to the counselor | Cue and threshold boundaries, single-cue rejection, counselor repair/hand-over, existing dialogue-loop test |
+| `domain/models.py`, `agents/client.py`, `client_simulation/policies.py`, `prompts/simclient/planner_system.jinja2`, `client_simulation/prompts.py` | Evidence-gated attachment conditioning, appendix C.4 trust anchors in both trust decision sites, prompt version v7 | Inert unsourced gate, evidence/confidence/pattern gate, planner payload and rendered-prompt checks, faithful trust step |
+| `runtime/disclosure.py`, `runtime/__init__.py`, `domain/models.py`, `config.py`, `configs/runtime.yaml`, `runtime/orchestrator.py` | Optional local semantic matcher, explicit configuration and trajectory record | Tag-versus-semantic activation ablation, trust gating unchanged, low-information guard, factory/config wiring |
+| `tests/test_dialogue_loop.py`, `tests/test_client_mechanism_boundaries.py`, `tests/test_components.py` | 15 new cases plus the prompt-version assertion | Full suite **500 passed** |
+
 ## Risks, omissions and smallest next steps
 
 - Coefficients are engineering hypotheses, not clinically validated effects.
@@ -136,7 +223,20 @@ silently promoted. No personality-based disclosure-threshold offset is added.
   therapeutic efficacy. Real API experiments and independent review remain.
 - Topic matching is lexical, not semantic. Appraisal combines structured model
   reactions, approved disclosure cost and Chinese boundary/pressure markers;
-  negation, quoted speech and other languages can be misclassified.
+  negation, quoted speech and other languages can be misclassified. The optional
+  `semantic` matcher only widens character n-gram overlap for tags that are
+  literally present in another form; it is not a semantic model and remains
+  untested against real paraphrases.
+- The idling guard is a text/cue heuristic. Its thresholds are engineering
+  hypotheses, its marker list is Chinese-only, and a detected repair replaces one
+  skill-based counselor turn exactly like the existing boundary guard. It cannot
+  prove that a client has no content left, and it never changes client planning or
+  disclosure permission.
+- Attachment conditioning is prompt-level and currently inert for compiled
+  PsychEval profiles, which never set an evidence-backed `attachment_pattern`.
+  Trust asymmetry is therefore guided, not enforced in state, and using it in a
+  reported experiment requires a case set that actually carries sourced attachment
+  evidence plus expert review of the anchors.
 - The no-pipeline compatibility path does not separately assess trust after the
   free response. Isolating behavior from trust needs an independent trust switch
   or critic; doing so would add an API call and change the historical baseline.
@@ -150,7 +250,8 @@ silently promoted. No personality-based disclosure-threshold offset is added.
   rupture now persists. A gradual resistance-retention experiment needs its own
   explicit configuration and comparison, not an implicit contract change.
 - No new emotional labels, Big Five inference, additional topic extraction API,
-  model migration, distillation or local model deployment is implemented.
+  model migration, distillation or local model deployment is implemented. The
+  `semantic` topic matcher stays local to keep that boundary.
 - Do not pool runs made under different prompt/state behavior. First use a fixed
   case set to compare full/ablation modes with repeated samples, report leakage,
   ambiguity, disclosure rate, trust/emotion trajectories and model-call cost;
@@ -172,3 +273,18 @@ including 16 added boundary cases. `git diff --check` passed. Intermediate
 new-test construction failures were repaired, and an attempted resistance
 retention change was withdrawn to preserve the existing session contract;
 no existing assertions were weakened to accept it.
+
+### Second round record (2026-10-07)
+
+Before the second round the same interpreter reported **485 passed in 43.92s**
+(a 2026-10-03 snapshot that `ROADMAP.md` has since replaced with the current
+500-item count; the 477 above is the older first-round snapshot, not a
+contradiction). After the three checklist items and their 15 new tests, the same
+interpreter reports **500 passed in 42.55s**, with `--collect-only -q` also at
+500. The count basis in `README.md`, `ROADMAP.md` and this file is now identical.
+
+Added tests: idling cues and thresholds (5), counselor idling repair and
+hand-over (2), semantic topic matcher ablation and factory/config wiring (4),
+attachment-conditioning gate and prompt anchors (4). No real API call, run
+deletion or shared-runtime database migration was performed; outputs stayed in
+the per-invocation `runs/tests` directory and were auto-cleaned.

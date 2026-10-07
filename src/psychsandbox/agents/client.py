@@ -67,6 +67,7 @@ class ClientAgent:
         input_payload = {
             "private_client_profile": profile.model_dump(mode="json"),
             "private_simulation_modifiers": profile.simulation_config.modifiers(),
+            "attachment_conditioning": profile.attachment_conditioning(),
             "simulation_state": state.model_dump(mode="json"),
             "counselor_message": counselor_message,
             "recent_messages": [

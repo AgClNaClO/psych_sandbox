@@ -8,15 +8,20 @@ import yaml
 
 from psychsandbox.agents import ClientAgent, CounselorAgent
 from psychsandbox.client_simulation import ClientSimulator, ClientTurnInput
-from psychsandbox.client_simulation.policies import FaithfulPatientActPolicy
+from psychsandbox.client_simulation.policies import (
+    FAITHFUL_PROMPT,
+    FaithfulPatientActPolicy,
+)
+from psychsandbox.client_simulation.prompts import CLIENT_PLANNER_TEMPLATE
 from psychsandbox.config import default_config
 from psychsandbox.domain import (
     BigFive, ClientBehaviorType, ClientGeneration, ClientReactionType,
-    ClientSimulationConfig, ClientState, ClientTurnSignal, ClientUtterance,
-    CounselorDecision, CounselorTurn, DisclosureItem,
-    RiskAssessment, RuptureState, SessionMemory, TrustChange, TrustTier,
-    UnlockedClientInfo, UnlockedFact,
+    ClientRelationalProfile, ClientSimulationConfig, ClientState, ClientTurnSignal,
+    ClientUtterance, CounselorDecision, CounselorTurn, DisclosureDecision,
+    DisclosureItem, RiskAssessment, RuptureState, SessionMemory, TrustChange,
+    TrustTier, UnlockedClientInfo, UnlockedFact,
 )
+from psychsandbox.prompts import render_prompt
 from psychsandbox.runtime.disclosure import DisclosureGate
 from psychsandbox.runtime.state import StateUpdater
 from tests.deterministic_gateway import DeterministicGateway
@@ -251,11 +256,17 @@ def test_ablation_yaml_loading(tmp_path):
     config_dir.mkdir()
     (config_dir / "runtime.yaml").write_text(yaml.safe_dump({"client": {
         "use_memory": False, "use_pipeline": False, "use_trust_gating": False,
+        "topic_matcher": "semantic",
     }}), encoding="utf-8")
     config = default_config(tmp_path)
     assert not config.client_use_memory
     assert not config.client_use_pipeline
     assert not config.client_use_trust_gating
+    assert config.client_topic_matcher == "semantic"
+
+
+def test_default_config_keeps_the_auditable_topic_matcher(root):
+    assert default_config(root).client_topic_matcher == "tags"
 
 
 def test_unlock_cannot_backfill_without_authorization_and_spoken_evidence(sample_case):
@@ -289,3 +300,114 @@ def test_personality_modifiers_affect_expression_and_recovery_not_gating(sample_
     sensitive, _ = updater.update(*args, configured)
     assert sensitive.distress > ordinary.distress
     assert sensitive.trust == ordinary.trust
+
+
+def _planner_payload(profile):
+    gateway = RecordingGateway()
+    asyncio.run(ClientAgent(gateway).plan_turn(
+        profile=profile, state=ClientState(), counselor_message="最近怎么样？",
+        recent_messages=[], disclosure=DisclosureDecision(), recent_signals=[],
+        turn_index=1,
+    ))
+    name, payload = gateway.calls[-1]
+    assert name == "ClientTurnSignal"
+    return payload
+
+
+def _conditioned(sample_case, **relational):
+    return sample_case.profile.model_copy(update={
+        "relational": ClientRelationalProfile(**relational)
+    })
+
+
+def test_unsourced_attachment_conditioning_stays_inert(sample_case):
+    profile = _conditioned(sample_case, attachment_pattern="anxious")
+    assert profile.attachment_conditioning() is None
+    payload = _planner_payload(profile)
+    assert payload["attachment_conditioning"] is None
+    rendered = render_prompt(CLIENT_PLANNER_TEMPLATE, **payload)
+    assert "attachment_conditioning 为空" in rendered
+    assert "pattern=anxious" not in rendered
+
+
+def test_attachment_conditioning_requires_evidence_and_confidence(sample_case):
+    evidence_id = sample_case.profile.evidence_nodes[0].evidence_id
+    low = _conditioned(
+        sample_case, attachment_pattern="anxious",
+        source_fact_ids=[evidence_id], confidence=0.2,
+    )
+    assert low.attachment_conditioning() is None
+    unknown = _conditioned(
+        sample_case, attachment_pattern="anxious",
+        source_fact_ids=["not-an-evidence-node"], confidence=0.9,
+    )
+    assert unknown.attachment_conditioning() is None
+    for pattern in ("secure", "unspecified"):
+        assert _conditioned(
+            sample_case, attachment_pattern=pattern,
+            source_fact_ids=[evidence_id], confidence=0.9,
+        ).attachment_conditioning() is None
+    sourced = _conditioned(
+        sample_case, attachment_pattern="avoidant",
+        source_fact_ids=[evidence_id], confidence=0.9,
+    ).attachment_conditioning()
+    assert sourced == {
+        "pattern": "avoidant", "source_ids": [evidence_id], "confidence": 0.9,
+    }
+
+
+def test_sourced_attachment_conditioning_reaches_both_trust_decision_sites(sample_case):
+    evidence_id = sample_case.profile.evidence_nodes[0].evidence_id
+    profile = _conditioned(
+        sample_case, attachment_pattern="anxious",
+        source_fact_ids=[evidence_id], confidence=0.8,
+    )
+    payload = _planner_payload(profile)
+    assert payload["attachment_conditioning"]["pattern"] == "anxious"
+    assert payload["attachment_conditioning"]["source_ids"] == [evidence_id]
+    rendered = render_prompt(CLIENT_PLANNER_TEMPLATE, **payload)
+    assert "依恋条件化（有来源）" in rendered
+    assert "pattern=anxious" in rendered
+    assert "attachment_conditioning 为空" not in rendered
+
+    faithful = FaithfulRecordingGateway()
+    agent = ClientAgent(faithful)
+    asyncio.run(
+        ClientSimulator(agent, policy=FaithfulPatientActPolicy(agent)).respond(
+            turn_input(profile)
+        )
+    )
+    trust_step = next(
+        payload for name, payload in faithful.calls if name == "trust"
+    )
+    assert trust_step["attachment_conditioning"]["pattern"] == "anxious"
+
+
+def test_trust_anchors_and_neutral_attachment_rule_are_in_both_decision_prompts(sample_case):
+    rendered = render_prompt(
+        CLIENT_PLANNER_TEMPLATE,
+        private_client_profile={},
+        simulation_state={},
+        counselor_message="",
+        recent_messages=[],
+        disclosure_decision={"retrieved": [], "blocked": []},
+        recent_signals=[],
+        turn_index=1,
+    )
+    for text in (rendered, FAITHFUL_PROMPT):
+        for anchor in ("0.00-0.20", "0.35-0.50", "0.85-1.00"):
+            assert anchor in text
+        assert "attachment_conditioning 为空" in text
+        assert "披露许可" in text
+    for pattern in ("anxious", "avoidant", "disorganized"):
+        assert f"- {pattern}：" in FAITHFUL_PROMPT
+        assert f"- {pattern}：" not in rendered
+    evidence_id = sample_case.profile.evidence_nodes[0].evidence_id
+    sourced = _planner_payload(_conditioned(
+        sample_case, attachment_pattern="anxious",
+        source_fact_ids=[evidence_id], confidence=0.9,
+    ))
+    sourced_render = render_prompt(CLIENT_PLANNER_TEMPLATE, **sourced)
+    assert "- anxious：" in sourced_render
+    assert "attachment_conditioning 为空" not in sourced_render
+    assert "只调节 trust_change" in sourced_render

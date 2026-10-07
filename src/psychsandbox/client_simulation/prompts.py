@@ -7,7 +7,7 @@ rendered at each call site with the validated, Pydantic-typed payload
 
 from __future__ import annotations
 
-CLIENT_PROMPT_VERSION = "psycheval_patientact_v6"
+CLIENT_PROMPT_VERSION = "psycheval_patientact_v7"
 
 # Jinja2 template paths (rooted at the repo ``prompts/`` directory).
 CLIENT_PLANNER_TEMPLATE = "simclient/planner_system.jinja2"

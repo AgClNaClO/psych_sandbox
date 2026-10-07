@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from ..domain import CounselingCase, SessionEvaluationReport, SessionRecord
 from .psycheval_supervisor import PsychEvalSupervisor
 
@@ -15,9 +17,13 @@ class SessionSupervisorEvaluator(PsychEvalSupervisor):
     """
 
     async def evaluate(
-        self, session: SessionRecord, case: CounselingCase
+        self,
+        session: SessionRecord,
+        case: CounselingCase,
+        *,
+        on_step: Callable[[int, int, str], None] | None = None,
     ) -> SessionEvaluationReport:
-        return await super().evaluate_session(session, case)
+        return await super().evaluate_session(session, case, on_step=on_step)
 
 
 __all__ = ["SessionSupervisorEvaluator"]

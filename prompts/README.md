@@ -14,7 +14,7 @@
 当前咨询师、来访者和会后记忆生成提示词以 **Jinja2 模板（`.jinja2`）** 存放。调用链路为：「Pydantic 领域对象构造输入 dict → Jinja2 渲染 → 调用大模型（结构化 JSON）→ Pydantic 输出验证」。当前 agent 直接调用 `render_prompt` 和 `complete_structured`，没有统一经过独立输入 schema；系统提示词由模板裸渲染生成，业务数据作为 `input_payload` 一并发送给 `complete_structured`。
 
 - 咨询师规划、ReAct 执行和会后自评：`prompts/counselor/{planner,actor,review}_system.jinja2`，消费于 `src/psychsandbox/agents/counselor.py`
-- 来访者规划与语言生成：`prompts/simclient/{planner,utterance}_system.jinja2`，消费于 `src/psychsandbox/agents/client.py`
+- 来访者规划与语言生成：`prompts/simclient/{planner,utterance}_system.jinja2`，消费于 `src/psychsandbox/agents/client.py`；规划器负载含可选的 `attachment_conditioning`（无来源证据或置信度不足时为 `null`，提示词按中性处理），当前来访者提示词版本为 `psycheval_patientact_v7`
 - E.7 信息提取、E.8 档案合并、E.9 临床摘要： `prompts/memory/{extraction,merge,summary}_system.jinja2`，消费于 `src/psychsandbox/runtime/memory_pipeline.py`
 - 通用「Pydantic → 渲染 → 模型 → Pydantic」管线封装： `src/psychsandbox/prompt_pipeline.py::run_pipeline`；当前生产调用点尚未调用此辅助函数。
 

@@ -12,7 +12,9 @@ from psychsandbox.domain import (
     SessionEvaluationReport, SessionRecord, SessionSafetyVerdict,
     CounselorActorOutput, CounselorSessionReview, SandboxConfig,
 )
+from psychsandbox.evaluation.rollout import SessionRolloutEvaluator
 from psychsandbox.runtime import CounselingSandbox, SQLiteStore
+from psychsandbox.runtime.progress import ScoringProgress
 from psychsandbox.runtime.rollout import RolloutSelectionError, SessionRolloutRunner
 from psychsandbox.visualization import generate_run_report
 from tests.deterministic_gateway import (
@@ -84,11 +86,11 @@ def runner_for(setup, judge=None, **settings):
     return SessionRolloutRunner(config, judge or Judge(), store, path)
 
 
-async def run(runner, setup, generate):
+async def run(runner, setup, generate, **kwargs):
     case, memory, plan, state, _, _ = setup
     return await runner.run(
         run_id="run-test", plan=plan, memory=memory, state=state,
-        case=case, previous=None, generate=generate, notify=lambda _: None,
+        case=case, previous=None, generate=generate, notify=lambda _: None, **kwargs,
     )
 
 
@@ -114,7 +116,9 @@ def test_parallel_candidates_are_isolated_and_only_winner_memory_returns(setup):
         return session_for(index, plan, branch_state)
 
     session, winner_memory = asyncio.run(run(runner_for(setup), setup, generate))
-    assert peak == 2
+    # The default concurrency follows the candidate count, so all three branches
+    # run at once instead of a 2 + 1 wave.
+    assert peak == 3
     assert memory.model_dump() == original
     assert winner_memory.unresolved_topics[-1] == "private-branch-3"
     assert not any("private-branch-1" in s for s in winner_memory.unresolved_topics)
@@ -380,6 +384,43 @@ def sandbox_for(root, tmp_path, gateway, repository):
 
 
 @pytest.mark.parametrize("therapy", ["bt", "cbt", "het", "pdt", "pmt"])
+def test_real_session_pipeline_reports_scoring_progress_ticks(
+    root, tmp_path, therapy, repository
+):
+    gateway = RolloutGateway()
+    sandbox = sandbox_for(root, tmp_path, gateway, repository)
+    ticks = []
+    try:
+        result = asyncio.run(sandbox.run_case(
+            f"psycheval-{therapy}-001", session_count=1, turn_progress=ticks.append,
+        ))
+    finally:
+        sandbox.store.close()
+    session = result.sessions[0]
+    per_candidate = SessionRolloutEvaluator(
+        gateway, root / "prompts" / "eval", temperature=0.0,
+    ).instrument_count(session)
+    assert per_candidate > 0
+    scoring = [tick for tick in ticks if isinstance(tick, ScoringProgress)]
+    assert scoring
+    final = scoring[-1]
+    expected = sandbox.config.rft.candidates * per_candidate
+    assert final.session_index == session.session_index
+    assert (final.instruments_done, final.instruments_total) == (expected, expected)
+    assert (final.candidates_scored, final.candidates_total) == (
+        sandbox.config.rft.candidates, sandbox.config.rft.candidates,
+    )
+    assert "100%" in final.render()
+    # Generation ticks keep their own per-candidate identity; the trailing None
+    # is the session-end clear signal for the live bars.
+    generation = [
+        tick for tick in ticks
+        if tick is not None and not isinstance(tick, ScoringProgress)
+    ]
+    assert generation and all(tick.label for tick in generation)
+
+
+@pytest.mark.parametrize("therapy", ["bt", "cbt", "het", "pdt", "pmt"])
 def test_real_session_pipeline_selects_and_persists_one_winner_per_therapy(
     root, tmp_path, therapy, repository
 ):
@@ -501,9 +542,81 @@ def test_judging_has_its_own_concurrency_limit_and_deadline(setup):
     async def generate(index, memory, state, checkpoint):
         return session_for(index, plan, state)
 
-    session, _ = asyncio.run(run(runner_for(setup, judge, judge_timeout_sec=0.06), setup, generate))
+    session, _ = asyncio.run(run(
+        runner_for(setup, judge, judge_timeout_sec=0.06, judge_concurrency=2),
+        setup, generate,
+    ))
     assert peak == 2 and active == 0
     assert session.rollout_selection.candidates[-1].status == "scoring_failed"
+
+
+def test_scoring_progress_reports_every_instrument_and_candidate(setup):
+    _, _, plan, _, _, _ = setup
+    judge = Judge()
+
+    async def evaluate(session, case, memory, *, on_step=None):
+        report = report_for(session, 6)
+        if on_step:
+            on_step(1, 2, "wai")
+            on_step(2, 2, "srs")
+        session.safety_verdict = SessionSafetyVerdict(
+            session_index=session.session_index, passed=True,
+        )
+        return report
+    judge.evaluate = evaluate
+    judge.instrument_count = lambda session: 2
+
+    async def generate(index, memory, state, checkpoint):
+        return session_for(index, plan, state)
+
+    ticks = []
+    session, _ = asyncio.run(run(
+        runner_for(setup, judge), setup, generate, judge_progress=ticks.append,
+    ))
+    assert session.rollout_selection.winner_index >= 1
+    assert ticks and all(isinstance(tick, ScoringProgress) for tick in ticks)
+    final = ticks[-1]
+    assert final.label == "评分"
+    assert final.session_index == plan.session_index
+    assert (final.instruments_done, final.instruments_total) == (6, 6)
+    assert (final.candidates_scored, final.candidates_total) == (3, 3)
+    assert "量表 6/6" in final.render()
+    assert "候选 3/3" in final.render()
+    assert final.render().startswith(f"Session {plan.session_index} 评分 [")
+    assert "100%" in final.render()
+
+
+def test_scoring_progress_does_not_inflate_on_judge_retries(setup):
+    _, _, plan, _, _, _ = setup
+    judge = Judge()
+    attempts = {}
+
+    async def evaluate(session, case, memory, *, on_step=None):
+        attempts[session.session_id] = attempts.get(session.session_id, 0) + 1
+        if on_step:
+            on_step(1, 1, "wai")
+            on_step(1, 1, "wai")  # the same step replaying a failed judge call
+        if session.session_id.endswith("-1") and attempts[session.session_id] == 1:
+            raise ValueError("invalid scale json")
+        report = report_for(session, 6)
+        session.safety_verdict = SessionSafetyVerdict(
+            session_index=session.session_index, passed=True,
+        )
+        return report
+    judge.evaluate = evaluate
+    judge.instrument_count = lambda session: 1
+
+    async def generate(index, memory, state, checkpoint):
+        return session_for(index, plan, state)
+
+    ticks = []
+    session, _ = asyncio.run(run(
+        runner_for(setup, judge), setup, generate, judge_progress=ticks.append,
+    ))
+    assert session.rollout_selection.candidates[0].status in {"eligible", "selected"}
+    assert attempts["session-1-1"] == 2  # one failed attempt, one retry
+    assert ticks[-1].instruments_done == 3
+    assert ticks[-1].instruments_total == 3
 
 
 def test_failed_generation_cannot_hide_risk_already_in_saved_prefix(setup):

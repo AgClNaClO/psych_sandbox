@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from ..domain import (
+    ClientTurnSignal,
     CounselorAction,
     CounselorActorOutput,
     CounselorDecision,
@@ -113,11 +114,13 @@ class CounselorAgent:
         risk: RiskAssessment,
         counselor_turn_count: int,
         session_checklist: SessionChecklist | None = None,
+        recent_signals: list[ClientTurnSignal] | None = None,
     ) -> CounselorTurn:
         guarded = self._guarded_turn(
             client_message=client_message,
             recent_messages=recent_messages,
             risk=risk,
+            recent_signals=recent_signals or [],
         )
         if guarded is not None:
             return guarded
@@ -499,6 +502,7 @@ class CounselorAgent:
         client_message: str,
         recent_messages: list[dict],
         risk: RiskAssessment,
+        recent_signals: list[ClientTurnSignal] | None = None,
     ) -> CounselorTurn | None:
         if risk.level is RiskLevel.MEDIUM:
             return self._fixed_turn(
@@ -532,6 +536,29 @@ class CounselorAgent:
                 ),
                 strategy="确认边界、不追问原因、提供低压力选择并让来访者决定方向。",
                 response=self.dialogue_guard.counselor_response(boundary),
+            )
+        idle = self.dialogue_guard.inspect_client_idling(
+            client_message,
+            recent_messages,
+            recent_signals or [],
+        )
+        if idle.detected:
+            repeated = self.dialogue_guard.has_idle_repair(recent_messages)
+            return self._fixed_turn(
+                risk=risk,
+                assessment="来访者连续给出简短、重复或最小化的回应，对话内容出现空转。",
+                state_observation=(
+                    f"空转线索：{'、'.join(idle.reasons)}；"
+                    f"已观察 {idle.observed_client_turns} 轮来访者发言。"
+                    + ("上一轮已做过同类修复。" if repeated else "")
+                ),
+                strategy=(
+                    "承认停滞、降低压力、停止重复追问并把方向决定权交回来访者；"
+                    "空转线索仅作为工程假设记录，不据此推断临床结论。"
+                ),
+                response=self.dialogue_guard.counselor_idle_response(
+                    repeated=repeated
+                ),
             )
         return None
 

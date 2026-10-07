@@ -7,7 +7,6 @@ import uuid
 import traceback
 from contextlib import ExitStack
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 
 from ..agents.client import ClientAgent
@@ -43,7 +42,8 @@ from ..domain import (
 from ..model_client import ModelGateway, create_gateway
 from ..skills import SkillCatalog, SkillRegistry
 from ..therapies import normalize_therapy_id
-from .disclosure import DisclosureGate
+from .disclosure import DisclosureGate, create_activation_matcher
+from .progress import ScoringProgress, TurnProgress, format_duration as _format_duration
 from .run_management import available_run_dir
 from .memory import MemoryConsolidator, merge_session_checklist
 from .memory_pipeline import (
@@ -68,47 +68,6 @@ def _therapy_codes(therapy: str) -> list[str]:
         "psychodynamic": "pdt",
         "postmodern": "pmt",
     }[normalize_therapy_id(therapy)]]
-
-
-def _format_duration(seconds: float) -> str:
-    """Format an elapsed duration as a short, human-readable Chinese label."""
-    seconds = max(0.0, seconds)
-    if seconds < 60:
-        return f"{seconds:.1f}秒"
-    minutes, sec = divmod(int(round(seconds)), 60)
-    if minutes < 60:
-        return f"{minutes}分{sec:02d}秒"
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours}时{minutes:02d}分"
-
-
-@dataclass(frozen=True)
-class TurnProgress:
-    """One in-session progress tick for a live progress bar."""
-
-    session_index: int
-    turn_index: int
-    total_turns: int
-    elapsed: float
-    eta: float
-    label: str = ""
-
-    def render(self) -> str:
-        total = max(1, self.total_turns)
-        ratio = min(1.0, max(0.0, self.turn_index / total))
-        filled = int(round(ratio * 20))
-        bar = "█" * filled + "░" * (20 - filled)
-        percent = int(round(ratio * 100))
-        eta = "—" if self.turn_index <= 0 else _format_duration(self.eta)
-        if self.turn_index >= self.total_turns:
-            eta = "无"
-        prefix = f"Session {self.session_index}"
-        if self.label:
-            prefix += f" 候选 {self.label}"
-        return (
-            f"{prefix} [{bar}] {percent:3d}%  "
-            f"已用 {_format_duration(self.elapsed)}  预计剩余 {eta}"
-        )
 
 
 class CounselingSandbox:
@@ -150,7 +109,9 @@ class CounselingSandbox:
             logprob_scoring=config.logprob_scoring,
         )
         self.safety = SafetyStateMachine()
-        self.disclosure = DisclosureGate()
+        self.disclosure = DisclosureGate(
+            create_activation_matcher(config.client_topic_matcher)
+        )
         self.state_updater = StateUpdater()
         self.client_simulator = ClientSimulator(
             self.client,
@@ -177,7 +138,7 @@ class CounselingSandbox:
         seed: int | None = None,
         resume_run_id: str | None = None,
         progress_callback: Callable[[str], None] | None = None,
-        turn_progress: Callable[[TurnProgress | None], None] | None = None,
+        turn_progress: Callable[[TurnProgress | ScoringProgress | None], None] | None = None,
     ) -> RunResult:
         with single_simulation(), ExitStack() as resources:
             if resume_run_id:
@@ -397,6 +358,7 @@ class CounselingSandbox:
                                 "use_memory": self.config.client_use_memory,
                                 "use_pipeline": self.config.client_use_pipeline,
                                 "use_trust_gating": self.config.client_use_trust_gating,
+                                "topic_matcher": self.config.client_topic_matcher,
                             },
                             "temperature_counselor": self.config.temperature_counselor,
                             "counselor_pipeline": "evidence_vector_retry_v2",
@@ -535,6 +497,7 @@ class CounselingSandbox:
                 risk=risk,
                 counselor_turn_count=turn_index - 1,
                 session_checklist=session_checklist,
+                recent_signals=recent_signals,
             )
             session_checklist = merge_session_checklist(
                 session_checklist,
@@ -684,7 +647,7 @@ class CounselingSandbox:
             )
             simulator = ClientSimulator(
                 client,
-                DisclosureGate(),
+                DisclosureGate(create_activation_matcher(self.config.client_topic_matcher)),
                 StateUpdater(),
                 policy=create_client_policy(self.config.client_policy, client),
             )
@@ -711,6 +674,7 @@ class CounselingSandbox:
         return await runner.run(
             run_id=run_id, plan=plan, memory=memory, state=initial_state,
             case=case, previous=previous, generate=generate, notify=notify,
+            judge_progress=turn_progress,
         )
 
     @staticmethod

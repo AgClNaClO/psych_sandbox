@@ -13,6 +13,7 @@
 | `skills/` | 技能注册、硬过滤、按 ID 展开和超量候选的向量筛选 | 最终适用判断或自动晋升 |
 | `runtime/` | 会谈编排、候选隔离与选优、披露、安全、状态、记忆、计划和 SQLite | 训练基础模型 |
 | `runtime/run_management.py` | 只读预览、按编号同步删除、失败日志与重试 | 自动监视目录或删除共享案例/技能 |
+| `runtime/progress.py` | CLI 候选与评分进度条的标签、百分比图形和耗时文案 | 采集模型调用、评判分数或写入运行状态 |
 | `evaluation/` | 每 session 量表评分、可选概率加权（logprob）评分与端点探测、规则安全门控、纵向、候选 RFT 评分和整体 PsychEval 评测 | 临床诊断或疗效判断 |
 | `visualization/` | 从已保存结果渲染离线 HTML/SVG | 修改运行状态 |
 
@@ -20,7 +21,7 @@
 
 ```text
 允许记忆 + 当前计划 + 来访者话语
-  → 输入风险和话题边界检查
+  → 输入风险、话题边界与来访者空转检查（命中时直接走固定回复，跳过技能查询）
   → 咨询师 API：Reasoning 摘要 + 分步 Planning + Action
   → 按有公开依据的元技能 ID 精确展开原子技能；超阈值才按向量筛选
   → 咨询师 API：核对适用依据、选择策略和技能、生成结构化回复
@@ -33,6 +34,8 @@
 ```
 
 这里只保存可审计的推理摘要、计划、行动和观察，不要求或展示模型私密的逐 token 思维链。
+
+风险分流、话题边界和空转修复都由 `runtime/dialogue_guard.py` 从咨询师可见的对话与上一轮 `ClientTurnSignal` 判定，命中后直接给出固定回复，不再查询技能。空转需要在最近四轮来访者发言中至少观察到三轮，且“重复内容 / 连续 `simple_response` / 最小化回答密度”三条线索里至少有两条成立；阈值是工程假设，线索写入该轮 `decision`，首次命中用承认停滞的修复回复，重复命中改为把方向交还来访者。
 
 ## Session 边界流程
 
@@ -50,7 +53,7 @@
 
 每个 session 结束时只运行规则安全/披露门控（`SessionSafetyGate`），用于 RFT 候选准入与轨迹安全标记，不参与评分。逐 session 的 PsychEval 量表评分仅在开启 RFT 时用于候选排名（`SessionRolloutEvaluator`），产出 `SessionEvaluationReport` 并存入候选审计记录，不写入已提交的 `SessionRecord`。一个 case 的全部 session 完成后， `PsychEvalSupervisor` 才对整条轨迹统一做一次整体 Counselor-Level/Client-Level 评分（`HolisticEvaluationReport`）；该评分同样不回写计划。
 
-RFT 默认关闭，启用后默认 3 条候选；候选以整场会谈为单位，不是单轮回复候选。候选失败、重复或落选时只留在独立审计存储；少于两个不同且合格候选则失败，任何候选出现即时风险则整批暂停。选优后仍须完成会后处理与正式提交，才能成为下一场基线。评分公式、并发和恢复见 [会谈 RFT](SESSION_RFT.md)。
+RFT 默认关闭，启用后默认 3 条候选，生成/评分并发默认跟随候选数（`rft.concurrency` / `rft.judge_concurrency` 为 `null` 时等于 `candidates`，显式传 `--rollout-concurrency` / `--judge-concurrency` 才限流）；候选以整场会谈为单位，不是单轮回复候选。候选失败、重复或落选时只留在独立审计存储；少于两个不同且合格候选则失败，任何候选出现即时风险则整批暂停。选优后仍须完成会后处理与正式提交，才能成为下一场基线。评分公式、并发和恢复见 [会谈 RFT](SESSION_RFT.md)。
 
 ## 资源边界
 

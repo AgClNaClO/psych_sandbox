@@ -6,14 +6,16 @@
 
 ```powershell
 Set-Location -LiteralPath 'C:\Users\Rain\Desktop\psych_sandbox'
-.\.venv\Scripts\python.exe -B -m psychsandbox simulate --case psycheval-cbt-001 --sessions 3 --rollouts 3 --rollout-concurrency 2 --judge-concurrency 2
+.\.venv\Scripts\python.exe -B -m psychsandbox simulate --case psycheval-cbt-001 --sessions 3 --rollouts 3
 ```
+
+需要限流时再加 `--rollout-concurrency 2 --judge-concurrency 2`；默认值与候选数相同，见下节。
 
 迁移后先完成 [可编辑安装检查](../README.md#53-迁移后的安装检查powershell)，并配置聊天 API 和 [条件 embedding 服务](SKILL_SELECTION.md)。这里的命令会消耗真实 API 额度，不是离线测试。
 
 `configs/runtime.yaml` 的 `rft` 段是完整默认配置。CLI 读取 YAML，再应用显式参数；未显式传入的 seed、session_count、温度、技能筛选等参数也会使用 YAML。Python 直接构造 `SandboxConfig` 不读文件，需要时使用 `default_config(root)`。默认 `rft.enabled=false`，`--rollouts N`（N≥2）启用， `--rollouts 1` / `--no-rft` 关闭。没有批量病例并发命令。
 
-默认采样 3 个候选、生成并发 2、评分并发 2，至少 2 个不同且合格候选才能选优。每个生成候选在取得并发许可后有 1800 秒总时限，每次评分 240 秒（`rft.judge_timeout_sec`，代码与 `configs/runtime.yaml` 默认值均为 240）；排队时间不计入这两个时限。生成失败（例如瞬时网络错误）默认最多补采 `resample_limit=2` 个新候选；评分失败（如瞬时评分 API 500）在合格候选不足 `min_eligible` 时也会补采。补采的新候选使用递增编号且不覆盖失败留档，与生成失败共用同一个 `resample_limit` 预算。评分器对校验失败（如非法 JSON 或量表 schema 不符）先按 `judge_retries` 重试（模型默认 1 次，`configs/runtime.yaml` 当前为 3），每次重试独立计时。网关的瞬时重试预算由 `MODEL_MAX_ATTEMPTS` 控制（默认 3 次，等于此前的 tenacity 预算；OpenAI SDK 自身另有 2 次内置重试），聊天生成、logprob 评判与技能向量 embedding 批次调用共用该预算，重试包含在上述总时限中，预算耗尽时请求元数据写入该候选的 `dNNN/api_error` 诊断记录。RFT 仅提高咨询师生成温度至 0.9，来访者使用原配置；评分默认温度为 0。会后自评仍使用正常咨询师温度。
+默认采样 3 个候选；生成并发与评分并发默认都等于候选数（`rft.concurrency` / `rft.judge_concurrency` 为 `null` 时跟随 `candidates`），所以 3 个候选会同时生成、同时评分，不会剩下只跑 1 个候选的尾轮。只有显式传入 `--rollout-concurrency` / `--judge-concurrency`（或 YAML 中的同名项）才会限制并发上限，用于主动降低并发请求量；上限高于候选数没有额外作用。至少 2 个不同且合格候选才能选优。每个生成候选在取得并发许可后有 1800 秒总时限，每次评分 240 秒（`rft.judge_timeout_sec`，代码与 `configs/runtime.yaml` 默认值均为 240）；排队时间不计入这两个时限。生成失败（例如瞬时网络错误）默认最多补采 `resample_limit=2` 个新候选；评分失败（如瞬时评分 API 500）在合格候选不足 `min_eligible` 时也会补采。补采的新候选使用递增编号且不覆盖失败留档，与生成失败共用同一个 `resample_limit` 预算。评分器对校验失败（如非法 JSON 或量表 schema 不符）先按 `judge_retries` 重试（模型默认 1 次，`configs/runtime.yaml` 当前为 3），每次重试独立计时。网关的瞬时重试预算由 `MODEL_MAX_ATTEMPTS` 控制（默认 3 次，等于此前的 tenacity 预算；OpenAI SDK 自身另有 2 次内置重试），聊天生成、logprob 评判与技能向量 embedding 批次调用共用该预算，重试包含在上述总时限中，预算耗尽时请求元数据写入该候选的 `dNNN/api_error` 诊断记录。RFT 仅提高咨询师生成温度至 0.9，来访者使用原配置；评分模型默认温度为 0，`configs/runtime.yaml` 当前设为 0.2（非零让评分校验重试有机会得到不同输出）。会后自评仍使用正常咨询师温度。
 
 同会谈的候选从相同案例、计划、记忆和初始状态开始，不分配不同人格或强制不同策略。独立 API 采样及后续不同的对话/技能选择产生分歧。API 请求没有远端 seed 参数；运行 seed 不保证远端可复现，温度也不保证候选一定不同。完全相同的双方对话只评分一次，暂不做语义去重。
 
@@ -28,6 +30,8 @@ Set-Location -LiteralPath 'C:\Users\Rain\Desktop\psych_sandbox'
 5. 对其余候选逐量表评分（PsychEval 量表）；校验失败按 `judge_retries` 自动重试，再应用规则安全门控和咨询师总分门槛。
 6. 从合格候选中选总分最高者；同分选编号最小者，结果不依赖完成顺序。
 7. 仅胜出者进行纵向评估、咨询师会后自评、下一计划、E.7/E.8/E.9 记忆整理和正式会谈提交。
+
+CLI 在候选生成阶段为每个候选绘制一条实时进度条（`Session N 候选 K [图形] 百分比 已用 预计剩余`），在评分阶段绘制一条汇总进度条（`Session N 评分 [图形] 百分比 量表 x/y 候选 x/y 最近 <量表> 已用 预计剩余`）。评分条按已进入评分的候选累计量表步数，补采的新候选会加进同一批次的总量，评分校验重试不会重复计数；判分器若不报告逐量表步数（自定义实现），则回退为候选级进度。`--json` 不绘制进度条，`logs/progress.log` 仍逐行记录每个候选的状态，并记录每批实际生效的候选数、生成并发与评分并发（用于事后核对 `null` 解析结果）。
 
 评分不进入咨询师提示词或记忆；下一计划仍由胜出会谈的自评与纵向信号决定。RFT 选优分数与整段疗程结束后 `PsychEvalSupervisor` 的整体督导同用一套 PsychEval 量表，但前者是单 session 的排名信号，后者是整条轨迹的汇总，不能直接比较。技能查询的一次纠错预算仍是每轮、每个分支各自的预算，不是 RFT 的补采许可。
 
@@ -101,7 +105,7 @@ runs/runtime/<本次运行>/
 .\.venv\Scripts\python.exe -B -m psychsandbox simulate --case psycheval-cbt-001 --sessions 6 --rollouts 3 --resume-run run-xxxxxxxxxxxx
 ```
 
-此接口不提供中途某个 token/turn 的恢复，不自动删除失败候选，不把选优数据直接交给训练导出。命令中的运行编号须替换为实际保留的记录；清理过的历史编号不能恢复。示例沿用默认 RFT 配置，若原运行改过候选数、并发、温度或门槛，应保持原值，不能借续跑做不同配置的对比实验。例如旧运行实际使用 8 候选，续跑仍须显式传 `--rollouts 8`，不能因新默认值为 3 而更换设置。完整删除使用 `runs delete --run <编号>` 预览，再加 `--yes`；会同时清除该运行全部 RFT 批次及候选，不把落选分支留下作为悬空数据库记录。删除开始后拒绝续跑，详见 [运行文件约定](RUN_ARTIFACTS.md)。测试产物采用同样结构，位于对应 `runs/tests/<批次>` 内；没有调用真实服务的测试只能验证流程约束。
+此接口不提供中途某个 token/turn 的恢复，不自动删除失败候选，不把选优数据直接交给训练导出。命令中的运行编号须替换为实际保留的记录；清理过的历史编号不能恢复。示例沿用默认 RFT 配置，若原运行改过候选数、并发、温度或门槛，应保持原值，不能借续跑做不同配置的对比实验。例如旧运行实际使用 8 候选，续跑仍须显式传 `--rollouts 8`，不能因新默认值为 3 而更换设置。并发默认跟随候选数，因此恢复在旧默认（生成/评分并发固定为 2）下启动的运行，需显式传 `--rollout-concurrency 2 --judge-concurrency 2` 才能通过配置一致性检查。完整删除使用 `runs delete --run <编号>` 预览，再加 `--yes`；会同时清除该运行全部 RFT 批次及候选，不把落选分支留下作为悬空数据库记录。删除开始后拒绝续跑，详见 [运行文件约定](RUN_ARTIFACTS.md)。测试产物采用同样结构，位于对应 `runs/tests/<批次>` 内；没有调用真实服务的测试只能验证流程约束。
 
 ## 参考范围
 

@@ -6,7 +6,7 @@
 
 ## 快速开始
 
-本机检出目录为 `C:\Users\Rain\Desktop\psych_sandbox`（2026-09 由 `D:\study\大创\project\psych_sandbox` 移入，该路径之前为 `D:\0test\psych_sandbox`；移动检出目录后须重做可编辑安装检查）。已有项目无需重新 clone；先阅读 [迁移后的安装检查](#53-迁移后的安装检查powershell)。后文安装与运行示例除另有标注外使用 CMD。
+已有项目无需重新 clone；先阅读 [迁移后的安装检查](#53-迁移后的安装检查powershell)。后文安装与运行示例除另有标注外使用 CMD。
 
 以下命令适用于 Windows CMD。运行前请先根据 `.env.example` 配置 API 密钥、接口地址和各角色模型：
 
@@ -34,7 +34,7 @@ psych-sandbox visualize --run run-xxxxxxxxxxxx
 
 - 将运行时扩充为行为（BT）、认知行为（CBT）、人本—存在（HET）、心理动力（PDT）和后现代（PMT）五流派；每个流派使用独立病例字段、技能树、概念化重点和专属评估指标。
 - 新增 CBT 与人本—存在取向的独立 `TherapyProfile`，避免混用不同流派的数据与评估标准。
-- 将模拟来访者拆分为内部策略规划和自然语言表达两个阶段，增加语义原子门控、阻抗、提前披露防护及对话循环修复。当前来访者提示词版本为 `psycheval_patientact_v5`。
+- 将模拟来访者拆分为内部策略规划和自然语言表达两个阶段，增加语义原子门控、阻抗、提前披露防护及对话循环修复。（该小节的版本号是 v0.3.0 发布时的历史快照 `psycheval_patientact_v5`；当前版本见 [来访者模拟核对](docs/CLIENT_SIMULATION.md)。）
 - 修复来访者披露链路：规划器选择的事实才会进入语言模型；本轮声称披露的事实必须能从实际台词核验；跨会谈只复用已经说过的证据片段，不把完整隐藏层写入记忆。
 - 将同类/跨类别候选统一进行歧义消解，并将公开主诉从私密泄漏匹配中排除；保留确定性近似匹配、重试和安全替代回答作为纵深防护。
 - PatientAct 互动先验只从 PsychEval 有明确来源的流派字段派生；新画像不再生成无来源的 Big Five 或依恋维度，PDT 之外也不会为凑齐结构而强制生成完整 CCRT。
@@ -51,7 +51,10 @@ psych-sandbox visualize --run run-xxxxxxxxxxxx
 - HTML 报告改为“概览页 + 每场会谈独立页”：逐轮规划/决策、技能查询记录、来访者模拟决策摘要和会后自评改为对话上方可折叠的内联卡片；原先独立的“运行过程 / 来访者状态趋势 / 纵向判断”板块不再渲染，这些数据仍保存在 `result.json`、SQLite 和 `trajectory.jsonl` 中。
 - 新增 [记忆结构说明](docs/MEMORY.md)，记录当前咨询师记忆的四字段结构、写入者、分层的读取视图与输入预算、退休语义与已知限制。
 - 新增可选的概率加权（logprob）量表评分，借鉴 Zhang et al.（npj Artificial Intelligence, DOI 10.1038/s44387-026-00160-9）式 8 的连续评分与拒答质量门：默认开启，端点不返回 logprobs 或质量不足时明确失败，不静默回退；配套 `psych-sandbox probe logprob-scoring` 端点实测入口，详见 [借鉴说明](notes/logprob_scoring_borrowing.md)。
-- 本机检出目录由 `D:\0test\psych_sandbox` 经 `D:\study\大创\project\psych_sandbox` 移至 `C:\Users\Rain\Desktop\psych_sandbox`，本文档与 `docs/` 下的路径、安装检查和提示词/测试计数同步更新。
+- 会谈 RFT 的生成/评分并发默认跟随候选数（`rft.concurrency` / `rft.judge_concurrency` 为 `null` 时等于 `candidates`），3 个候选同时生成、同时评分，不再出现「2 + 1」的尾轮；`--rollout-concurrency` / `--judge-concurrency` 仍可显式限流。终端新增候选评分进度条（量表 x/y、候选 x/y、最近量表、已用与预计剩余），详见 [会谈 RFT](docs/SESSION_RFT.md)。
+- 新增来访者侧「内容耗尽/空转」检测：连续简短回应、重复台词与最小化回答密度达到阈值时，咨询师改为承认停滞并把方向交回来访者，不再重复同一追问；阈值是工程假设，可核验线索写入 decision，详见 [来访者模拟核对](docs/CLIENT_SIMULATION.md)。
+- 来访者规划提示词新增信任行为锚点（论文附录 C.4 的 7 级描述）与有来源的依恋条件化：无 `source_fact_ids`/置信度的依恋标签保持惰性，不进入规划、不改变披露许可、不进入咨询师记忆；当前来访者提示词版本为 `psycheval_patientact_v7`。
+- 新增可选的本地语义化主题匹配（`client.topic_matcher: semantic`，默认 `tags`）：保持 `ActivationMatcher` 接口，用字符 n-gram 覆盖度近似论文的 LLM 主题抽取，不额外调用模型 API；默认路径不变，配置项写入轨迹快照。
 
 ## 1. 项目要解决什么问题
 
@@ -94,13 +97,13 @@ SQLite、JSONL 轨迹和后续经验池
 - 咨询师只能读取已解锁信息，不能读取完整来访者档案。
 - 来访者语言生成器只能读取静态画像、本轮经规划器选中的允许记忆，以及过去已经实际说出的证据片段；完整私有画像仅进入内部状态规划器。
 - 支持“反应—行为—阻抗—回答”的两阶段来访者生成、blocked 敏感话题信号和提前披露防护。
-- 支持来访者话题边界识别、咨询师重复回复检测和互动修复，避免固定追问形成对话循环。
+- 支持来访者话题边界识别、空转/停滞检测、咨询师重复回复检测和互动修复，避免固定追问形成对话循环。
 - 每轮记录 Reasoning 摘要、Planning 步骤、Action、Observation、实际技能、结构化决策、状态变化和安全结果。
 - 每个 session 生成咨询师目标自评、必要的策略再规划、摘要、纵向趋势和下一次计划；开启 RFT 时另做候选评分与选优。
 - 每次 CLI 仿真自动生成单文件 HTML 报告：一个概览页加每场会谈的独立页面，页内对话上方可折叠查看该轮的规划与决策、技能查询记录、会后自评和 E.9 临床摘要，并汇总整体督导评估、披露/安全记录和完整对话。
 - 生产运行统一使用 OpenAI-compatible API，不提供离线或本地模型后端。
 - 自动化测试覆盖 API 契约和主要控制流程。
-- 测试套件当前为 452 项（2026-09-28 用 `.venv\Scripts\python.exe -B -m pytest --collect-only -q` 统计）。同日在当前检出目录全量运行 `pytest -q` 为 452 passed（38.15 秒），覆盖概率加权评分与启动脚本、统一删除和 ChatECNU 配置等；全量测试不调用真实模型 API，因此不据此声称模型质量或真实接口联调通过。
+- 测试套件当前为 500 项（2026-10-07 用 `.venv\Scripts\python.exe -B -m pytest --collect-only -q` 统计）。同日全量运行 `pytest -q` 为 500 passed（42.55 秒），覆盖概率加权评分与启动脚本、统一删除、ChatECNU 配置、空转检测、信任锚点/依恋门槛与主题匹配消融等；全量测试不调用真实模型 API，因此不据此声称模型质量或真实接口联调通过。
 - 三随机种子、30 案例正式实验和人工评审仍需要在后续实验阶段完成。
 
 ## 3. 项目中的三个智能体
@@ -123,7 +126,7 @@ SQLite、JSONL 轨迹和后续经验池
 
 回答经过确定性提前披露检查；检查会排除公开主诉和已说过的旧记忆，并对相近改写做近似匹配。首次失败会重试，仍失败则使用符合当前行为信号的安全替代回答。该检查是纵深防护，不等同于完整语义理解；最终的多会话语义一致性仍由 PsychEval 整体督导和人工评审承担。
 
-PatientAct 参数采用“有证据才派生”的原则：PsychEval 原始字段先编译为可追溯的 `EvidenceNode`，再投影为原子 `DisclosureItem`、带来源的 5Ps 和按流派构建的 `InteractionPrior`。新画像不生成 Big Five 或依恋类型；PDT 可从核心冲突、客体关系和反应模式形成 CCRT-like 结构，其他流派只保留其证据足以支持的互动倾向。状态在会谈内允许非线性波动，信任变化下一轮生效；跨会谈按配置系数保留信任并恢复短期状态，避免 6–10 次会谈中疲劳只能单向累积。
+PatientAct 参数采用“有证据才派生”的原则：PsychEval 原始字段先编译为可追溯的 `EvidenceNode`，再投影为原子 `DisclosureItem`、带来源的 5Ps 和按流派构建的 `InteractionPrior`。新画像不生成 Big Five 或依恋类型；PDT 可从核心冲突、客体关系和反应模式形成 CCRT-like 结构，其他流派只保留其证据足以支持的互动倾向。状态在会谈内允许非线性波动，信任变化下一轮生效；跨会谈按配置系数保留信任并恢复短期状态，避免 6–10 次会谈中疲劳只能单向累积。依恋条件化只在画像带来源证据（`source_fact_ids` 可解析到证据节点）且置信度达标时进入规划，并且只调节 `trust_change`：它不进入案例证据、不改变披露许可、不写入咨询师记忆。
 
 ### 3.2 多流派咨询师
 
@@ -267,9 +270,9 @@ Set-Location -LiteralPath 'C:\Users\Rain\Desktop\psych_sandbox'
 .\.venv\Scripts\python.exe -B -m psychsandbox --help
 ```
 
-导入位置应在 `C:\Users\Rain\Desktop\psych_sandbox\src` 下。安装需要可用的依赖源；若缺少构建依赖，不要用 `--no-build-isolation` 跳过准备。若解释器本身不能启动，应使用本机 Python 3.11+ 重建环境并重新安装依赖。旧 `pip.exe`、`pytest.exe`、激活脚本可能保留原路径，移动目录后优先直接使用 `.venv\Scripts\python.exe -m pip/pytest/psychsandbox`，不依赖这些旧入口。
+导入位置应在 `.\psych_sandbox\src` 下。安装需要可用的依赖源；若缺少构建依赖，不要用 `--no-build-isolation` 跳过准备。若解释器本身不能启动，应使用本机 Python 3.11+ 重建环境并重新安装依赖。旧 `pip.exe`、`pytest.exe`、激活脚本可能保留原路径，移动目录后优先直接使用 `.venv\Scripts\python.exe -m pip/pytest/psychsandbox`，不依赖这些旧入口。
 
-CLI 默认以当前目录作为项目根目录；在其他目录调用时，将 `--root C:\Users\Rain\Desktop\psych_sandbox` 放在 `simulate`、`cases` 等子命令之前。清理过的运行编号不再可查，后续运行会在当前项目的 `runs/runtime/` 下建立新目录。仅手动删除文件夹不会清除数据库，需用统一删除入口同步清理。
+CLI 默认以当前目录作为项目根目录；在其他目录调用时，将 `--root .\psych_sandbox` 放在 `simulate`、`cases` 等子命令之前。清理过的运行编号不再可查，后续运行会在当前项目的 `runs/runtime/` 下建立新目录。仅手动删除文件夹不会清除数据库，需用统一删除入口同步清理。
 
 ## 6. 数据资源与可选刷新
 
@@ -380,10 +383,10 @@ psych-sandbox simulate ^
 ### 可选：整场会谈多候选与 RFT 选优
 
 ```bat
-psych-sandbox simulate --case psycheval-cbt-001 --sessions 3 --rollouts 3 --rollout-concurrency 2 --judge-concurrency 2
+psych-sandbox simulate --case psycheval-cbt-001 --sessions 3 --rollouts 3
 ```
 
-每个 session 从相同会前状态生成完整候选会谈，经安全检查、去重和 PsychEval 量表评分后，只将胜出会谈推进记忆与下一会谈。默认关闭，避免普通仿真自动增加调用成本；`--no-rft` 或 `--rollouts 1` 可关闭。启用后的默认候选数为 3，生成/评分并发仍为 2，至少 2 个不同合格候选才能选优。 CLI 现在会读取 `configs/runtime.yaml`，显式命令行参数再覆盖 YAML。评分规则、失败处理和目录结构见 [会谈 RFT](docs/SESSION_RFT.md)。这里只实现采样、评分与选优，没有权重训练。
+每个 session 从相同会前状态生成完整候选会谈，经安全检查、去重和 PsychEval 量表评分后，只将胜出会谈推进记忆与下一会谈。默认关闭，避免普通仿真自动增加调用成本；`--no-rft` 或 `--rollouts 1` 可关闭。启用后的默认候选数为 3，生成/评分并发默认与候选数相同（3 个候选同时生成、同时评分，不留「2 + 1」的尾轮；`--rollout-concurrency` / `--judge-concurrency` 可显式限流），至少 2 个不同合格候选才能选优；终端在生成阶段为每个候选、评分阶段为整批候选各绘制实时进度条。 CLI 现在会读取 `configs/runtime.yaml`，显式命令行参数再覆盖 YAML。评分规则、失败处理和目录结构见 [会谈 RFT](docs/SESSION_RFT.md)。这里只实现采样、评分与选优，没有权重训练。
 
 ### 可选：概率加权（logprob）量表评分
 
@@ -394,7 +397,7 @@ psych-sandbox simulate --case psycheval-cbt-001 --sessions 3 --logprob-scoring
 
 先探测端点，再开启评分：端点必须返回 `logprobs`/`top_logprobs`，否则该路径明确报错（RFT 记为评分失败并按既有补采规则处理），不会回退到条目均值或零分。第 10 节有配置与产物说明，方法学来源与实测记录见 [借鉴说明](notes/logprob_scoring_borrowing.md)。
 
-也可以直接双击项目根目录的 `run_simulate.bat`：它激活虚拟环境后按脚本顶部的可调参数（案例、会话数、每场轮数上限 `TURNS`、候选数、并发、`LOGPROB_SCORING`、`PROBE_LOGPROB`、`PROBE_INSTRUMENT`、`MODEL_MAX_ATTEMPTS`）跑一次真实仿真，默认 `LOGPROB_SCORING=1` 与 `MODEL_MAX_ATTEMPTS=6`（脚本 `set` 出的进程环境变量优先于 `.env` 与代码默认值 3），并在仿真前先用探测量表确认端点返回 logprobs（`PROBE_LOGPROB=0` 可跳过，失败时脚本明确中止，不会让整批评分白跑）。`run_simulate.bat probe` 只做一次端点 logprobs 探测并打印完整记录。该脚本必须保持纯 ASCII 且不调用 `chcp`：cmd 会在更换代码页后丢掉批处理的行位置，把注释行碎片当成命令执行；脚本自身的中文提示因此由 Python Unicode 转义输出，改动说明见[借鉴说明的启动脚本一节](notes/logprob_scoring_borrowing.md#windows-启动脚本)，回归约束见 `tests/test_launcher_script.py`。
+也可以直接双击项目根目录的 `run_simulate.bat`：它激活虚拟环境后按脚本顶部的可调参数（案例、会话数、每场轮数上限 `TURNS`、候选数、并发 `ROLLOUT_CONCURRENCY` / `JUDGE_CONCURRENCY`、`LOGPROB_SCORING`、`PROBE_LOGPROB`、`PROBE_INSTRUMENT`、`MODEL_MAX_ATTEMPTS`）跑一次真实仿真，其中两个并发变量默认为空、表示跟随候选数（留空才能让 3 个候选同时跑），填数字才会作为上限传入；默认 `LOGPROB_SCORING=1` 与 `MODEL_MAX_ATTEMPTS=6`（脚本 `set` 出的进程环境变量优先于 `.env` 与代码默认值 3），并在仿真前先用探测量表确认端点返回 logprobs（`PROBE_LOGPROB=0` 可跳过，失败时脚本明确中止，不会让整批评分白跑）。`run_simulate.bat probe` 只做一次端点 logprobs 探测并打印完整记录。该脚本必须保持纯 ASCII 且不调用 `chcp`：cmd 会在更换代码页后丢掉批处理的行位置，把注释行碎片当成命令执行；脚本自身的中文提示因此由 Python Unicode 转义输出，改动说明见[借鉴说明的启动脚本一节](notes/logprob_scoring_borrowing.md#windows-启动脚本)，回归约束见 `tests/test_launcher_script.py`。
 
 ## 8. 查看评测和完整报告
 
@@ -497,7 +500,7 @@ set MODEL_TIMEOUT_SECONDS=180
 set MODEL_MAX_TOKENS=4096
 ```
 
-`logprob_scoring`（默认开启，可用 `enabled: false` 关闭）不再解析整数文本，而是按论文式 8 取评判模型数值 token 的概率加权期望 `score = sum(i * p_i) / sum(p_i)`；数值 token 总概率质量低于 `mass_floor`（默认 0.25）判为拒答并明确失败，不用零分或条目均值代替。端点必须返回 `logprobs`，换模型或供应商后应重新实测：
+`logprob_scoring`（默认开启，可用 `enabled: false` 关闭）不再解析整数文本，而是按论文式 8 取评判模型数值 token 的概率加权期望 $score = sum(i * p_i) / sum(p_i)$；数值 token 总概率质量低于 `mass_floor`（默认 0.25）判为拒答并明确失败，不用零分或条目均值代替。端点必须返回 `logprobs`，换模型或供应商后应重新实测：
 
 ```bat
 psych-sandbox probe logprob-scoring --case psycheval-cbt-001 --instrument wai

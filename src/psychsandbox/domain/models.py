@@ -167,6 +167,13 @@ class ClientSimulationConfig(StrictModel):
         }
 
 
+# An attachment pattern only becomes simulation guidance when it is source
+# backed. Synthetic, legacy or unsourced labels stay inert so no attachment
+# label is invented from the case (see docs/CLIENT_SIMULATION.md).
+ATTACHMENT_EVIDENCE_CONFIDENCE_FLOOR = 0.5
+ATTACHMENT_CONDITIONED_PATTERNS = frozenset({"anxious", "avoidant", "disorganized"})
+
+
 class ClientRelationalProfile(StrictModel):
     """Theory-grounded simulation parameters, never clinical diagnoses."""
 
@@ -528,6 +535,31 @@ class ClientProfile(StrictModel):
         ):
             raise ValueError("expression style must reference existing evidence")
         return self
+
+    def attachment_conditioning(self) -> dict[str, Any] | None:
+        """Return evidence-gated attachment guidance, or ``None`` when inert.
+
+        The reference conditions trust dynamics on attachment style. Here it is
+        a prompt-level simulation prior for ``trust_change`` only: it never
+        becomes case evidence, never changes disclosure permission and is never
+        part of counselor memory. Without a source-backed pattern and confidence
+        it is absent, so an unsourced or legacy label cannot leak into planning.
+        """
+        relational = self.relational
+        if relational.attachment_pattern not in ATTACHMENT_CONDITIONED_PATTERNS:
+            return None
+        if not relational.source_fact_ids:
+            return None
+        if relational.confidence < ATTACHMENT_EVIDENCE_CONFIDENCE_FLOOR:
+            return None
+        evidence_ids = {node.evidence_id for node in self.evidence_nodes}
+        if not set(relational.source_fact_ids).issubset(evidence_ids):
+            return None
+        return {
+            "pattern": relational.attachment_pattern,
+            "source_ids": list(relational.source_fact_ids),
+            "confidence": round(relational.confidence, 4),
+        }
 
 
 class UnlockedFact(StrictModel):
@@ -1315,8 +1347,11 @@ class SessionSafetyVerdict(StrictModel):
 class RFTConfig(StrictModel):
     enabled: bool = False
     candidates: int = Field(default=3, ge=2, le=32)
-    concurrency: int = Field(default=2, ge=1, le=32)
-    judge_concurrency: int = Field(default=2, ge=1, le=16)
+    # ``None`` follows ``candidates`` so a batch never wastes a trailing wave
+    # (three candidates at a fixed budget of two would run as 2 + 1). An
+    # explicit number still caps the concurrent model calls.
+    concurrency: int | None = Field(default=None, ge=1, le=32)
+    judge_concurrency: int | None = Field(default=None, ge=1, le=16)
     candidate_timeout_sec: float = Field(default=1800, gt=0, allow_inf_nan=False)
     judge_timeout_sec: float = Field(default=240, gt=0, allow_inf_nan=False)
     min_eligible: int = Field(default=2, ge=2, le=32)
@@ -1330,6 +1365,18 @@ class RFTConfig(StrictModel):
         if self.min_eligible > self.candidates:
             raise ValueError("min_eligible must not exceed candidates")
         return self
+
+    @property
+    def effective_concurrency(self) -> int:
+        """Candidate generations allowed at once; ``None`` follows ``candidates``."""
+        return self.candidates if self.concurrency is None else self.concurrency
+
+    @property
+    def effective_judge_concurrency(self) -> int:
+        """Candidate sessions scored at once; ``None`` follows ``candidates``."""
+        return (
+            self.candidates if self.judge_concurrency is None else self.judge_concurrency
+        )
 
 
 class RewardSignal(StrictModel):
@@ -1536,6 +1583,7 @@ class SandboxConfig(StrictModel):
     client_use_memory: bool = True
     client_use_pipeline: bool = True
     client_use_trust_gating: bool = True
+    client_topic_matcher: Literal["tags", "semantic"] = "tags"
     skill_selection: SkillSelectionConfig = Field(default_factory=SkillSelectionConfig)
     rft: RFTConfig = Field(default_factory=RFTConfig)
     logprob_scoring: LogprobScoringConfig = Field(default_factory=LogprobScoringConfig)

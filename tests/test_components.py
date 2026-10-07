@@ -649,7 +649,7 @@ def test_vector_filter_rejects_invalid_embeddings(selection_catalog, sample_case
 
 
 def test_client_prompts_are_versioned_and_reexported():
-    assert CLIENT_PROMPT_VERSION == "psycheval_patientact_v6"
+    assert CLIENT_PROMPT_VERSION == "psycheval_patientact_v7"
     assert CLIENT_PROMPT_VERSION == CANONICAL_CLIENT_PROMPT_VERSION
     assert CLIENT_PLANNER_TEMPLATE == "simclient/planner_system.jinja2"
     assert CLIENT_UTTERANCE_TEMPLATE == "simclient/utterance_system.jinja2"

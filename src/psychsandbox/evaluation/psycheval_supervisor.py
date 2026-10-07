@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
@@ -264,18 +265,26 @@ class PsychEvalSupervisor:
         )
 
     async def evaluate_session(
-        self, session: SessionRecord, case: CounselingCase
+        self,
+        session: SessionRecord,
+        case: CounselingCase,
+        *,
+        on_step: Callable[[int, int, str], None] | None = None,
     ) -> SessionEvaluationReport:
         """Score a single session with the same PsychEval instruments.
 
         This is the per-session LLM-as-judge used for RFT reward and session
         audit; it shares the instrument set of the holistic supervisor but is a
-        ranking signal, not the clinical supervisor itself.
+        ranking signal, not the clinical supervisor itself. ``on_step`` receives
+        ``(completed, total, instrument_key)`` after every judge step so a live
+        progress bar can follow a long scoring pass.
         """
         dialogue = self._format_session_dialogue(session)
         intake = format_intake(case)
         counselor_shared, counselor_specific, client_shared, client_specific = (
-            await self._score_instruments(session.plan.therapy, intake, dialogue)
+            await self._score_instruments(
+                session.plan.therapy, intake, dialogue, on_step=on_step,
+            )
         )
         counselor_overall = self._overall(counselor_shared + counselor_specific)
         client_overall = self._overall(client_shared + client_specific)
@@ -290,31 +299,73 @@ class PsychEvalSupervisor:
             client_overall=client_overall,
         )
 
+    @staticmethod
+    def _score_plan(therapy: str) -> list[tuple[str, Instrument | None]]:
+        """Ordered judge steps of one scoring pass.
+
+        ``None`` marks the composite RRO step, which produces the counselor and
+        the client factor scores from one judge call. The order matches the
+        historical sequence: shared counselor, specific counselor, shared
+        client, specific client, then the composite RRO append.
+        """
+        return [
+            *(
+                ("counselor_shared", instrument)
+                for instrument in _shared_counselor_instruments().values()
+            ),
+            *(
+                ("counselor_specific", instrument)
+                for instrument in _specific_counselor_instruments(therapy).values()
+            ),
+            *(
+                ("client_shared", instrument)
+                for instrument in _shared_client_instruments().values()
+            ),
+            *(
+                ("client_specific", instrument)
+                for instrument in _specific_client_instruments(therapy).values()
+            ),
+            ("rro", None),
+        ]
+
+    def session_instrument_count(self, therapy: str) -> int:
+        """Number of judge steps :meth:`evaluate_session` performs for a therapy."""
+        return len(self._score_plan(therapy))
+
     async def _score_instruments(
-        self, therapy: str, intake: str, dialogue: str
+        self,
+        therapy: str,
+        intake: str,
+        dialogue: str,
+        *,
+        on_step: Callable[[int, int, str], None] | None = None,
     ) -> tuple[list[ScaleScore], list[ScaleScore], list[ScaleScore], list[ScaleScore]]:
-        counselor_shared = [
-            await self._score(instrument, intake, dialogue)
-            for instrument in _shared_counselor_instruments().values()
-        ]
-        counselor_specific = [
-            await self._score(instrument, intake, dialogue)
-            for instrument in _specific_counselor_instruments(therapy).values()
-        ]
-        client_shared = [
-            await self._score(instrument, intake, dialogue)
-            for instrument in _shared_client_instruments().values()
-        ]
-        client_specific = [
-            await self._score(instrument, intake, dialogue)
-            for instrument in _specific_client_instruments(therapy).values()
-        ]
-        # RRO is a single 24-item prompt that decomposes into counselor- and
-        # client-side factor scores (matching PsychEval's factor structure).
-        rro_counselor, rro_client = await self._score_rro(intake, dialogue)
-        counselor_shared.append(rro_counselor)
-        client_shared.append(rro_client)
-        return counselor_shared, counselor_specific, client_shared, client_specific
+        groups: dict[str, list[ScaleScore]] = {
+            "counselor_shared": [],
+            "counselor_specific": [],
+            "client_shared": [],
+            "client_specific": [],
+        }
+        steps = self._score_plan(therapy)
+        for completed, (group, instrument) in enumerate(steps, start=1):
+            if instrument is None:
+                # RRO is a single 24-item prompt that decomposes into counselor-
+                # and client-side factor scores (PsychEval's factor structure).
+                rro_counselor, rro_client = await self._score_rro(intake, dialogue)
+                groups["counselor_shared"].append(rro_counselor)
+                groups["client_shared"].append(rro_client)
+                key = "rro"
+            else:
+                groups[group].append(await self._score(instrument, intake, dialogue))
+                key = instrument.key
+            if on_step is not None:
+                on_step(completed, len(steps), key)
+        return (
+            groups["counselor_shared"],
+            groups["counselor_specific"],
+            groups["client_shared"],
+            groups["client_specific"],
+        )
 
     async def _collect_items(
         self, relative: str, intake: str, dialogue: str
