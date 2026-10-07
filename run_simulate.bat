@@ -3,7 +3,8 @@ rem ============================================================
 rem  psych-sandbox simulate launcher
 rem  Double-click to open a CMD window in the project root and run
 rem  one simulation. Adjustable parameters are grouped below.
-rem  Probability-weighted (logprob) scoring is on by default.
+rem  Item-average scoring is the default; the optional probability-weighted
+rem  (logprob) mode is opt-in through LOGPROB_SCORING=1 below.
 rem
 rem  Usage:
 rem    run_simulate.bat          run one simulation with the parameters below
@@ -42,11 +43,12 @@ rem Candidate generation/scoring concurrency. Leave empty to follow ROLLOUTS
 rem (no trailing wave with fewer candidates than slots); a number caps the load.
 set ROLLOUT_CONCURRENCY=
 set JUDGE_CONCURRENCY=
-rem 1 = probability-weighted (logprob) scoring ON (default); 0 = item average
-set LOGPROB_SCORING=1
-rem 1 = probe the endpoint and keep the record before simulating (default);
-rem     0 = skip the probe
-set PROBE_LOGPROB=1
+rem 1 = probability-weighted (logprob) scoring ON (opt-in comparison mode);
+rem     0 = item average (default)
+set LOGPROB_SCORING=0
+rem 1 = probe the endpoint and keep the record before simulating;
+rem     0 = skip the probe (default; the probe only matters with LOGPROB_SCORING=1)
+set PROBE_LOGPROB=0
 rem Instrument used by the probe: any non-composite key, e.g. wai/ctrs/bdi_ii
 set PROBE_INSTRUMENT=wai
 rem Transient retry attempts per model call (3 = the previous fixed budget).

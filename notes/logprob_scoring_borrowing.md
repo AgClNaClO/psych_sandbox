@@ -26,8 +26,8 @@ DOI 10.1038/s44387-026-00160-9，式 8「通过 logprob 参数聚合 EMS 得分�
 | `prompts/eval/_scoring/instrument_rating.txt` | 项目新增的评分提示词资产（非官方 PsychEval 量表），要求评判模型只输出一个整数量表总分 |
 | `src/psychsandbox/evaluation/psycheval_supervisor.py` | 可选 `logprob_scoring`：`score_instrument_rating` 给出量表级连续分，替换 `_score` 的条目均值；RRO/PANAS 保留官方公式 |
 | `src/psychsandbox/evaluation/scoring_probe.py`、`cli.py probe logprob-scoring` | 端点可行性实测入口，一次调用一个 `runs/` 目录，写 `probe.json` |
-| `run_simulate.bat` | 双击启动器：默认 `LOGPROB_SCORING=1`，仿真前先探测端点（`PROBE_LOGPROB=1`），支持 `run_simulate.bat probe` |
-| `src/psychsandbox/domain/models.py`、`configs/runtime.yaml` | `LogprobScoringConfig`（配置默认开启，改为 `enabled: false` 即关闭；启动器仍显式传 `--logprob-scoring`），配置与 `runs/runtime/*/run.json` 快照同时留存 |
+| `run_simulate.bat` | 双击启动器：默认 `LOGPROB_SCORING=0`（条目均值路径），需要时改 1 开启概率加权路径并配合 `PROBE_LOGPROB=1` 先探测端点，支持 `run_simulate.bat probe` |
+| `src/psychsandbox/domain/models.py`、`configs/runtime.yaml` | `LogprobScoringConfig`（默认关闭，设为 `enabled: true` 或传 `simulate --logprob-scoring` 才启用），配置与 `runs/runtime/*/run.json` 快照同时留存 |
 
 ## 与论文的差异（有意为之）
 
@@ -45,8 +45,8 @@ DOI 10.1038/s44387-026-00160-9，式 8「通过 logprob 参数聚合 EMS 得分�
   `docs/SESSION_RFT.md` 的「失败不用分数代替」一致；RFT 会记为 `scoring_failed`
   并按既有 `resample_limit` 补采，整体督导则走既有失败路径（记录提示、不生成整体
   报告，也不会生成一个假分数）。离线测试用 `tests/deterministic_gateway.py` 的
-  `DISABLED_LOGPROB_SCORING` 显式关闭该路径（确定性双替身不产出 logprobs），默认开启
-  只影响真实端点。
+  `DISABLED_LOGPROB_SCORING` 显式关闭该路径（确定性双替身不产出 logprobs）；该路径
+  默认关闭（2026-10-07 起），只有显式开启的配置或真实端点会走它。
 
 ## 端点实测记录（2026-09-27）
 
@@ -87,14 +87,16 @@ DOI 10.1038/s44387-026-00160-9，式 8「通过 logprob 参数聚合 EMS 得分�
 （0.25 通过、0.24 拒绝）、非法 token、单数字评分带校验、提示词占位符、网关请求
 契约（`logprobs`/`top_logprobs`/无 `response_format`）、拒答不重试、不支持时显式
 报错、基类网关拒绝、supervisor 集成（连续分与条目审计并存、失败不外退、复合量表
-不受影响）、探针记录与 CLI 目录约定、默认开启（`enabled=true`）断言、传输重试预算
-与 `api_error` 诊断、默认开启且端点不支持时不回退条目均值。
+不受影响）、多文件量表的同名条目标签（`#n` 后缀、审计字典可复现分数）、探针记录与
+CLI 目录约定、默认关闭（`enabled=false`）断言与 CLI 开关可显式开启、传输重试预算
+与 `api_error` 诊断、显式开启且端点不支持时不回退条目均值。
 
 ## Windows 启动脚本
 
-`run_simulate.bat` 默认 `LOGPROB_SCORING=1`，并在跑仿真前先执行一次探测量表
-（`PROBE_LOGPROB=1`）：探测失败即打印错误并中止，避免整批 RFT 候选生成完才发现评分
-不可用。`PROBE_LOGPROB=0` 跳过探测，`run_simulate.bat probe` 只探测并打印完整记录
+`run_simulate.bat` 默认 `LOGPROB_SCORING=0`（条目均值路径），需要概率加权路径时改为 1，
+并把 `PROBE_LOGPROB` 也设为 1：启动器会在跑仿真前先执行一次探测量表，探测失败即打印错误并
+中止，避免整批 RFT 候选生成完才发现评分不可用。`PROBE_LOGPROB=0` 跳过探测，
+`run_simulate.bat probe` 只探测并打印完整记录
 （等价于 `psych-sandbox probe logprob-scoring ... --json`）。探测量表由
 `PROBE_INSTRUMENT` 指定，默认 `wai`；案例、会话数、每场轮数上限（`TURNS`）、候选数、并发与瞬时重试预算
 （`MODEL_MAX_ATTEMPTS`，启动器默认 6）同样在脚本顶部可调。
@@ -125,3 +127,39 @@ CMD 窗口与重定向日志都能正确显示。修改提示文案时，先把�
 - 只有实测过的端点组合可以开启；未实测的端点应先跑 probe，把 `probe.json` 与运行
   一起留档。
 - 端到端临床效度没有变化：该路径只改变分数聚合方式，不改变量表本身的口径。
+
+## 分辨力审计（2026-10-07）
+
+按 `runs/runtime/20261007-222144__score-audit/SUMMARY.md` 的方法实测：在**真实候选对话**上用
+`probe logprob-scoring --dialogue-file`（不再依赖固定 fixture，14 次真实判分），并在**不修改
+`configs/runtime.yaml`** 的前提下用显式 `LogprobScoringConfig(enabled=False)` 跑了一次对照疗程
+（独立 SQLite 与 trace 目录）。结论：
+
+- **塌陷源于裁判信念，不是取平均。** CTRS 在两条条目均值相差 2.22 分的对话上给出 5.000 与
+  5.000（众数 3 的概率 0.95–1.00、熵 0.002–0.232 nat），而同对话重复的极差只有 0.043。
+  概率加权期望精确地报出了这个"自信给中点"的信念；它揭穿而非制造了"信念无位移"。
+- **分辨率 = 分布位移 / 判分噪声。** 走 logprob 的咨询师量表在 0–10 上的候选间极差从条目均值的
+  0.11–0.34 压到 0.003–0.008；`run-9b178a94e230` 里残余的 0.23–0.40 极差全部来自复合量表 RRO
+  （`_score_plan` 的 `None` 步骤，绕过 logprob）。
+- **问题粒度比聚合方式更关键**：SCL-90 同批次的分布熵 0.72–0.90 nat、对话间位移 0.445，
+  即"症状整体水平"这类单 token 总评**确实携带信息**。
+- **关闭 logprob 后总量级不变**：对照疗程胜出候选 RFT = −2.172，与 logprob 运行的 −2.16 同量级，
+  说明"分低"由官方硬编码参考均值主导，只作候选排序。
+- **附带发现（与 logprob 无关）**：`_score` 用跨文件全部条目算 `score`，却用
+  `item_scores.setdefault(label, ...)` 建审计字典，同名标签被丢弃，导致 `custom_dim`（5 个流派
+  都是 4 文件量表）的 `item_scores` **无法复现** `score`（实测记录分 5.846 / 存储 21 条均值 3.0）。
+  对照疗程校验 9/10 量表"活路径 == 离线反算"，唯一例外即 `custom_dim`。
+- 处置方向：换 `SUPERVISOR_MODEL` / 补量表总分锚点，或让条目证据与单 token 期望共同决定 `score`
+  （口径变更需评审，且必须保留 fail-loudly 语义）；不要用 RFT z 值或整体督导分做绝对水平判断。
+
+### 本次落地（2026-10-07）
+
+- **默认改为关闭**：`LogprobScoringConfig.enabled=False`、`configs/runtime.yaml` 的
+  `logprob_scoring.enabled: false`、`run_simulate.bat` 的 `LOGPROB_SCORING=0` /
+  `PROBE_LOGPROB=0`。开启入口保留为 `enabled: true` 或 `simulate --logprob-scoring`
+  （CLI 仍是单向开启，`enabled: false` 时只能用配置或该开关启用）。
+- **修审计字典丢条目**：`_score` 改用 `_record_item`，同名标签以 `#n` 后缀保留全部评分，
+  `ScaleScore.item_scores` 现在可复现 `score`（`custom_dim` 为 4 文件 65 条、唯一标签 21 个）。
+  回归测试：`tests/test_logprob_scoring.py::test_multi_file_audit_keeps_colliding_item_labels`。
+- 仍未处理：裁判侧（`SUPERVISOR_MODEL` / 提示词总分锚点），以及"条目证据是否参与 `score`"
+  这一口径变更（需评审）。

@@ -48,9 +48,9 @@ CLI 在候选生成阶段为每个候选绘制一条实时进度条（`Session N
 | Counselor-Level | WAI、HTAIS、RRO、`custom_dim` | BT→MITI；CBT→CTRS；HET→TES；PDT→PSC；PMT→EFT-TFS |
 | Client-Level | SCL-90、PANAS、RRO、SRS | BT→STAI；CBT→BDI-II；HET→CCT；PDT→IPO；PMT→SFBT |
 
-对齐 PsychEval 的细节：RRO 是单个 24 条目量表，按 4 因子（Client/Counselor × Realism/Genuineness）分解并对条目 {2,7,16,17,18,19,24} 反向计分，咨询师侧与来访者侧各取两个因子均值、共用同一次模型调用；`custom_dim` 是单个咨询师侧量表，聚合 Ethics、Interaction、Intervention、Perception 四个 criteria 为一个分数。流派专属量表也修正了多文件条目编号互相覆盖的问题（现在按所有条目聚合，不再按编号去重丢条目）。
+对齐 PsychEval 的细节：RRO 是单个 24 条目量表，按 4 因子（Client/Counselor × Realism/Genuineness）分解并对条目 {2,7,16,17,18,19,24} 反向计分，咨询师侧与来访者侧各取两个因子均值、共用同一次模型调用；`custom_dim` 是单个咨询师侧量表，聚合 Ethics、Interaction、Intervention、Perception 四个 criteria 为一个分数。流派专属量表也修正了多文件条目编号互相覆盖的问题（现在按所有条目聚合，不再按编号去重丢条目）；审计字典同样保留全部条目——重复标签以 `#n` 后缀区分，因此 `item_scores` 可复现 `score`。
 
-可选的概率加权评分：`configs/runtime.yaml` 的 `logprob_scoring`（默认 `enabled=true`）或 `simulate --logprob-scoring` 会让每个非复合量表额外做一次只输出整数总分的评判调用，按 `score = sum(i * p_i) / sum(p_i)` 取概率加权期望作为该量表的 0–10 归一化输入，取代条目均值（条目级 JSON 调用仍执行，`item_scores` 保留作审计）。数值 token 总概率质量低于 `mass_floor`（默认 0.25）判为拒答。RRO 与 PANAS 仍用各自的官方复合公式；该选项每个量表多一次调用，评分器口径不变。该路径默认开启：端点必须返回 `logprobs`/`top_logprobs`，否则按下一节记评分失败；把 `configs/runtime.yaml` 的 `logprob_scoring.enabled` 改为 `false` 即可关闭（`simulate --logprob-scoring` 只会显式开启）。评分调用与生成调用共用同一份瞬时重试预算。
+可选的概率加权评分：`configs/runtime.yaml` 的 `logprob_scoring`（默认 `enabled=false`，2026-10-07 起）或 `simulate --logprob-scoring` 会让每个非复合量表额外做一次只输出整数总分的评判调用，按 `score = sum(i * p_i) / sum(p_i)` 取概率加权期望作为该量表的 0–10 归一化输入，取代条目均值（条目级 JSON 调用仍执行，`item_scores` 保留作审计）。数值 token 总概率质量低于 `mass_floor`（默认 0.25）判为拒答。RRO 与 PANAS 仍用各自的官方复合公式；该选项每个量表多一次调用，评分器口径不变。该路径默认关闭：实测其概率加权期望会把每个量表钉在裁判信念的中心，候选间分辨力低于条目均值路径（见 [借鉴说明](../notes/logprob_scoring_borrowing.md) 的 2026-10-07 分辨力审计）。开启后端点必须返回 `logprobs`/`top_logprobs`，否则按下一节记评分失败；改 `configs/runtime.yaml` 的 `logprob_scoring.enabled` 为 `true`，或传 `simulate --logprob-scoring`，才会启用。评分调用与生成调用共用同一份瞬时重试预算。
 
 每个量表按其官方原始条目范围归一化为 0–10 原始分（与官方 eval 方法一致，不因方向取反）：WAI、HTAIS、`custom_dim`、EFT-TFS、MITI、IPO、PANAS 为 1–5，TES 为 1–7，PSC、CTRS 为 0–6，SCL-90、SRS、STAI、SFBT 为 0–4，BDI-II 为 0–3，CCT 为 0–2。各量表的原始范围记录在 `Instrument.scale`，评分时按 `(条目均值 - 下限) / (上限 - 下限) × 10` 换算；症状量表（SCL-90、BDI-II、IPO）保持原始方向（越高越重），`direction` 仅作元数据，不对分数取反。PANAS 单独按正/负情绪平衡公式 `(positive − negative + 10) / 2` 计算，不是条目均值。缺字段、非法 JSON 或 schema 不符会使该候选评分失败，不用零分或均分代替。量表评分没有临床效度保证，也无法完全防御对话中的评分操纵。
 
@@ -75,7 +75,7 @@ SCL-90 仍出现在每 session 的 PsychEval 报告中，但不进入 RFT 奖励
 - 任何候选前缀出现即时风险时，立即保存风险标记、取消其他任务并令整批 `safety_hold`，不选赢家、不推进记忆。恢复同时核对候选文件与数据库，取消或崩溃不能绕过已记录风险。
 - 评分器校验失败（如非法 JSON 或量表 schema 不符）先按 `judge_retries` 重试，重试仍失败才记 `scoring_failed`；生成失败与评分失败都会按 `resample_limit` 补采新候选，补采仍不足 `min_eligible` 才整批失败。
 - 瞬时网络错误与 HTTP 5xx 先按 `MODEL_MAX_ATTEMPTS`（默认 3）重试，预算耗尽才记 `generation_failed`/`scoring_failed`；聊天生成、logprob 评判与技能向量 embedding 批次调用共用这一预算，最终失败的请求元数据（角色、模型、状态码、尝试次数）写入该候选的 `dNNN/api_error` 记录，不写提示词或密钥。embedding 失败记为 `role="embedding"`、`output_schema="Embedding"`，`request` 只含向量模型、批次序号与批量，不含技能文本。
-- `logprob_scoring` 默认开启：端点未返回 `logprobs`/`top_logprobs` 或数值 token 总质量低于 `mass_floor` 时同样记评分失败并按上面的补采规则处理：不把条目均值、零分或均分当作该候选的分数。启用前先用 `psych-sandbox probe logprob-scoring` 留档端点实测记录，换模型或供应商后重跑；不需要该路径时把 `configs/runtime.yaml` 的 `logprob_scoring.enabled` 改为 `false`。
+- `logprob_scoring` 默认关闭（2026-10-07 起）：显式开启后，端点未返回 `logprobs`/`top_logprobs` 或数值 token 总质量低于 `mass_floor` 时记评分失败并按上面的补采规则处理：不把条目均值、零分或均分当作该候选的分数。启用前先用 `psych-sandbox probe logprob-scoring` 留档端点实测记录，换模型或供应商后重跑；不需要该路径时保持 `configs/runtime.yaml` 的 `logprob_scoring.enabled: false`（默认值）。
 - 少于 `min_eligible` 个不同且合格的候选时，整批失败；不把 API 失败、评分失败或不合格候选当作低分负例。
 - 失败或取消保留已经生成的对话前缀、当时记忆、诊断与错误；强制终止进程可能留下 `running` 状态，不应当成已完成候选。失败批次可从最后已提交会谈重跑，第一场尚未提交也可以恢复。
 

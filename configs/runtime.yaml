@@ -33,10 +33,11 @@ rft:
   judge_retries: 3  # 评分校验失败时的重试次数
   resample_limit: 2
 logprob_scoring:
-  # 按论文式 8 的概率加权期望给 PsychEval 量表打分；默认开启。
-  # 开启前先用 psych-sandbox probe logprob-scoring 确认端点返回 logprobs；
-  # 端点不支持时改为 enabled: false（或去掉 simulate --logprob-scoring）。
-  enabled: true
+  # 按论文式 8 的概率加权期望给 PsychEval 量表打分；默认关闭（2026-10-07 起）。
+  # 该路径把每个量表钉在裁判信念的中心，实测候选间分辨力低于条目均值路径，
+  # 因此只作对照模式：需要时改 enabled: true（或传 simulate --logprob-scoring），
+  # 并先用 psych-sandbox probe logprob-scoring 确认端点返回 logprobs。
+  enabled: false
   mass_floor: 0.25  # 数值 token 总概率质量低于此值判为拒答并明确失败
   top_logprobs: 20
   max_tokens: 16

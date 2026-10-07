@@ -3,8 +3,8 @@
 The launcher is the one place where a Windows shell decides whether the
 simulation runs at all, so two properties are asserted here:
 
-* it enables the optional probability-weighted (logprob) scoring path by
-  default, and can still be switched back to the item-average path;
+* it keeps the optional probability-weighted (logprob) scoring path off by
+  default, while still wiring the switch that turns it on;
 * it stays ASCII-only and never calls ``chcp``. cmd re-reads a batch file with
   the codepage that is active while reading it, so non-ASCII bytes make the
   parser lose its line position and execute fragments of the file as commands
@@ -24,8 +24,11 @@ def launcher(root: Path) -> str:
     return (Path(root) / "run_simulate.bat").read_text(encoding="utf-8")
 
 
-def test_launcher_enables_logprob_scoring_by_default(launcher):
-    assert "set LOGPROB_SCORING=1" in launcher
+def test_launcher_keeps_logprob_scoring_switched_off_by_default(launcher):
+    # Item-average scoring is the default; the weighted-expectation path is an
+    # opt-in comparison mode, so the launcher must not enable or probe it.
+    assert "set LOGPROB_SCORING=0" in launcher
+    assert "set PROBE_LOGPROB=0" in launcher
     assert "set LOGPROB_ARG=--logprob-scoring" in launcher
     assert "%LOGPROB_ARG%" in launcher
     # The switch must stay a real switch, not a hard-coded flag.

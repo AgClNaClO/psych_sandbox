@@ -399,6 +399,45 @@ def test_disabled_config_keeps_the_item_average(root):
     assert gateway.rating_calls == []
 
 
+def test_multi_file_audit_keeps_colliding_item_labels(root):
+    """``custom_dim`` numbers its items from 1 in each of the four criteria files.
+
+    Keying the audit dict by label alone kept only the unique labels, so the
+    stored ``item_scores`` could not reproduce the score it was computed with.
+    """
+
+    class PerFileGateway(ModelGateway):
+        provider_name = "per-file"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete_structured(self, **kwargs):
+            self.calls += 1
+            return ScaleItems(items=[ScaleItem(item="1", score=float(self.calls))])
+
+        async def complete_numeric_rating(self, **kwargs):  # pragma: no cover
+            raise NotImplementedError
+
+    gateway = PerFileGateway()
+    instrument = instrument_registry("cbt")["custom_dim"]
+
+    score = asyncio.run(_supervisor(root, gateway)._score(instrument, "背景", "对话"))
+
+    assert len(instrument.prompt_files) == 4
+    assert sorted(score.item_scores) == ["1", "1#2", "1#3", "1#4"]
+    assert sorted(score.item_scores.values()) == [1.0, 2.0, 3.0, 4.0]
+    # Mean 2.5 on the 1-5 band stays reproducible from the audit dict alone.
+    assert score.score == pytest.approx(3.75)
+    assert (
+        round(
+            (sum(score.item_scores.values()) / len(score.item_scores) - 1.0) / 4.0 * 10.0,
+            3,
+        )
+        == score.score
+    )
+
+
 def test_enabled_scoring_uses_the_weighted_rating_and_keeps_item_audit(root):
     gateway = ScriptedSupervisorGateway(item_score=5.0, probabilities={3: 0.5, 5: 0.5})
     supervisor = _supervisor(root, gateway, logprob_scoring=_enabled())
@@ -620,8 +659,10 @@ def test_runtime_config_exposes_the_scoring_block(root):
 
     block = default_config(Path(root)).logprob_scoring
 
-    assert block.enabled is True
-    assert SandboxConfig(project_root=Path(root)).logprob_scoring.enabled is True
+    # Off by default: its probability-weighted expectation reports the judge's
+    # own centred belief, so it stays an opt-in comparison mode.
+    assert block.enabled is False
+    assert SandboxConfig(project_root=Path(root)).logprob_scoring.enabled is False
     assert block.mass_floor == pytest.approx(0.25)
     assert (block.top_logprobs, block.max_tokens, block.temperature) == (20, 16, 0.7)
 
@@ -658,14 +699,18 @@ class ItemAverageOnlyGateway(DeterministicGateway):
     complete_numeric_rating = ModelGateway.complete_numeric_rating
 
 
-def test_default_config_fails_loudly_without_substituting_item_averages(
+def test_enabled_logprob_scoring_fails_loudly_without_substituting_item_averages(
     root, tmp_path, repository
 ):
+    # The path is off by default, so this contract opts in explicitly: an
+    # endpoint without a logprobs payload must fail the judgement, never fall
+    # back to the item average or a zero.
     config = SandboxConfig(
         project_root=root,
         max_turns_per_session=1,
         database_path=tmp_path / "default-logprob.sqlite3",
         trace_dir=tmp_path / "default-logprob-traces",
+        logprob_scoring=LogprobScoringConfig(enabled=True),
     )
     sandbox = CounselingSandbox(
         config, gateway=ItemAverageOnlyGateway(), repository=repository

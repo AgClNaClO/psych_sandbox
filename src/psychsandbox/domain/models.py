@@ -1278,9 +1278,13 @@ class ScaleScore(StrictModel):
 
     ``item_scores`` preserves raw per-item ratings (usually 1-5) keyed by item
     number string, while ``score`` carries the normalized 0-10 summary mapped
-    from the instrument's own raw range. ``direction`` records whether higher
-    or lower is better (symptom scales are ``lower_better``); ``score`` stays
-    raw and is not direction-adjusted, matching the official eval methods.
+    from the instrument's own raw range. Multi-file instruments restart their
+    item numbering in every file (``custom_dim`` is four criteria files), so a
+    repeated label gets an ``#n`` suffix (``"3#2"``); ``item_scores`` is thereby
+    a lossless multiset of the ratings ``score`` was computed from.
+    ``direction`` records whether higher or lower is better (symptom scales are
+    ``lower_better``); ``score`` stays raw and is not direction-adjusted,
+    matching the official eval methods.
     """
 
     name: str
@@ -1527,15 +1531,18 @@ class LogprobScoringConfig(StrictModel):
     as a refusal instead of being replaced by a zero or an item average.
 
     Default values are the paper's scoring request (temperature 0.7, max 16
-    tokens, top 20 candidates, mass floor 0.25). The path is on by default: it
-    needs an endpoint that actually returns ``logprobs``/``top_logprobs``, so
-    probe it with ``psych-sandbox probe logprob-scoring`` before a run. An
-    endpoint without the payload (or a judgement below the floor) fails loudly
-    instead of falling back to an item average, and ``enabled: false`` switches
-    the path off again.
+    tokens, top 20 candidates, mass floor 0.25). The path is **off by default**:
+    its probability-weighted expectation reports the judge's own (usually
+    centred) belief with high precision, so it is an opt-in comparison mode
+    enabled through ``configs/runtime.yaml`` or ``simulate --logprob-scoring``
+    (see ``notes/logprob_scoring_borrowing.md``, 2026-10-07 audit). It needs an
+    endpoint that actually returns ``logprobs``/``top_logprobs``, so probe it
+    with ``psych-sandbox probe logprob-scoring`` before enabling it. An endpoint
+    without the payload (or a judgement below the floor) still fails loudly
+    instead of falling back to an item average.
     """
 
-    enabled: bool = True
+    enabled: bool = False
     mass_floor: float = Field(default=0.25, gt=0, le=1)
     top_logprobs: int = Field(default=20, ge=1, le=20)
     max_tokens: int = Field(default=16, ge=1, le=64)

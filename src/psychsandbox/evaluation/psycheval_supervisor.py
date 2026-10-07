@@ -486,7 +486,7 @@ class PsychEvalSupervisor:
         for relative in instrument.prompt_files:
             for label, score in await self._collect_items(relative, intake, dialogue):
                 values.append(score)
-                item_scores.setdefault(label, score)
+                _record_item(item_scores, label, score)
         if self.logprob_scoring is not None:
             # Item ratings stay on the scale for audit, but the reported score
             # comes from the continuous logprob judgement instead of the item
@@ -685,6 +685,28 @@ class PsychEvalSupervisor:
         if profile.growth_experiences:
             lines.append("成长经历：" + "；".join(profile.growth_experiences))
         return "\n".join(line for line in lines if line)
+
+
+def _record_item(item_scores: dict[str, float], label: str, score: float) -> None:
+    """Record one item rating without dropping cross-file label collisions.
+
+    Multi-file instruments restart their item numbering in every file.
+    ``custom_dim`` is four criteria files (Ethics 15, Interaction 14,
+    Intervention 15, Perception 21 items) that all label their items from ``1``,
+    so a plain ``setdefault`` kept only 21 of the 65 ratings: the stored audit
+    trail could no longer reproduce the score it was computed with.
+
+    The first occurrence keeps the bare label; later ones get an ``#n`` suffix
+    (``"3#2"``), so ``item_scores`` is a lossless multiset of the ratings behind
+    ``ScaleScore.score``.
+    """
+    if label not in item_scores:
+        item_scores[label] = score
+        return
+    occurrence = 2
+    while f"{label}#{occurrence}" in item_scores:
+        occurrence += 1
+    item_scores[f"{label}#{occurrence}"] = score
 
 
 def _has_intake_and_dialogue(prompt: str) -> bool:

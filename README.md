@@ -50,7 +50,7 @@ psych-sandbox visualize --run run-xxxxxxxxxxxx
 
 - HTML 报告改为“概览页 + 每场会谈独立页”：逐轮规划/决策、技能查询记录、来访者模拟决策摘要和会后自评改为对话上方可折叠的内联卡片；原先独立的“运行过程 / 来访者状态趋势 / 纵向判断”板块不再渲染，这些数据仍保存在 `result.json`、SQLite 和 `trajectory.jsonl` 中。
 - 新增 [记忆结构说明](docs/MEMORY.md)，记录当前咨询师记忆的四字段结构、写入者、分层的读取视图与输入预算、退休语义与已知限制。
-- 新增可选的概率加权（logprob）量表评分，借鉴 Zhang et al.（npj Artificial Intelligence, DOI 10.1038/s44387-026-00160-9）式 8 的连续评分与拒答质量门：默认开启，端点不返回 logprobs 或质量不足时明确失败，不静默回退；配套 `psych-sandbox probe logprob-scoring` 端点实测入口，详见 [借鉴说明](notes/logprob_scoring_borrowing.md)。
+- 新增可选的概率加权（logprob）量表评分，借鉴 Zhang et al.（npj Artificial Intelligence, DOI 10.1038/s44387-026-00160-9）式 8 的连续评分与拒答质量门：默认关闭（2026-10-07 起，需要时改 `logprob_scoring.enabled: true` 或传 `--logprob-scoring`），端点不返回 logprobs 或质量不足时明确失败，不静默回退；配套 `psych-sandbox probe logprob-scoring` 端点实测入口，详见 [借鉴说明](notes/logprob_scoring_borrowing.md)。
 - 会谈 RFT 的生成/评分并发默认跟随候选数（`rft.concurrency` / `rft.judge_concurrency` 为 `null` 时等于 `candidates`），3 个候选同时生成、同时评分，不再出现「2 + 1」的尾轮；`--rollout-concurrency` / `--judge-concurrency` 仍可显式限流。终端新增候选评分进度条（量表 x/y、候选 x/y、最近量表、已用与预计剩余），详见 [会谈 RFT](docs/SESSION_RFT.md)。
 - 新增来访者侧「内容耗尽/空转」检测：连续简短回应、重复台词与最小化回答密度达到阈值时，咨询师改为承认停滞并把方向交回来访者，不再重复同一追问；阈值是工程假设，可核验线索写入 decision，详见 [来访者模拟核对](docs/CLIENT_SIMULATION.md)。
 - 来访者规划提示词新增信任行为锚点（论文附录 C.4 的 7 级描述）与有来源的依恋条件化：无 `source_fact_ids`/置信度的依恋标签保持惰性，不进入规划、不改变披露许可、不进入咨询师记忆；当前来访者提示词版本为 `psycheval_patientact_v7`。
@@ -500,13 +500,13 @@ set MODEL_TIMEOUT_SECONDS=180
 set MODEL_MAX_TOKENS=4096
 ```
 
-`logprob_scoring`（默认开启，可用 `enabled: false` 关闭）不再解析整数文本，而是按论文式 8 取评判模型数值 token 的概率加权期望 $score = sum(i * p_i) / sum(p_i)$；数值 token 总概率质量低于 `mass_floor`（默认 0.25）判为拒答并明确失败，不用零分或条目均值代替。端点必须返回 `logprobs`，换模型或供应商后应重新实测：
+`logprob_scoring`（默认关闭，2026-10-07 起；改 `enabled: true` 或在 `simulate` 上加 `--logprob-scoring` 才启用）不再解析整数文本，而是按论文式 8 取评判模型数值 token 的概率加权期望 $score = sum(i * p_i) / sum(p_i)$；数值 token 总概率质量低于 `mass_floor`（默认 0.25）判为拒答并明确失败，不用零分或条目均值代替。实测该期望的概率加权会精确报出裁判"总给量表中点"的信念，候选间分辨力低于条目均值路径，因此只作为可选对照模式。端点必须返回 `logprobs`，换模型或供应商后应重新实测：
 
 ```bat
 psych-sandbox probe logprob-scoring --case psycheval-cbt-001 --instrument wai
 ```
 
-该命令一次调用建立一个 `runs\runtime\时间__probe-logprob-scoring__编号` 目录，`probe.json` 记录评分带、请求参数、完整分布、总质量与结论；端点未返回 logprobs 或未通过质量门时退出码为 1，记录照常保留。该路径默认开启（`configs/runtime.yaml` 的 `logprob_scoring.enabled: true`；`simulate --logprob-scoring` 仍可显式打开）；探测不通过或只想保留条目均值时，把该值改为 `false`。该路径每个非复合量表多一次评判调用，RRO 与 PANAS 仍用官方公式，详见 [借鉴说明](notes/logprob_scoring_borrowing.md)。
+该命令一次调用建立一个 `runs\runtime\时间__probe-logprob-scoring__编号` 目录，`probe.json` 记录评分带、请求参数、完整分布、总质量与结论；端点未返回 logprobs 或未通过质量门时退出码为 1，记录照常保留。该路径默认关闭（`configs/runtime.yaml` 的 `logprob_scoring.enabled: false`；改 `true` 或传 `simulate --logprob-scoring` 才打开）。该路径每个非复合量表多一次评判调用，RRO 与 PANAS 仍用官方公式，详见 [借鉴说明](notes/logprob_scoring_borrowing.md)。
 
 运行真实 API：
 

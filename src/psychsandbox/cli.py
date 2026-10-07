@@ -105,7 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
     simulate.add_argument(
         "--logprob-scoring",
         action="store_true",
-        help="按论文式 8 的概率加权期望评分（默认已开启；先确认端点返回 logprobs）",
+        help="按论文式 8 的概率加权期望评分（默认关闭；开启前先确认端点返回 logprobs）",
     )
     simulate.add_argument("--resume-run")
     simulate.add_argument("--json", action="store_true")
