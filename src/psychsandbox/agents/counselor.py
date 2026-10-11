@@ -22,6 +22,7 @@ from ..domain import (
     SkillSelectionConfig,
     SkillSelectionEvidence,
 )
+from ..evaluation.session_review import validated_review
 from ..model_client import ModelGateway
 from ..prompts import render_prompt
 from ..runtime.dialogue_guard import DialogueLoopGuard
@@ -431,7 +432,7 @@ class CounselorAgent:
             output_schema=CounselorSessionReview,
             temperature=self.temperature,
         )
-        review = CounselorSessionReview.model_validate(result)
+        review = validated_review(CounselorSessionReview.model_validate(result), session)
         allowed_meta_ids = {item.meta_skill_id for item in next_meta}
         review.target_meta_skill_ids = list(
             dict.fromkeys(

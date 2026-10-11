@@ -615,12 +615,17 @@ def test_probe_cli_rejects_an_unknown_instrument(
 
 
 
-def test_runtime_config_exposes_the_scoring_block(root):
+@pytest.mark.parametrize("enabled", [True, False])
+def test_runtime_config_exposes_the_scoring_block(root, tmp_path, enabled):
     from psychsandbox.config import default_config
 
-    block = default_config(Path(root)).logprob_scoring
+    (tmp_path / "configs").mkdir()
+    (tmp_path / "configs" / "runtime.yaml").write_text(
+        "logprob_scoring:\n  enabled: " + str(enabled).lower() + "\n", encoding="utf-8"
+    )
+    block = default_config(tmp_path).logprob_scoring
 
-    assert block.enabled is True
+    assert block.enabled is enabled
     assert SandboxConfig(project_root=Path(root)).logprob_scoring.enabled is True
     assert block.mass_floor == pytest.approx(0.25)
     assert (block.top_logprobs, block.max_tokens, block.temperature) == (20, 16, 0.7)

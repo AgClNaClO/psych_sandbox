@@ -10,6 +10,9 @@ import pytest
 
 from psychsandbox.domain import (
     CounselorPlanning,
+    CounselorActorOutput,
+    DialogueEvidence,
+    HomeworkAssignment,
     SandboxConfig,
     SessionChecklistUpdate,
     SkillStatus,
@@ -72,15 +75,21 @@ def test_e7_e8_e9_feed_counselor_review_before_next_session(root, tmp_path, repo
             payload = kwargs["input_payload"]
             self.calls.append((schema.__name__, payload))
             if schema.__name__ == "_ClientInfoGet":
+                client_message = next(m for m in payload["dialogue"] if m["role"] == "client")
                 return schema.model_validate({
                     "client_info_get": {
                         "static_traits": StaticTraits(name="小林").model_dump(mode="json"),
-                        "main_problem": "最近总担心自己出错",
+                        "main_problem": client_message["content"],
                         "topic": "情绪管理",
                         "core_demands": "希望不再被担心牵着走",
                         "growth_experiences": [],
                         "theory": {},
                         "source_session": payload["current_session_number"],
+                        "field_evidence": [{
+                            "field_path": "main_problem", "value": client_message["content"],
+                            "evidence": {"turn_index": client_message["turn_index"],
+                                         "role": "client", "quote": client_message["content"]},
+                        }],
                     }
                 })
             return await super().complete_structured(**kwargs)
@@ -104,7 +113,7 @@ def test_e7_e8_e9_feed_counselor_review_before_next_session(root, tmp_path, repo
     )
     assert (
         first_review["allowed_memory"]["known_background"]["main_problem"]
-        == "最近总担心自己出错"
+        == result.sessions[0].messages[-1].content
     )
     assert first_review["allowed_memory"]["session_recaps"]
     planning_payloads = [
@@ -113,13 +122,13 @@ def test_e7_e8_e9_feed_counselor_review_before_next_session(root, tmp_path, repo
     second_session_planning = planning_payloads[1]
     assert (
         second_session_planning["known_background"]["main_problem"]
-        == "最近总担心自己出错"
+        == result.sessions[0].messages[-1].content
     )
     assert second_session_planning["session_memory"]["session_recaps"]
     assert result.sessions[1].messages[0].role == "counselor"
     persisted = sandbox.store.load_memory(result.run_id)
     assert persisted is not None
-    assert persisted.known_background.main_problem == "最近总担心自己出错"
+    assert persisted.known_background.main_problem == result.sessions[0].messages[-1].content
     assert len(persisted.session_recaps) == 2
 
 
@@ -151,10 +160,16 @@ def test_session_checklist_is_local_then_archived_into_complete_memory(
                     )
                 )
                 return result.model_copy(update={"checklist_update": update})
+            if schema is CounselorActorOutput:
+                result.response += "这周请试着记录一次压力事件。"
             if schema.__name__ == "_SessionSummaryWrapper":
                 self.summary_payloads.append(payload)
                 summary = result.session_summary.model_copy(update={
                     "homework": ["记录一次压力事件"],
+                    "homework_assignments": [HomeworkAssignment(
+                        text="记录一次压力事件",
+                        proposed_evidence=DialogueEvidence(turn_index=1, role="counselor", quote="这周请试着记录一次压力事件"),
+                    )],
                     "important_information": [],
                     "important_methods": [],
                     "important_results": [],

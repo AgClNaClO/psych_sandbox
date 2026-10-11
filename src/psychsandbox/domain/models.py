@@ -571,6 +571,30 @@ class UnlockedFact(StrictModel):
     disclosure_level: int = Field(default=1, ge=1, exclude=True)
 
 
+class DialogueEvidence(StrictModel):
+    """An exact quote at an identified role/turn; validated against the dialogue."""
+
+    turn_index: int = Field(ge=0)
+    role: Literal["client", "counselor"]
+    quote: str = Field(min_length=2)
+
+
+class MemoryFieldEvidence(StrictModel):
+    """Provenance of one string leaf; field_path omits list indices."""
+
+    field_path: str
+    value: str
+    kind: Literal["fact", "hypothesis"] = "fact"
+    source_session: int = Field(default=1, ge=1)
+    evidence: DialogueEvidence
+
+
+class HomeworkAssignment(StrictModel):
+    text: str
+    proposed_evidence: DialogueEvidence
+    agreed_evidence: DialogueEvidence | None = None
+
+
 class UnlockedClientInfo(StrictModel):
     """The counselor's sole structured knowledge, built only from spoken evidence."""
 
@@ -583,6 +607,7 @@ class UnlockedClientInfo(StrictModel):
     theory: dict[str, Any] = Field(default_factory=dict)
     facts: list[UnlockedFact] = Field(default_factory=list)
     updated_session: int = Field(default=0, ge=0)
+    field_evidence: list[MemoryFieldEvidence] = Field(default_factory=list)
 
 
 class MetaSkill(StrictModel):
@@ -634,7 +659,9 @@ class SessionPlan(StrictModel):
     target_atomic_skill_ids: list[str] = Field(default_factory=list)
     forbidden_actions: list[str] = Field(default_factory=list)
     strategy: str = ""
+    # Legacy audit parameter; no longer controls stopping or stage advancement.
     completion_threshold: float = Field(default=0.7, ge=0, le=1)
+    objective_priorities: dict[str, Literal["critical", "standard", "optional"]] = Field(default_factory=dict)
 
 
 class ExtractedClientInfo(StrictModel):
@@ -652,6 +679,7 @@ class ExtractedClientInfo(StrictModel):
     growth_experiences: list[str] = Field(default_factory=list)
     theory: dict[str, Any] = Field(default_factory=dict)
     source_session: int = Field(default=1, ge=1)
+    field_evidence: list[MemoryFieldEvidence] = Field(default_factory=list)
 
 
 class GoalAssessment(StrictModel):
@@ -700,6 +728,9 @@ class HomeworkItem(StrictModel):
     status: Literal["open", "done", "dropped", "replaced"] = "open"
     completion_evidence: str = ""
     carried_sessions: int = Field(default=0, ge=0)
+    agreement_status: Literal["proposed", "agreed", "unverified"] = "unverified"
+    proposed_evidence: DialogueEvidence | None = None
+    agreed_evidence: DialogueEvidence | None = None
 
 
 class ChecklistRecord(StrictModel):
@@ -790,6 +821,7 @@ class ClinicalSummary(StrictModel):
     completed_items: list[str] = Field(default_factory=list)
     pending_items: list[str] = Field(default_factory=list)
     item_updates: list[MemoryItemUpdate] = Field(default_factory=list)
+    homework_assignments: list[HomeworkAssignment] = Field(default_factory=list)
 
 
 _LEGACY_MEMORY_KEYS = frozenset({
@@ -1216,6 +1248,23 @@ class CounselorActorOutput(StrictModel):
         return self
 
 
+class ObjectiveAssessment(StrictModel):
+    objective: str
+    priority: Literal["critical", "standard", "optional"] = "standard"
+    status: Literal["completed", "partial", "not_completed", "not_assessed"]
+    evidence: list[DialogueEvidence] = Field(default_factory=list)
+    defer_to_next_stage: bool = False
+    reason: str = ""
+
+
+class TerminationReview(StrictModel):
+    """Independent, dialogue-bound conditions for ending the whole trajectory."""
+
+    mutual_agreement: list[DialogueEvidence] = Field(default_factory=list)
+    relapse_plan: list[DialogueEvidence] = Field(default_factory=list)
+    support_plan: list[DialogueEvidence] = Field(default_factory=list)
+
+
 class CounselorSessionReview(StrictModel):
     """Counselor self-review used to decide whether and how to replan."""
 
@@ -1228,6 +1277,10 @@ class CounselorSessionReview(StrictModel):
     revised_strategy: str = ""
     next_objectives: list[str] = Field(default_factory=list, max_length=8)
     target_meta_skill_ids: list[str] = Field(default_factory=list, max_length=3)
+    objective_assessments: list[ObjectiveAssessment] = Field(default_factory=list)
+    stage_ready: bool = False
+    termination: TerminationReview = Field(default_factory=TerminationReview)
+    validation_warnings: list[str] = Field(default_factory=list)
 
 
 class ClientGeneration(StrictModel):

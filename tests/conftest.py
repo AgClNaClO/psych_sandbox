@@ -15,6 +15,7 @@ sys.dont_write_bytecode = True
 
 from psychsandbox.artifacts import create_artifact_dir, write_json
 from psychsandbox.datasets import CaseRepository, convert_psycheval, merge_therapy_conversions
+from psychsandbox.datasets.profile_compiler import AtomicSpan
 
 
 @pytest.hookimpl(tryfirst=True)
@@ -120,17 +121,28 @@ def repository(root: Path, tmp_path_factory) -> CaseRepository:
     output = tmp_path_factory.mktemp("schema-v4") / "psycheval"
     manifests = []
     for therapy in ("bt", "cbt", "het", "pdt", "pmt"):
+        # Explicit test-only extraction: preserve whole source items so older
+        # dialogue fixtures keep their stable facts. Production uses the API
+        # atomizer; rules fallbacks must remain quarantined there.
+        spans_by_case = {}
+        for path in (root / "data" / therapy).glob("*.json"):
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            spans_by_case[str(raw["client_id"])] = {
+                f"client_info.growth_experiences[{index}]": [AtomicSpan(
+                    start=0, end=len(str(value).strip()), text=str(value).strip(),
+                    activation_tags=("经历", "成长", "过去"),
+                )]
+                for index, value in enumerate(raw["client_info"].get("growth_experiences", []))
+                if str(value).strip()
+            }
         manifest = convert_psycheval(
                 root,
                 output / "by_therapy" / therapy,
                 therapy=therapy,
-                atomizer="rules",
+                free_text_spans_by_case=spans_by_case,
+                atomizer="extractive",
+                atomizer_model="deterministic-test-double",
             )
-        manifest.update({
-            "atomizer": "extractive",
-            "atomizer_prompt_version": "psycheval_extract_only_v2",
-            "atomizer_model": "deterministic-test-double",
-        })
         manifests.append(manifest)
     merge_therapy_conversions(output, manifests)
     return CaseRepository(output, raw_data_dir=root)

@@ -20,6 +20,7 @@ from ..domain import (
     SessionStage,
 )
 from .leakage import normalize_disclosure_text
+from .evidence import is_grounded
 
 _RISK_ORDER = (RiskLevel.LOW, RiskLevel.MEDIUM, RiskLevel.HIGH, RiskLevel.IMMINENT)
 
@@ -114,6 +115,24 @@ class MemoryConsolidator:
         notes = warnings if warnings is not None else []
         clinical = session.clinical_summary
         dialogue = "\n".join(message.content for message in session.messages)
+        if clinical is not None:
+            assignments = []
+            for item in clinical.homework_assignments:
+                if not is_grounded(item.proposed_evidence, session.messages, role="counselor"):
+                    notes.append("作业建议缺少咨询师对话证据，拒绝写入")
+                    continue
+                item = item.model_copy(deep=True)
+                if item.agreed_evidence is not None and not (
+                    is_grounded(item.agreed_evidence, session.messages, role="client")
+                    and item.agreed_evidence.turn_index >= item.proposed_evidence.turn_index
+                ):
+                    notes.append("作业同意证据无效，保留为建议")
+                    item.agreed_evidence = None
+                assignments.append(item)
+            if clinical.homework and not assignments:
+                notes.append("作业文本没有本场布置证据，拒绝写入")
+            clinical.homework_assignments = assignments
+            clinical.homework = _unique([item.text for item in assignments])
         recap = self._recap(session, clinical)
         homework = self._homework(memory, session, recap, dialogue, notes)
         checklist = self._checklist(
@@ -235,13 +254,24 @@ class MemoryConsolidator:
             if match is not None:
                 item.status = "done"
                 item.completion_evidence = match
+        assignments = {item.text: item for item in clinical.homework_assignments} if clinical else {}
         for text in recap.homework:
-            if any(_same_item(text, item.text) for item in items if item.status == "open"):
+            assignment = assignments[text]
+            existing = next((item for item in items
+                             if item.status == "open" and _same_item(text, item.text)), None)
+            if existing is not None:
+                if assignment.agreed_evidence is not None:
+                    existing.agreement_status = "agreed"
+                    existing.proposed_evidence = assignment.proposed_evidence
+                    existing.agreed_evidence = assignment.agreed_evidence
                 continue
             items.append(HomeworkItem(
                 item_id=f"homework-s{session.session_index}-{len(items) + 1}",
                 text=text,
                 source_session=session.session_index,
+                agreement_status="agreed" if assignment.agreed_evidence else "proposed",
+                proposed_evidence=assignment.proposed_evidence,
+                agreed_evidence=assignment.agreed_evidence,
             ))
         return [item for item in items if item.status == "open"]
 

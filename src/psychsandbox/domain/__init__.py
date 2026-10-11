@@ -1,4 +1,9 @@
 from .models import (
+    DialogueEvidence,
+    MemoryFieldEvidence,
+    HomeworkAssignment,
+    ObjectiveAssessment,
+    TerminationReview,
     AtomicSkill,
     BigFive,
     BlockedMemorySignal,
@@ -88,6 +93,11 @@ from .models import (
 )
 
 __all__ = [
+    "DialogueEvidence",
+    "MemoryFieldEvidence",
+    "HomeworkAssignment",
+    "ObjectiveAssessment",
+    "TerminationReview",
     "AtomicSkill",
     "BigFive",
     "BlockedMemorySignal",

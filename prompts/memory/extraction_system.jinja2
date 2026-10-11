@@ -24,3 +24,11 @@
 - theory：仅提取 theory_select 中存在的流派字段；不存在的流派字段保持空。
 - 保持与既有档案字段一致，不做字段外扩充。
 输出只返回一个 JSON 对象，键名为 client_info_get，必须可被 json.loads 解析。
+
+证据契约：为每个非空字符串叶子输出 field_evidence：field_path、value、kind、
+source_session、evidence（turn_index、role="client"、quote）。field_path 用点分隔字典键，
+列表不写索引，例如 static_traits.name、growth_experiences、theory.cbt.special_situations.event。
+value 必须与对应字段内容完全一致；quote 必须是该轮来访者的逐字原话，不能引用咨询师。
+没有出处的字段留空。theory 中推断的信念、机制或认知模式标为 kind="hypothesis"；
+事件和现实经历只有在原话支持时标为 fact。不得把假设写成确认事实。
+可定位的对话消息见输入 dialogue；本场编号由程序设置，不自行推测。

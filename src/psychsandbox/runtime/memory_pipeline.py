@@ -4,7 +4,6 @@ from typing import Any
 
 from ..domain.models import StrictModel
 from ..domain import (
-    ClientProfile,
     ClinicalSummary,
     ExtractedClientInfo,
     UnlockedClientInfo,
@@ -14,6 +13,7 @@ from ..domain import (
     StaticTraits,
 )
 from ..prompts import render_prompt
+from .evidence import is_grounded, prune_leaves, string_leaves
 
 
 # Prompts mirror the PsychEval E.7/E.8/E.9 designs while staying compatible with
@@ -51,6 +51,7 @@ class MemoryExtractionAgent:
             "current_session_number": session_number,
             "current_session_theory": theory_select,
             "current_session_dialogue": _format_dialogue(dialogue),
+            "dialogue": [message.model_dump(mode="json") for message in dialogue],
         }
         result = await self.gateway.complete_structured(
             role="summarizer",
@@ -64,7 +65,19 @@ class MemoryExtractionAgent:
         # PsychEval language_features controls the private client actor; it is
         # never a counselor-memory field, even if an extractor tries to infer it.
         raw.static_traits.language_features = ""
-        return raw
+        allowed = []
+        leaves = set(string_leaves(raw.model_dump(exclude={"field_evidence", "source_session"})))
+        for item in raw.field_evidence:
+            if ((item.field_path, item.value) in leaves
+                    and is_grounded(item.evidence, dialogue, role="client")
+                    and (item.kind == "fact" or item.field_path.startswith("theory."))):
+                item.source_session = session_number
+                allowed.append(item)
+        accepted = {(item.field_path, item.value) for item in allowed}
+        values = prune_leaves(raw.model_dump(exclude={"field_evidence", "source_session"}), accepted)
+        return ExtractedClientInfo.model_validate({
+            **values, "source_session": session_number, "field_evidence": allowed,
+        })
 
 
 class ClientMergeAgent:
@@ -75,14 +88,13 @@ class ClientMergeAgent:
         self,
         history: UnlockedClientInfo,
         current: ExtractedClientInfo,
-        global_profile: ClientProfile,
         therapy_select: list[str],
     ) -> UnlockedClientInfo:
         history_dump = history.model_dump(mode="json")
         merge_payload = {
             "history_profile": history_dump,
             "current_profile": current.model_dump(mode="json"),
-            "global_profile": _profile_for_global(global_profile),
+            "client_id": history.client_id,
             "session_number": current.source_session,
             "theory_select": therapy_select,
         }
@@ -95,7 +107,14 @@ class ClientMergeAgent:
         )
         merged = _ClientInfoMerge.model_validate(result).client_info_merge
         merged = _prevent_global_backfill(merged, history, current)
-        merged.facts = history.facts
+        merged.client_id = history.client_id
+        merged.updated_session = current.source_session
+        merged.facts = list(history.facts)
+        leaves = set(string_leaves(merged.model_dump(exclude={"field_evidence", "facts"})))
+        merged.field_evidence = [
+            item for item in history.field_evidence + current.field_evidence
+            if (item.field_path, item.value) in leaves
+        ]
         return merged
 
 
@@ -122,6 +141,7 @@ class DialogueSummaryAgent:
                 "objective": plan.objectives,
             },
             "session_dialogue": _format_dialogue(dialogue),
+            "dialogue": [message.model_dump(mode="json") for message in dialogue],
             "plan": plan.model_dump(mode="json"),
             "session_checklist": checklist.model_dump(mode="json"),
             "memory_items": memory_items or {},
@@ -158,20 +178,6 @@ def _format_dialogue(dialogue: list[Message]) -> str:
     return "\n".join(lines)
 
 
-def _profile_for_global(profile: ClientProfile) -> dict[str, Any]:
-    traits = profile.static_traits.model_dump(mode="json")
-    traits.pop("language_features", None)
-    return {
-        "client_id": profile.client_id,
-        "static_traits": traits,
-        "main_problem": profile.main_problem,
-        "topic": profile.topic,
-        "core_demands": profile.core_demands,
-        "growth_experiences": profile.growth_experiences,
-        "theory": profile.theory,
-    }
-
-
 def _prevent_global_backfill(
     merged: UnlockedClientInfo,
     history: UnlockedClientInfo,
@@ -206,8 +212,20 @@ def _prevent_global_backfill(
             or ""
         )
     updates["static_traits"] = StaticTraits(**trait_updates)
-    allowed_theory_keys = set(history.theory) | set(current.theory)
-    updates["theory"] = {
-        key: value for key, value in merged.theory.items() if key in allowed_theory_keys
-    }
+    allowed_theory = set(string_leaves(history.theory)) | set(string_leaves(current.theory))
+    updates["theory"] = _merge_known_tree(
+        history.theory, prune_leaves(merged.theory, allowed_theory)
+    )
     return merged.model_copy(update=updates)
+
+
+def _merge_known_tree(history: Any, current: Any) -> Any:
+    """Retain omitted historical leaves while merging authorized new values."""
+    if isinstance(history, dict) and isinstance(current, dict):
+        return {key: _merge_known_tree(history.get(key), current[key]) if key in current else value
+                for key, value in history.items()} | {
+                    key: value for key, value in current.items() if key not in history
+                }
+    if isinstance(history, list) and isinstance(current, list):
+        return history + [value for value in current if value not in history]
+    return current if current is not None else history

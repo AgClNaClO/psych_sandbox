@@ -1,5 +1,5 @@
 seed: 42
-max_turns_per_session: 8
+max_turns_per_session: 20
 session_count: 3
 temperature:
   client: 0.8
@@ -36,7 +36,7 @@ logprob_scoring:
   # 按论文式 8 的概率加权期望给 PsychEval 量表打分；默认开启。
   # 开启前先用 psych-sandbox probe logprob-scoring 确认端点返回 logprobs；
   # 端点不支持时改为 enabled: false（或去掉 simulate --logprob-scoring）。
-  enabled: true
+  enabled: false
   mass_floor: 0.25  # 数值 token 总概率质量低于此值判为拒答并明确失败
   top_logprobs: 20
   max_tokens: 16

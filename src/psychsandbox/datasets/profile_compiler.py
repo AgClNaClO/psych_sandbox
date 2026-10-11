@@ -23,6 +23,16 @@ from ..domain import (
 
 PROFILE_SCHEMA_VERSION = "4"
 ATOMIZER_PROMPT_VERSION = "psycheval_extract_only_v2"
+CONVERSION_POLICY_VERSION = "disclosure_dependencies_review_cost_negation_v2"
+
+# Synthetic expression costs, not inferred clinical measurements.
+EMOTIONAL_COST_BY_TIER = {
+    TrustTier.ROUTINE: 0.0,
+    TrustTier.BASIC: 0.0,
+    TrustTier.MODERATE: 0.1,
+    TrustTier.SENSITIVE: 0.3,
+    TrustTier.DEEP: 0.45,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,6 +208,7 @@ class PsychEvalProfileCompiler:
 
         nodes = _deduplicate_nodes(nodes)
         disclosures = _deduplicate_disclosures(disclosures)
+        disclosures = _apply_disclosure_policy(disclosures, nodes)
         formulation = _build_five_ps(info, therapy_code, nodes)
         interaction = _build_interaction_prior(info, therapy_code, nodes)
         expression = _build_expression_style(nodes)
@@ -256,6 +267,51 @@ def _routine_disclosure(
         activation_examples=[f"请问你的{activation_tags[0]}是什么？"],
         trust_tier=TrustTier.ROUTINE,
     )
+
+
+def _apply_disclosure_policy(
+    items: list[DisclosureItem], nodes: list[EvidenceNode]
+) -> list[DisclosureItem]:
+    node_index = {node.evidence_id: node for node in nodes}
+    groups: dict[str, list[tuple[DisclosureItem, EvidenceNode]]] = {}
+    for item in items:
+        node = node_index[item.evidence_ids[0]]
+        if node.source_path.startswith("client_info.growth_experiences["):
+            group = node.source_path
+        elif node.source_path.startswith("client_info.special_situations"):
+            group = node.source_path.rsplit(".", 1)[0]
+        else:
+            continue
+        groups.setdefault(group, []).append((item, node))
+
+    dependencies: dict[str, list[str]] = {}
+    for group, entries in groups.items():
+        events = [
+            (item, node) for item, node in entries
+            if node.kind in {"event", "trigger"} and not node.needs_review
+        ]
+        # Multiple events are ambiguous: do not invent which one explains a thought.
+        if len(events) != 1:
+            continue
+        event, event_node = events[0]
+        for item, node in entries:
+            if node.needs_review or item.item_id == event.item_id:
+                continue
+            if group.startswith("client_info.growth_experiences[") and (
+                node.kind not in {"emotion", "belief", "meaning", "coping", "consequence"}
+                or node.source_start < event_node.source_end
+            ):
+                continue
+            if event.session_scope and (
+                not item.session_scope
+                or not set(item.session_scope).issubset(event.session_scope)
+            ):
+                continue
+            dependencies[item.item_id] = [event.item_id]
+    return [item.model_copy(update={
+        "depends_on": dependencies.get(item.item_id, item.depends_on),
+        "emotional_cost": EMOTIONAL_COST_BY_TIER[item.trust_tier],
+    }) for item in items]
 
 
 # parent field, disclosure category, fields, activation fallbacks, examples

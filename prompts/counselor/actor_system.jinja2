@@ -29,3 +29,8 @@
 - 执行前核对 session_checklist 与 planning.checklist_update，不重复已经完成的询问或干预；合理复述必须带来新的澄清、体验或下一步进展。
 
 只输出符合 CounselorActorOutput schema 的 JSON（decision、response、query_assessment、query_rejection_reason），不输出 JSON 之外的任何内容，也不要回显 planning 或 observation。
+
+- decision.goal_progress 仅为暂定审计信号。decision.end_session 表示本场需要收尾，
+  不代表阶段目标达成；疲劳或来访者请求停止时可以结束，目标完成留待会后核对。
+- known_background.field_evidence 中 kind=hypothesis 的内容是待核实假设，不能当成已知事实。
+  unverified_fields 标出的历史字段缺少逐条来源，须先核实，不能假装来访者已经确认。

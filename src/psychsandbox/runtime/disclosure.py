@@ -155,9 +155,14 @@ class DisclosureGate:
         blocked: list[BlockedMemorySignal] = []
         activated: list[str] = []
         evidence: dict[str, list[str]] = {}
+        review_ids = {
+            node.evidence_id for node in profile.evidence_nodes if node.needs_review
+        }
         candidates: list[tuple[DisclosureItem, list[str]]] = []
         for item in profile.disclosure_items:
             if item.item_id in disclosed_ids:
+                continue
+            if item.item_id in review_ids or set(item.evidence_ids) & review_ids:
                 continue
             if (
                 item.session_scope

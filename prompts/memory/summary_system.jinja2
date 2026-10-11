@@ -30,3 +30,9 @@
    - 没有变化的条目不要出现在 item_updates 里；没有证据时不得写 done。
 8. homework 只写本次会谈新布置的作业，不重复历史作业，也不重复已完成的作业。
 输出只返回一个 JSON 对象（键名 session_summary），必须可被 json.loads 解析。
+
+9. homework_assignments 只记录本场真正提出的作业，每项含 text、proposed_evidence、
+   agreed_evidence。证据必须含 turn_index、role、逐字 quote，并来自输入 dialogue。
+   proposed_evidence 必须引用咨询师实际布置作业的话；agreed_evidence 仅在来访者明确同意
+   该作业时填写，否则为 null。建议、同意与完成是不同状态，不能把计划里的作业当成已布置。
+   homework 只能是这些已布置项的文本列表；尚未提出的下一场建议写入 pending_items。

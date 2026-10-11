@@ -248,6 +248,12 @@ def _session_section(session: SessionRecord) -> str:
     if review:
         review_items.extend(review.evidence)
         review_items.extend(review.improvement_areas)
+        for item in review.objective_assessments:
+            quotes = "；".join(f"{quote.role} T{quote.turn_index}：{quote.quote}" for quote in item.evidence)
+            review_items.append(f"{item.objective}：{item.status}；{quotes}")
+            if item.defer_to_next_stage:
+                review_items.append(f"延期理由：{item.reason}")
+        review_items.extend(review.validation_warnings)
         if review.revised_strategy:
             review_items.append(f"调整策略：{review.revised_strategy}")
     review_html = (
@@ -265,6 +271,7 @@ def _session_section(session: SessionRecord) -> str:
       <p>{_join_objectives(session.plan.objectives[:3])}</p>
     </div>
   </div>
+  <p class="muted">本场停止：{escape(session.end_reason)} · 阶段动作：{escape(session.longitudinal_report.stage_action if session.longitudinal_report else '未判定')} · 疗程终止：{'已满足条件' if session.longitudinal_report and session.longitudinal_report.stage_action == 'close' else '未确认'}</p>
   {summary_html}
   {_rollout_selection(session.rollout_selection)}
   <section class="panel">

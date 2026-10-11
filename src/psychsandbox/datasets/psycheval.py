@@ -27,6 +27,7 @@ from ..skills import SkillRegistry
 from ..therapies import normalize_therapy_id
 from .profile_compiler import (
     ATOMIZER_PROMPT_VERSION,
+    CONVERSION_POLICY_VERSION,
     PROFILE_SCHEMA_VERSION,
     AtomicSpan,
     PsychEvalProfileCompiler,
@@ -50,6 +51,27 @@ _FACT_TOPIC_TERMS = (
     "实习", "工作", "考试", "毕业", "失业", "睡眠", "争吵", "批评",
     "失败", "拒绝", "离开", "生病", "医院", "焦虑", "抑郁",
 )
+
+
+def _contains_unnegated_term(text: str, terms: tuple[str, ...]) -> bool:
+    """Recognize local negation in symptom lists; not a clinical classifier.
+
+    Negation spans only short modifiers and coordinated symptom words. Clause
+    boundaries and contrast words prevent it from masking later affirmations.
+    """
+    symptoms = "焦虑|紧张|担心|失眠|抑郁|低落|无力|疲惫"
+    negation = re.compile(
+        rf"(?:没有|否认|未见|未出现|未|无|不再|并不|不)"
+        rf"(?:(?:出现|感到|觉得|感觉|明显|任何|的|了|症状|也|和|及|、|\s)|(?:{symptoms}))*$"
+    )
+    for term in terms:
+        for match in re.finditer(re.escape(term), text):
+            prefix = re.split(r"[。！？；，\n]|但是|但|然而|不过", text[:match.start()])[-1]
+            if re.search(r"(?:不是|并非|不能说)(?:没有|不).*?$", prefix):
+                return True
+            if not negation.search(prefix):
+                return True
+    return False
 
 
 def _fact_activation_tags(content: str, fallback: list[str]) -> list[str]:
@@ -781,16 +803,16 @@ class PsychEvalAdapter:
 
     @staticmethod
     def _initial_state(info: dict[str, Any]) -> ClientState:
-        text = " ".join(
-            str(value)
+        texts = [
+            str(value or "")
             for value in (
                 info.get("main_problem", ""),
                 info.get("core_demands", ""),
                 info.get("static_traits", {}).get("medical_history", ""),
             )
-        )
-        anxious = any(term in text for term in ("焦虑", "紧张", "担心", "失眠"))
-        depressed = any(term in text for term in ("抑郁", "低落", "无力", "疲惫"))
+        ]
+        anxious = any(_contains_unnegated_term(text, ("焦虑", "紧张", "担心", "失眠")) for text in texts)
+        depressed = any(_contains_unnegated_term(text, ("抑郁", "低落", "无力", "疲惫")) for text in texts)
         return ClientState(
             valence=0.28 if depressed else 0.38,
             arousal=0.7 if anxious else 0.56,
@@ -974,6 +996,7 @@ def convert_psycheval(
             ATOMIZER_PROMPT_VERSION if atomizer == "extractive" else None
         ),
         "atomizer_model": atomizer_model,
+        "conversion_policy_version": CONVERSION_POLICY_VERSION,
         "atomization_audit": atomization_audit or {
             "cache_hits": 0,
             "fallbacks": 0,
@@ -1031,7 +1054,11 @@ async def convert_psycheval_extractive(
         )
         for path, raw in raw_by_path.items()
     )
-    pilot_paths = [lengths[0][1], lengths[len(lengths) // 2][1], lengths[-1][1]]
+    if not lengths:
+        raise FileNotFoundError(f"No PsychEval files found under {source}")
+    pilot_paths = list(dict.fromkeys([
+        lengths[0][1], lengths[len(lengths) // 2][1], lengths[-1][1]
+    ]))
     remaining = [path for _, path in lengths if path not in pilot_paths]
     pilot_paths.extend(random.Random(42).sample(remaining, k=min(2, len(remaining))))
     pilot_total = 0
@@ -1200,6 +1227,11 @@ def merge_therapy_conversions(
         ),
         "atomizer_model": next((item.get("atomizer_model") for item in manifests if item.get("atomizer_model")), None),
         "atomization_audit": atomization_totals,
+        "conversion_policy_version": (
+            CONVERSION_POLICY_VERSION
+            if all(item.get("conversion_policy_version") == CONVERSION_POLICY_VERSION for item in manifests)
+            else None
+        ),
         "five_ps_coverage": coverage_counts,
     }
     (output_dir / "manifest.json").write_text(
@@ -1283,6 +1315,7 @@ class CaseRepository:
             or int(manifest.get("case_count", 0)) != 341
             or manifest.get("atomizer") != "extractive"
             or manifest.get("atomizer_prompt_version") != ATOMIZER_PROMPT_VERSION
+            or manifest.get("conversion_policy_version") != CONVERSION_POLICY_VERSION
             or not manifest.get("atomizer_model")
         ):
             raise RuntimeError(

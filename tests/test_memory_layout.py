@@ -8,6 +8,8 @@ from psychsandbox.domain import (
     ChecklistMemory,
     ClientState,
     ClinicalSummary,
+    DialogueEvidence,
+    HomeworkAssignment,
     HomeworkItem,
     MemoryItemUpdate,
     MemoryViewConfig,
@@ -208,10 +210,15 @@ def test_new_session_assigns_homework_and_archives_the_checklist():
     session = _record(1, clinical=ClinicalSummary(
         session_index=1,
         homework=["记录一次压力事件"],
+        homework_assignments=[HomeworkAssignment(
+            text="记录一次压力事件",
+            proposed_evidence=DialogueEvidence(turn_index=0, role="counselor", quote="记录一次压力事件"),
+        )],
         important_information=["来访者希望称呼为明山"],
         pending_items=["讨论睡眠"],
     ))
 
+    session.messages[0].content = "这周请试着记录一次压力事件。"
     memory = CONSOLIDATOR.consolidate(_memory(), session, next_index=2)
 
     assert [item.text for item in memory.last_homework] == ["记录一次压力事件"]

@@ -20,6 +20,7 @@ import json
 from typing import Any
 
 from ..domain import MemoryViewConfig, SessionMemory
+from .evidence import string_leaves
 
 BUDGET_KEY = "view_budget"
 
@@ -53,6 +54,13 @@ class MemoryViewBuilder:
         if isinstance(traits, dict):
             # The private expression style drives the simulated client only.
             traits.pop("language_features", None)
+        background = view.get("known_background", {})
+        proven = {(item["field_path"], item["value"]) for item in background.get("field_evidence", [])}
+        content = {key: value for key, value in background.items()
+                   if key not in {"client_id", "facts", "field_evidence", "updated_session"}}
+        missing = sorted({path for path, value in string_leaves(content) if (path, value) not in proven})
+        if missing:
+            background["unverified_fields"] = missing
         for recap in view.get("session_recaps", []):
             for key in AUDIT_ONLY_RECAP_KEYS:
                 recap.pop(key, None)

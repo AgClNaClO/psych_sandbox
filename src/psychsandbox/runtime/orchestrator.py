@@ -207,7 +207,6 @@ class CounselingSandbox:
                     memory.known_background = await self.client_merger.merge(
                         memory.known_background,
                         extracted,
-                        case.profile,
                         _therapy_codes(case.therapy),
                     )
                 spoken = normalize_disclosure_text(" ".join(
@@ -306,9 +305,6 @@ class CounselingSandbox:
                         session.safety_verdict = self.safety_gate.evaluate(
                             session, case, memory_before
                         )
-                    session.longitudinal_report = self.longitudinal.evaluate(
-                        session, sessions
-                    )
                     # Only the selected dialogue reaches E.7/E.8/E.9.  Review
                     # and next-session planning must see the newly merged memory.
                     await self._consolidate_memory_pipeline(
@@ -326,16 +322,12 @@ class CounselingSandbox:
                     baseline_next = self._baseline_next_plan(
                         case, session, session_index + 1
                     )
-                    provisional_next = self.plan_builder.build(
-                        session.plan,
-                        baseline_next,
-                        session.longitudinal_report,
-                    )
                     session.counselor_review = await self.counselor.review_session(
                         session=session,
                         memory=memory,
-                        baseline_next=provisional_next,
+                        baseline_next=baseline_next.model_copy(update={"stage": session.plan.stage}),
                     )
+                    session.longitudinal_report = self.longitudinal.evaluate(session, sessions)
                     session.next_session_plan = self.plan_builder.build(
                         session.plan,
                         baseline_next,
@@ -376,7 +368,7 @@ class CounselingSandbox:
                                 if self.config.patientact_enabled
                                 else "direct_generation_v1"
                             ),
-                            "trace_schema_version": 5,
+                            "trace_schema_version": 6,
                         },
                         memory_before=memory_before,
                         plan=plan,
@@ -506,8 +498,6 @@ class CounselingSandbox:
             output_risk = self.safety.assess_output(counselor_turn.response, risk)
             risks.append(output_risk)
             decisions.append(counselor_turn.decision)
-            if counselor_turn.decision.goal_progress >= plan.completion_threshold:
-                counselor_turn.decision.end_session = True
             interventions.extend(counselor_turn.decision.selected_atomic_skill_ids)
             messages.append(Message(
                 session_index=plan.session_index,
@@ -604,7 +594,7 @@ class CounselingSandbox:
                     label=progress_label,
                 ))
             if counselor_turn.decision.end_session:
-                end_reason = "counselor_goal_complete"
+                end_reason = "counselor_stopped"
                 break
         summary = self._summary(plan, messages, interventions)
         if turn_progress:
@@ -727,7 +717,7 @@ class CounselingSandbox:
         """Run the PsychEval E.7/E.8/E.9 post-session consolidation pipeline.
 
         E.7 extracts only what the client actually disclosed in this session,
-        E.8 merges it into the counselor's longitudinal, ground-truth-gated
+        E.8 merges it into the counselor's longitudinal, dialogue-grounded
         profile, and E.9 writes the evidence-bound clinical summary that bridges
         to the next session.
         """
@@ -740,7 +730,6 @@ class CounselingSandbox:
         memory.known_background = await self.client_merger.merge(
             memory.known_background,
             extracted,
-            case.profile,
             therapy_codes,
         )
         session.clinical_summary = await self.summarizer.summarize(

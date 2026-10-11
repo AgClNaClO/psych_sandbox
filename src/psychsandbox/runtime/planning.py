@@ -34,8 +34,10 @@ class PlanBuilder:
         strategy = baseline_next.strategy
         target_meta_skill_ids = list(baseline_next.target_meta_skill_ids)
         if counselor_review is not None:
-            if counselor_review.next_objectives:
-                objectives = counselor_review.next_objectives + objectives
+            objectives = (
+                counselor_review.unmet_objectives
+                + counselor_review.next_objectives + objectives
+            )
             if counselor_review.replanning_required:
                 strategy = counselor_review.revised_strategy
                 target_meta_skill_ids = counselor_review.target_meta_skill_ids
@@ -48,13 +50,25 @@ class PlanBuilder:
         action = longitudinal.stage_action
         if action == "close":
             objectives = [stage_actions["close"]]
-        elif action in stage_actions:
+        elif action in {"hold", "regress"}:
             objectives.insert(0, stage_actions[action])
+        ordered = list(dict.fromkeys(objectives))
+        carry = list(dict.fromkeys(counselor_review.unmet_objectives)) if counselor_review else []
+        # The cap applies to new goals, never silently drops carried obligations.
+        chosen = ordered[:max(8, len(carry) + int(action in {"hold", "regress"}))]
+        reviewed_priorities = {
+            item.objective: item.priority for item in counselor_review.objective_assessments
+        } if counselor_review else {}
         return baseline_next.model_copy(
             update={
                 "therapy": current.therapy,
                 "stage": stage,
-                "objectives": list(dict.fromkeys(objectives))[:8],
+                "objectives": chosen,
+                "objective_priorities": {
+                    objective: reviewed_priorities.get(objective, current.objective_priorities.get(
+                        objective, baseline_next.objective_priorities.get(objective, "standard")
+                    )) for objective in chosen
+                },
                 "strategy": strategy,
                 "target_meta_skill_ids": target_meta_skill_ids,
             }

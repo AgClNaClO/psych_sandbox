@@ -52,18 +52,18 @@
 `runtime/orchestrator.py::run_case` 每场会谈的实际顺序是：
 
 1. 规则安全/披露门控（`SessionSafetyGate`，用会话前的记忆副本判定"披露前引用"）。
-2. 纵向评估（状态差值、趋势、阶段动作）。
-3. E.7 会话信息提取 → E.8 档案合并 → E.9 临床摘要（`runtime/memory_pipeline.py`）；E.9 额外收到 `memory_items` 台账（开放作业、开放待办、待核实项及其 `item_id`）。
-4. `MemoryConsolidator.consolidate` 把本场结果并入 `session_recaps`、`last_homework`、`checklist`；被拒绝的完成更新写入运行日志（`记忆整合提示：…`）。
-5. 咨询师会后自评（读取刚合并的记忆）→ `PlanBuilder` 生成下一次计划。
+2. E.7 会话信息提取 → E.8 档案合并 → E.9 临床摘要（`runtime/memory_pipeline.py`）；E.9 额外收到 `memory_items` 台账（开放作业、开放待办、待核实项及其 `item_id`）。
+3. `MemoryConsolidator.consolidate` 把本场结果并入 `session_recaps`、`last_homework`、`checklist`；被拒绝的完成更新写入运行日志（`记忆整合提示：…`）。
+4. 咨询师会后自评（读取刚合并的记忆），逐目标引用完整对话；程序校验角色、轮次和原话。
+5. 纵向评估结合自评确定阶段动作 → `PlanBuilder` 生成下一次计划。会内百分比不控制推进或终止。
 6. 构造轨迹（含会话前记忆副本 `Trajectory.memory_before`）→ 提交 SQLite `memories`/`sessions`/`trajectories` → 同步 `trajectory.jsonl`。
 
 会话内的 `facts` 由 `DisclosureGate.unlock` 生成、`ClientSimulator.merge_unlocked` 合并，并在 `_run_session` 结束时写回 `known_background.facts`。
 
 | 步骤 | 模板 | 输入 | 输出与门控 |
 |---|---|---|---|
-| E.7 提取 | `prompts/memory/extraction_system.jinja2` | 本场完整对话、流派代码、会话序号 | `ExtractedClientInfo`；代码强制清空 `language_features`。提示词要求只提取来访者亲口表达的内容。 |
-| E.8 合并 | `prompts/memory/merge_system.jinja2` | 历史档案、本场提取、全局背景（脱敏）、会话序号 | `UnlockedClientInfo`；代码用 `_prevent_global_backfill` 做等值白名单，并强制 `facts = history.facts`。 |
+| E.7 提取 | `prompts/memory/extraction_system.jinja2` | 本场完整对话、流派代码、会话序号 | `ExtractedClientInfo`；代码强制清空 `language_features`；每个非空字符串叶子必须有 `field_evidence`，校验其角色、轮次、原话及字段值。 |
+| E.8 合并 | `prompts/memory/merge_system.jinja2` | 历史档案、本场经原话校验的提取、会话序号（不接收私有病例） | `UnlockedClientInfo`；代码用 `_prevent_global_backfill` 做等值白名单，`theory` 逐叶子过滤；管理编号、会话序号、`facts` 和已验证来源由程序设置。 |
 | E.9 摘要 | `prompts/memory/summary_system.jinja2` | 本场对话、会话计划、最后一轮清单、记忆台账 | `ClinicalSummary`（含 `item_updates`）与清单字段去重合并；提示词要求证据来自本场对话。 |
 
 ## 4. 会话内工作记忆 `SessionChecklist`
@@ -141,9 +141,9 @@ view_budget: { mode, limit, chars, truncated, dropped_sessions, dropped_archive_
 3. **退休的质量仍取决于 E.9。** 代码能拒绝"没有证据的完成"，但不能保证 E.9 主动为每个开放条目给出更新；未更新的条目会留在 `open_items` 里（视图按 `focus_items_max` 截断，并记录 `dropped_focus_items`）。
 4. **`checklist.per_session` 与 `session_recaps` 是"明细 + 叙述"关系。** 归档清单条目不进入 recap，因此窗口模式下老场次的清单条目只能通过 `earlier_session_archive` 与 SQLite 回溯。
 5. **`risk` 只记录非低风险场次。** 低风险轮次仍只留在 `SessionRecord.risk_events` 与会话产物里。
-6. **档案字段仍没有来源标记。** 除 `facts` 外，`main_problem`、`topic`、`core_demands`、`static_traits` 不携带 `source_session` 或证据原文，一旦写入就缺少可审计的修正路径。
-7. **`theory` 与 `updated_session` 约束不全。** 提示词要求只合并 `theory_select` 中的流派字段，代码只按"历史或本场已有的键"过滤；`updated_session` 取决于合并模型的输出。
-8. **E.7/E.9 的输出没有对话级证据校验（退休更新除外）。** 提取与摘要仍只由提示词约束"必须来自对话"；只有 `item_updates.status="done"` 有代码级证据校验。
+6. **旧档案可能缺少来源。** 新提取具有 `field_evidence`；旧字段在读取视图中列入 `unverified_fields`，原始记录不改写、不自动补造证据。
+7. **引用真实不等于语义正确。** 程序逐字段验证原话存在，理论推断标为 `hypothesis`；引用是否真正支持解释仍依赖模型和人工审计。
+8. **叙述摘要仍依赖模型。** E.7 字段、E.9 新作业和自评目标有定位证据校验，E.9 自由叙述与五类清单并非所有句子都经过语义证明；已有事项退休的兼容匹配机制保持原行为。
 
 ## 10. 修改记忆时的检查项
 
@@ -153,3 +153,14 @@ view_budget: { mode, limit, chars, truncated, dropped_sessions, dropped_archive_
 4. **更新测试：** `tests/test_memory_layout.py`（四字段契约、迁移、退休、视图预算）、`tests/test_components.py`（payload 契约、清单合并、legacy 迁移、反回填）、`tests/test_e2e.py`（E.7→E.8→E.9→自评链路、记忆持久化）、`tests/test_dialogue_loop.py`、`tests/test_rollout_runtime.py`（候选隔离）。
 5. **提示词与版本：** 改动 `prompts/` 下任何被消费的模板时要同步 `src/psychsandbox/prompts.py::PROMPT_TREE_VERSION`。
 6. **产物与文档：** 记忆结构变化会影响 `result.json`、SQLite、`trajectory.jsonl` 和报告内容；新增输出路径或迁移时按 [运行产物约定](RUN_ARTIFACTS.md) 处理并保留既有运行。
+
+## 11. 证据契约与会谈控制（2026-10-11）
+
+- 新轨迹 `trace_schema_version=6`。新增字段均有默认值，旧四字段记忆、旧自评、旧结束原因仍可读取；不重写历史产物。
+- `field_evidence` 记录 field_path、value、kind（fact/hypothesis）、source_session 和 evidence（turn_index、role、quote）。点分隔路径省略列表索引，如 `theory.cbt.special_situations.event`。新档案叶子只能引用来访者原话；无证据叶子被剔除。字面引用验证不保证语义蕴含。
+- `ClinicalSummary.homework_assignments` 记录 text、咨询师实际提出作业的 proposed_evidence 和可选 agreed_evidence。没有布置证据的作业不能进入摘要作业列表或开放台账。`HomeworkItem.agreement_status` 分 proposed/agreed/unverified；unverified 用于旧记录，不自动补证据。
+- `CounselorSessionReview.objective_assessments` 覆盖原文目标，状态为 completed/partial/not_completed/not_assessed。前两者必须有定位到本场对话的证据。遗漏、重复、未知目标不算完成。
+- `SessionPlan.objective_priorities` 可配置 critical/standard/optional，未配置时为 standard；自评可将新识别的必要条件提高为 critical，但不能降低已配置等级，下一计划保留提高后的等级。项目不按关键词自动改写病例目标优先级。critical 未完成不能推进；standard 可有明确理由延期，但必须带入 next_objectives；optional 不构成硬门槛。推进还需要 stage_ready 与至少一个非可选目标已完成。
+- `goal_progress` 和 `completion_threshold` 保留供审计及旧数据兼容，不控制停止或阶段。模型主动收尾记录 `counselor_stopped`，轮数耗尽为 `max_turns`，安全中断保留原标签。
+- 疗程结束只在巩固阶段、非可选目标完成、安全未阻断且 termination 三项均有对话证据时成立：mutual_agreement（来访者同意结束整个疗程）、relapse_plan、support_plan。
+- 自评使用完整本场对话与已整合记忆；督导量表和 RFT 奖励仍不参与下一场规划。仅 RFT 胜者进入这条链路。

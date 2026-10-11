@@ -10,7 +10,7 @@ from psychsandbox.datasets.psycheval import (
     _files_digest,
     convert_psycheval,
 )
-from psychsandbox.datasets.profile_compiler import ATOMIZER_PROMPT_VERSION
+from psychsandbox.datasets.profile_compiler import ATOMIZER_PROMPT_VERSION, CONVERSION_POLICY_VERSION
 from psychsandbox.runtime import DisclosureGate
 
 
@@ -35,6 +35,7 @@ def _valid_manifest(root):
         "atomizer": "extractive",
         "atomizer_prompt_version": ATOMIZER_PROMPT_VERSION,
         "atomizer_model": "test-model",
+        "conversion_policy_version": CONVERSION_POLICY_VERSION,
         "therapy_counts": {"bt": 43, "cbt": 148, "het": 50, "pdt": 50, "pmt": 50},
         "therapies": {
             therapy: {

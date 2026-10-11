@@ -12,3 +12,17 @@
 
 输出简洁、可审计的评估摘要，不输出私密逐 token 思维链。
 只输出符合 CounselorSessionReview schema 的 JSON。
+
+逐目标评估契约：
+- objective_assessments 必须覆盖 session_plan.objectives 中每个原文目标，不能新增或改写目标。
+- status 只能为 completed、partial、not_completed、not_assessed。completed/partial 必须提供
+  evidence（turn_index、role、逐字 quote），能定位到输入 dialogue。没有证据就未评估。
+- goal_progress 仅供审计参考，不能因为会内数值高、来访者喊停或达到轮数上限就认定完成。
+- stage_ready 是你对进入下一阶段的判断，须基于阶段条件与完整对话。关键目标 critical
+  不得延期；普通目标 standard 如需带入下一阶段，应设 defer_to_next_stage=true、说明 reason，
+  并将其原文放入 next_objectives。optional 可选目标未完成不阻止推进。
+- priority 以 session_plan.objective_priorities 为准；未配置时为 standard。安全闭环或阶段
+  必要条件可在自评中提高为 critical 并在 reason 解释，不能降低已配置优先级，也不能擅自标成 optional。
+- termination 单独评估 mutual_agreement（来访者明确同意结束疗程）、relapse_plan（实际形成
+  的复发/困难应对预案）、support_plan（实际明确的支持资源与后续安排）。每项提供原话证据列表。
+  本场告别、下次见或同意休息不等于同意结束整个疗程。缺证据就留空，不能把计划当成完成。

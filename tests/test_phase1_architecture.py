@@ -5,7 +5,9 @@ from html import escape
 
 import pytest
 
-from psychsandbox.domain import SandboxConfig, SessionStage
+from psychsandbox.domain import (
+    SandboxConfig, SessionStage, CounselorSessionReview, ObjectiveAssessment, DialogueEvidence,
+)
 from psychsandbox.evaluation.psycheval_supervisor import (
     _specific_counselor_instruments,
     _specific_client_instruments,
@@ -149,8 +151,26 @@ def test_longitudinal_report_and_feedback_plan_are_persisted(root, tmp_path, rep
     assert restored.sessions[1].longitudinal_report is not None
 
 
-def test_supervision_can_advance_next_session_stage(root, tmp_path, repository):
+def test_grounded_counselor_review_can_advance_next_session_stage(root, tmp_path, repository):
+    class GroundedReviewGateway(DeterministicGateway):
+        async def complete_structured(self, **kwargs):
+            result = await super().complete_structured(**kwargs)
+            if kwargs["output_schema"] is CounselorSessionReview:
+                payload = kwargs["input_payload"]
+                message = next(item for item in payload["dialogue"] if item["role"] == "client")
+                # A transport double supplies explicit grounded assessments; real
+                # semantic goal judgement belongs to the production counselor.
+                result.stage_ready = True
+                result.objective_assessments = [ObjectiveAssessment(
+                    objective=objective, status="completed",
+                    evidence=[DialogueEvidence(turn_index=message["turn_index"],
+                        role="client", quote=message["content"])],
+                ) for objective in payload["session_plan"]["objectives"]]
+            return result
+
     sandbox = _sandbox(root, tmp_path, repository, max_turns=8)
+    sandbox.gateway = GroundedReviewGateway()
+    sandbox.counselor.gateway = sandbox.gateway
     result = asyncio.run(
         sandbox.run_case("psycheval-cbt-001", session_count=1)
     )

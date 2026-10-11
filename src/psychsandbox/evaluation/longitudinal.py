@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Literal
 
+from .session_review import stage_is_ready, trajectory_can_close
+
 from ..domain import (
     LongitudinalReport,
     RiskLevel,
@@ -87,17 +89,9 @@ class LongitudinalEvaluator:
         if high_risk or safety_blocked:
             return "hold"
 
-        goal_progress = max(
-            (decision.goal_progress for decision in session.decisions),
-            default=0,
-        )
-        goal_reached = goal_progress >= session.plan.completion_threshold
-        if (
-            session.plan.stage is SessionStage.CONSOLIDATION
-            and goal_reached
-        ):
-            return "close"
-        if goal_reached and trend != "worsening":
+        if session.plan.stage is SessionStage.CONSOLIDATION:
+            return "close" if trajectory_can_close(session) else "continue"
+        if stage_is_ready(session) and trend != "worsening":
             return "advance"
         if trend == "worsening" and session.plan.stage is not SessionStage.CONCEPTUALIZATION:
             return "regress"
