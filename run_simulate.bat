@@ -43,10 +43,10 @@ rem (no trailing wave with fewer candidates than slots); a number caps the load.
 set ROLLOUT_CONCURRENCY=
 set JUDGE_CONCURRENCY=
 rem 1 = probability-weighted (logprob) scoring ON (default); 0 = item average
-set LOGPROB_SCORING=1
+set LOGPROB_SCORING=0
 rem 1 = probe the endpoint and keep the record before simulating (default);
 rem     0 = skip the probe
-set PROBE_LOGPROB=1
+set PROBE_LOGPROB=0
 rem Instrument used by the probe: any non-composite key, e.g. wai/ctrs/bdi_ii
 set PROBE_INSTRUMENT=wai
 rem Transient retry attempts per model call (3 = the previous fixed budget).
