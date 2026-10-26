@@ -141,6 +141,20 @@ export interface CloseStepRecord {
   created_at: string;
 }
 
+export interface OperationRecord {
+  operation_id: string;
+  course_id: string;
+  session_index: number;
+  kind: string;
+  status: 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+  expected_version: number;
+  payload: Record<string, any>;
+  result?: Record<string, any> | null;
+  error?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface CourseSessionDetail {
   course_id: string;
   session_index: number;
@@ -155,6 +169,8 @@ export interface CourseSessionDetail {
   closed_at?: string | null;
   messages: CourseMessage[];
   close_steps: CloseStepRecord[];
+  active_operation?: OperationRecord | null;
+  last_operation?: OperationRecord | null;
 }
 
 export interface SkillRelease {

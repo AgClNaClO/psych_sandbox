@@ -108,6 +108,10 @@ export const api = {
     request(`/courses/${courseId}/sessions/${sessionIndex}/close?operation_id=${operationId}&expected_version=${expectedVersion}`, {
       method: 'POST',
     }),
+  resetSessionLock: (courseId: string, sessionIndex: number) =>
+    request<{ status: string; unlocked_operations: number }>(`/courses/${courseId}/sessions/${sessionIndex}/reset-lock`, {
+      method: 'POST',
+    }),
   closeCourse: (courseId: string, reason = 'participant_closed_course') =>
     request<Course>(`/courses/${courseId}/close?reason=${reason}`, { method: 'POST' }),
 
@@ -169,10 +173,23 @@ export const api = {
 export function subscribeSSE(
   stream: string,
   onEvent: (event: { seq: number; type: string; payload: any }) => void,
-  onError?: (err: any) => void
+  onError?: (err: any) => void,
+  onOpen?: () => void
 ): () => void {
   const url = `${API_BASE}/events?stream=${encodeURIComponent(stream)}`;
   const es = new EventSource(url);
+
+  es.onopen = () => {
+    if (onOpen) onOpen();
+  };
+
+  es.addEventListener('connected', () => {
+    if (onOpen) onOpen();
+  });
+
+  es.addEventListener('ping', () => {
+    if (onOpen) onOpen();
+  });
 
   es.onmessage = (e) => {
     try {
@@ -184,36 +201,35 @@ export function subscribeSSE(
     }
   };
 
-  es.addEventListener('simulation_progress', (e: any) => {
-    try {
-      const payload = JSON.parse(e.data);
-      onEvent({ seq: 0, type: 'simulation_progress', payload });
-    } catch {}
-  });
+  const eventTypes = [
+    'simulation_progress',
+    'message_submitted',
+    'counselor_replied',
+    'session_closed',
+    'close_requested',
+    'operation_failed',
+    'operation_succeeded',
+    'job_failed',
+    'job_succeeded',
+  ];
 
-  es.addEventListener('message_submitted', (e: any) => {
-    try {
-      const payload = JSON.parse(e.data);
-      onEvent({ seq: 0, type: 'message_submitted', payload });
-    } catch {}
-  });
-
-  es.addEventListener('counselor_replied', (e: any) => {
-    try {
-      const payload = JSON.parse(e.data);
-      onEvent({ seq: 0, type: 'counselor_replied', payload });
-    } catch {}
-  });
-
-  es.addEventListener('session_closed', (e: any) => {
-    try {
-      const payload = JSON.parse(e.data);
-      onEvent({ seq: 0, type: 'session_closed', payload });
-    } catch {}
+  eventTypes.forEach((type) => {
+    es.addEventListener(type, (e: any) => {
+      try {
+        const payload = JSON.parse(e.data);
+        const seq = e.lastEventId ? parseInt(e.lastEventId, 10) : 0;
+        onEvent({ seq, type, payload });
+      } catch {
+        onEvent({ seq: 0, type, payload: e.data });
+      }
+    });
   });
 
   es.onerror = (err) => {
-    if (onError) onError(err);
+    // 仅在明确彻底关闭时才通知断开；如果处于自动重连中则等待重连握手
+    if (es.readyState === EventSource.CLOSED) {
+      if (onError) onError(err);
+    }
   };
 
   return () => {

@@ -15,7 +15,13 @@ import uuid
 from typing import Any, Literal
 from pathlib import Path
 
-from .db import db_transaction, get_connection
+from dotenv import load_dotenv
+
+env_path = Path(__file__).resolve().parents[3] / ".env"
+if env_path.exists():
+    load_dotenv(env_path)
+
+from .db import db_transaction, get_connection, utc_now
 from .models import (
     CourseResponse,
     CourseSessionDetailResponse,
@@ -287,6 +293,46 @@ class CourseManager:
                 for r in cur.fetchall()
             ]
 
+            # 活跃与最近操作
+            cur.execute(
+                "SELECT * FROM course_operations WHERE course_id = ? AND session_index = ? ORDER BY created_at DESC",
+                (course_id, session_index),
+            )
+            op_rows = cur.fetchall()
+            active_op: OperationResponse | None = None
+            last_op: OperationResponse | None = None
+            if op_rows:
+                last_r = op_rows[0]
+                last_op = OperationResponse(
+                    operation_id=last_r["operation_id"],
+                    course_id=last_r["course_id"],
+                    session_index=last_r["session_index"],
+                    kind=last_r["kind"],
+                    status=last_r["status"],
+                    expected_version=last_r["expected_version"],
+                    payload=json.loads(last_r["payload_json"]) if last_r["payload_json"] else {},
+                    result=json.loads(last_r["result_json"]) if last_r["result_json"] else None,
+                    error=last_r["error"],
+                    created_at=last_r["created_at"],
+                    updated_at=last_r["updated_at"],
+                )
+                for r in op_rows:
+                    if r["status"] in ("pending", "running"):
+                        active_op = OperationResponse(
+                            operation_id=r["operation_id"],
+                            course_id=r["course_id"],
+                            session_index=r["session_index"],
+                            kind=r["kind"],
+                            status=r["status"],
+                            expected_version=r["expected_version"],
+                            payload=json.loads(r["payload_json"]) if r["payload_json"] else {},
+                            result=json.loads(r["result_json"]) if r["result_json"] else None,
+                            error=r["error"],
+                            created_at=r["created_at"],
+                            updated_at=r["updated_at"],
+                        )
+                        break
+
             return CourseSessionDetailResponse(
                 course_id=s_row["course_id"],
                 session_index=s_row["session_index"],
@@ -301,7 +347,31 @@ class CourseManager:
                 closed_at=s_row["closed_at"],
                 messages=msgs,
                 close_steps=steps,
+                active_operation=active_op,
+                last_operation=last_op,
             )
+        finally:
+            conn.close()
+
+    def reset_session_lock(self, course_id: str, session_index: int) -> int:
+        """重置会话中卡死或残留的 pending/running 操作，恢复会话可交互状态"""
+        conn = get_connection(self.db_path)
+        try:
+            with db_transaction(conn) as cur:
+                cur.execute(
+                    """UPDATE course_operations
+                    SET status = 'cancelled', error = 'User reset operation lock', updated_at = ?
+                    WHERE course_id = ? AND session_index = ? AND status IN ('pending', 'running')""",
+                    (utc_now(), course_id, session_index),
+                )
+                affected = cur.rowcount
+            if affected > 0:
+                self.events.emit(
+                    f"course:{course_id}",
+                    "operation_failed",
+                    {"course_id": course_id, "error": "操作锁已由用户手动重置解除"},
+                )
+            return affected
         finally:
             conn.close()
 

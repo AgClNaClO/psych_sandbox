@@ -61,7 +61,19 @@ export const InteractiveChatHub: React.FC<InteractiveChatHubProps> = ({ observer
   const fetchSessionDetail = () => {
     if (!selectedCourseId) return;
     api.getSessionDetail(selectedCourseId, selectedSessionIdx)
-      .then(setSessionDetail)
+      .then((detail) => {
+        setSessionDetail(detail);
+        if (!detail.active_operation) {
+          setIsSending(false);
+        } else {
+          setIsSending(true);
+        }
+        if (detail.last_operation && detail.last_operation.status === 'failed') {
+          setErrorMsg(`操作失败: ${detail.last_operation.error || '未知错误'}`);
+        } else if (!detail.active_operation) {
+          setErrorMsg(null);
+        }
+      })
       .catch(console.error);
   };
 
@@ -72,17 +84,41 @@ export const InteractiveChatHub: React.FC<InteractiveChatHubProps> = ({ observer
       fetchSessionDetail();
       if (event.type === 'counselor_replied') {
         setIsSending(false);
+        setErrorMsg(null);
       }
       if (event.type === 'operation_failed') {
         setIsSending(false);
         setErrorMsg(`操作失败: ${event.payload?.error || '未知错误'}`);
       }
       if (event.type === 'session_closed') {
+        setIsSending(false);
         api.getCourse(selectedCourseId).then(setCourseDetail).catch(console.error);
       }
     });
     return unsub;
   }, [selectedCourseId, selectedSessionIdx]);
+
+  // 发送中短轮询自愈（以防网络延迟或丢帧）
+  useEffect(() => {
+    if (!isSending || !selectedCourseId) return;
+    const timer = setInterval(() => {
+      fetchSessionDetail();
+    }, 1500);
+    return () => clearInterval(timer);
+  }, [isSending, selectedCourseId, selectedSessionIdx]);
+
+  const handleResetLock = async () => {
+    if (!courseDetail || !sessionDetail) return;
+    try {
+      await api.resetSessionLock(courseDetail.course_id, sessionDetail.session_index);
+      setErrorMsg(null);
+      setIsSending(false);
+      fetchSessionDetail();
+      api.getCourse(courseDetail.course_id).then(setCourseDetail).catch(console.error);
+    } catch (err: any) {
+      alert(`解除失败: ${err.message}`);
+    }
+  };
 
   const handleCreateCourse = async () => {
     try {
@@ -262,13 +298,34 @@ export const InteractiveChatHub: React.FC<InteractiveChatHubProps> = ({ observer
                 <LogOut size={13} /> 结束疗程
               </button>
             )}
+
+            {(isSending || sessionDetail?.active_operation || errorMsg) && (
+              <button
+                className="btn btn-secondary"
+                style={{ fontSize: 11, border: '1px dashed var(--border-color)', color: 'var(--text-muted)' }}
+                onClick={handleResetLock}
+                title="若任务卡死或失败，点击强制解除锁定"
+              >
+                解除死锁
+              </button>
+            )}
           </div>
         </div>
 
         <div className="column-body">
           {errorMsg && (
-            <div style={{ background: '#fee2e2', border: '1px solid #f87171', color: '#b91c1c', padding: '8px 12px', borderRadius: 6, marginBottom: 12, fontSize: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
-              <AlertCircle size={14} /> {errorMsg}
+            <div style={{ background: '#fee2e2', border: '1px solid #f87171', color: '#b91c1c', padding: '8px 12px', borderRadius: 6, marginBottom: 12, fontSize: 12, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1, marginRight: 8 }}>
+                <AlertCircle size={15} style={{ flexShrink: 0 }} />
+                <span>{errorMsg}</span>
+              </div>
+              <button
+                className="btn btn-secondary"
+                style={{ fontSize: 11, padding: '2px 8px', height: 26, background: '#fff', color: '#b91c1c', borderColor: '#fca5a5' }}
+                onClick={handleResetLock}
+              >
+                清除锁定
+              </button>
             </div>
           )}
 

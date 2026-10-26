@@ -32,6 +32,9 @@ export const App: React.FC = () => {
       },
       () => {
         setSseConnected(false);
+      },
+      () => {
+        setSseConnected(true);
       }
     );
 

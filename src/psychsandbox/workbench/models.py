@@ -150,6 +150,8 @@ class CourseSessionDetailResponse(BaseModel):
     closed_at: str | None = None
     messages: list[CourseMessageResponse] = Field(default_factory=list)
     close_steps: list[CloseStepRecord] = Field(default_factory=list)
+    active_operation: OperationResponse | None = None
+    last_operation: OperationResponse | None = None
 
 
 # ==========================================

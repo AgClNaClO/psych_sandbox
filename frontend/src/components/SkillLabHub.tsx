@@ -17,6 +17,7 @@ export const SkillLabHub: React.FC<SkillLabHubProps> = ({ observerMode = false }
 
   // 技能树与预览
   const [skillTreeData, setSkillTreeData] = useState<any>(null);
+  const [expandedStage, setExpandedStage] = useState<string | null>('stage1');
 
   // 提交提案表单
   const [showProposalModal, setShowProposalModal] = useState<boolean>(false);
@@ -356,16 +357,91 @@ export const SkillLabHub: React.FC<SkillLabHubProps> = ({ observerMode = false }
             </ul>
           </div>
 
-          <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8 }}>当前技能树结构 (只读):</div>
-          <div style={{ fontSize: 12, color: 'var(--text-muted)', background: 'var(--bg-subtle)', padding: 12, borderRadius: 6, maxHeight: 300, overflowY: 'auto' }}>
-            {skillTreeData?.raw_tree ? (
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <div style={{ fontWeight: 600, fontSize: 13 }}>当前技能树结构 (只读):</div>
+            {skillTreeData?.raw_tree?.total_meta_count !== undefined && (
+              <span className="tag tag-neutral" style={{ fontSize: 10 }}>
+                {skillTreeData.raw_tree.total_meta_count} 元技能 / {skillTreeData.raw_tree.total_micro_count} 原子技能
+              </span>
+            )}
+          </div>
+
+          {skillTreeData?.raw_tree?.stages ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {Object.entries(skillTreeData.raw_tree.stages).map(([sKey, sVal]: [string, any]) => {
+                const isExp = expandedStage === sKey;
+                return (
+                  <div key={sKey} style={{ border: '1px solid var(--border-color)', borderRadius: 6, overflow: 'hidden' }}>
+                    <div
+                      onClick={() => setExpandedStage(isExp ? null : sKey)}
+                      style={{
+                        padding: '8px 12px',
+                        background: isExp ? 'var(--bg-subtle)' : '#fff',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        fontSize: 12,
+                        fontWeight: 600,
+                      }}
+                    >
+                      <span>{sVal.title}</span>
+                      <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                        {sVal.meta_count} 元 / {sVal.micro_count} 原子 {isExp ? '▲' : '▼'}
+                      </span>
+                    </div>
+
+                    {isExp && (
+                      <div style={{ padding: '8px 12px', background: '#fafafa', borderTop: '1px solid var(--border-color)', maxHeight: 220, overflowY: 'auto' }}>
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>
+                          核心元技能列表 (点击可带入提案父节点 ID):
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                          {Object.entries(sVal.meta_skills || {}).slice(0, 30).map(([mId, mObj]: [string, any]) => (
+                            <div
+                              key={mId}
+                              onClick={() => {
+                                setPropParentMeta(mId);
+                                setPropStage(sKey === 'stage1' ? 'conceptualization' : sKey === 'stage2' ? 'intervention' : 'consolidation');
+                              }}
+                              style={{
+                                padding: '4px 8px',
+                                background: '#fff',
+                                border: '1px solid #e2e8f0',
+                                borderRadius: 4,
+                                fontSize: 11,
+                                cursor: 'pointer',
+                              }}
+                              title="点击填入提案父节点ID"
+                            >
+                              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                <strong style={{ color: 'var(--primary)' }}>[{mId}] {mObj.skill_name}</strong>
+                              </div>
+                              {mObj.skill_description && (
+                                <div style={{ color: 'var(--text-muted)', marginTop: 2, fontSize: 10 }}>
+                                  {mObj.skill_description.slice(0, 50)}...
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          ) : skillTreeData?.raw_tree ? (
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', background: 'var(--bg-subtle)', padding: 12, borderRadius: 6, maxHeight: 300, overflowY: 'auto' }}>
               <pre style={{ margin: 0, fontFamily: 'monospace', fontSize: 11, whiteSpace: 'pre-wrap' }}>
                 {JSON.stringify(skillTreeData.raw_tree, null, 2).slice(0, 1500)}...
               </pre>
-            ) : (
-              <div>加载原始技能树中...</div>
-            )}
-          </div>
+            </div>
+          ) : (
+            <div style={{ padding: 16, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12, background: 'var(--bg-subtle)', borderRadius: 6 }}>
+              加载原始技能树中...
+            </div>
+          )}
         </div>
       </div>
 

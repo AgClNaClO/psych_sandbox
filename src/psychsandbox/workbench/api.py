@@ -12,6 +12,12 @@ import json
 from pathlib import Path
 from typing import Any, AsyncGenerator, Literal
 
+from dotenv import load_dotenv
+
+env_path = Path(__file__).resolve().parents[3] / ".env"
+if env_path.exists():
+    load_dotenv(env_path)
+
 from fastapi import FastAPI, HTTPException, Header, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
@@ -22,6 +28,7 @@ from ..config import default_config
 from ..datasets import CaseRepository
 from ..domain import SandboxConfig
 from ..runtime.storage import SQLiteStore
+from ..therapies import normalize_therapy_id
 from .db import init_db
 from .events import get_event_hub
 from .evolution import EvolutionValidationError, SkillEvolutionLab
@@ -271,6 +278,11 @@ def create_app(
         except VersionConflictError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
 
+    @app.post("/api/courses/{course_id}/sessions/{session_index}/reset-lock")
+    def reset_session_lock(course_id: str, session_index: int):
+        affected = course_mgr.reset_session_lock(course_id, session_index)
+        return {"status": "ok", "unlocked_operations": affected}
+
     @app.post("/api/courses/{course_id}/close", response_model=CourseResponse)
     def close_course(course_id: str, reason: str = "participant_closed_course"):
         return course_mgr.close_course(course_id, reason=reason)
@@ -356,11 +368,14 @@ def create_app(
 
     @app.get("/api/skills/tree/{therapy}")
     def get_skill_tree(therapy: str):
-        norm = normalize_therapy_id(therapy)
-        tree_file = assets_directory / f"{norm}.json"
-        if not tree_file.exists():
-            raise HTTPException(status_code=404, detail="Therapy skill tree not found")
-        raw_tree = json.loads(tree_file.read_text(encoding="utf-8"))
+        try:
+            norm = normalize_therapy_id(therapy)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        raw_tree = evolution_lab.load_raw_skill_tree(norm)
+        if not raw_tree:
+            raise HTTPException(status_code=404, detail=f"Therapy skill tree not found for {norm}")
         active_rel = evolution_lab.get_active_release(norm)
         overlay = active_rel.overlay_skills if active_rel else {}
         return {
@@ -416,7 +431,12 @@ def create_app(
             start_seq = max(start_seq, int(last_event_id))
 
         async def event_generator() -> AsyncGenerator[str, None]:
+            # 立即发送握手事件，通知客户端 SSE 通道已连通
+            yield "event: connected\ndata: {\"status\": \"connected\"}\n\n"
             async for ev in event_hub.subscribe(stream, after_seq=start_seq):
+                if ev.type == "ping":
+                    yield ": ping\n\nevent: ping\ndata: {}\n\n"
+                    continue
                 data_str = json.dumps(ev.payload, ensure_ascii=False)
                 yield f"id: {ev.seq}\nevent: {ev.type}\ndata: {data_str}\n\n"
 

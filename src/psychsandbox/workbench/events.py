@@ -101,28 +101,48 @@ class EventHub:
     async def subscribe(
         self, stream: str, after_seq: int = 0
     ) -> AsyncGenerator[WorkbenchEvent, None]:
-        """订阅指定 stream 的事件流：先重放历史事件，再监听新事件"""
+        """订阅指定 stream 的事件流：支持跨进程 SQLite 持久化事件与实时推送"""
         q: asyncio.Queue[WorkbenchEvent] = asyncio.Queue()
         async with self._lock:
             if stream not in self._listeners:
                 self._listeners[stream] = set()
             self._listeners[stream].add(q)
 
+        loop = asyncio.get_event_loop()
         last_yielded_seq = after_seq
-        try:
-            # 1. 补发历史事件
-            history = self.get_events(stream, after_seq=last_yielded_seq, limit=1000)
-            for event in history:
-                if event.seq > last_yielded_seq:
-                    last_yielded_seq = event.seq
-                    yield event
+        last_ping_time = loop.time()
 
-            # 2. 消费实时队列
+        try:
             while True:
-                event = await q.get()
-                if event.seq > last_yielded_seq:
-                    last_yielded_seq = event.seq
-                    yield event
+                # 1. 优先拉取 SQLite 中新增事件（支持独立 Worker 跨进程写入）
+                new_events = self.get_events(stream, after_seq=last_yielded_seq, limit=200)
+                if new_events:
+                    for ev in new_events:
+                        if ev.seq > last_yielded_seq:
+                            last_yielded_seq = ev.seq
+                            yield ev
+                    last_ping_time = loop.time()
+
+                # 2. 等待内存队列唤醒（同进程 emit），最多等待 0.5 秒
+                try:
+                    mem_event = await asyncio.wait_for(q.get(), timeout=0.5)
+                    if mem_event.seq > last_yielded_seq:
+                        last_yielded_seq = mem_event.seq
+                        yield mem_event
+                        last_ping_time = loop.time()
+                except asyncio.TimeoutError:
+                    pass
+
+                # 3. 每 10 秒发送心跳保活包
+                now_time = loop.time()
+                if now_time - last_ping_time >= 10.0:
+                    yield WorkbenchEvent(
+                        stream=stream,
+                        seq=last_yielded_seq,
+                        type="ping",
+                        payload={"timestamp": utc_now()},
+                    )
+                    last_ping_time = now_time
         finally:
             async with self._lock:
                 if stream in self._listeners and q in self._listeners[stream]:

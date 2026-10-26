@@ -176,6 +176,24 @@ def test_api_interactive_courses_and_messages(workbench_client):
     )
     assert conflict_resp.status_code == 409
 
+    # 6. 验证会话详情返回 active_operation 与 reset-lock
+    sess_resp = client.get(f"/api/courses/{course_id}/sessions/1")
+    assert sess_resp.status_code == 200
+    sess_detail = sess_resp.json()
+    assert sess_detail["active_operation"] is not None
+    assert sess_detail["active_operation"]["operation_id"] == "op-api-01"
+
+    # 7. 重置操作锁
+    reset_resp = client.post(f"/api/courses/{course_id}/sessions/1/reset-lock")
+    assert reset_resp.status_code == 200
+    assert reset_resp.json()["unlocked_operations"] == 1
+
+    # 验证重置后无 active_operation
+    sess_resp2 = client.get(f"/api/courses/{course_id}/sessions/1")
+    assert sess_resp2.status_code == 200
+    assert sess_resp2.json()["active_operation"] is None
+    assert sess_resp2.json()["last_operation"]["status"] == "cancelled"
+
 
 def test_api_skill_evolution_lifecycle(workbench_client):
     client, _, _ = workbench_client
@@ -246,6 +264,18 @@ def test_api_skill_evolution_lifecycle(workbench_client):
     # 5. 一键安全回滚
     rollback_resp = client.post(f"/api/skills/releases/{release_id}/rollback?therapy=cbt")
     assert rollback_resp.status_code == 200
+
+    # 6. 查询流派原始只读技能树
+    tree_resp = client.get("/api/skills/tree/bt")
+    assert tree_resp.status_code == 200
+    tree_data = tree_resp.json()
+    assert tree_data["therapy"] == "behavioral"
+    assert tree_data["raw_tree"]["total_meta_count"] > 0
+
+    # 验证大写别名查询
+    tree_resp2 = client.get("/api/skills/tree/BEHAVIORAL")
+    assert tree_resp2.status_code == 200
+    assert tree_resp2.json()["raw_tree"]["total_meta_count"] > 0
 
 
 def test_api_analytics_and_audited_exports(workbench_client, tmp_path: Path):

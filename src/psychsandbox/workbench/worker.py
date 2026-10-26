@@ -10,13 +10,21 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+from pathlib import Path
 import signal
 import sys
 import traceback
 import uuid
 from typing import Any, Callable
 
-from .db import init_db
+from dotenv import load_dotenv
+
+# 优先加载项目根目录下的 .env 配置
+env_path = Path(__file__).resolve().parents[3] / ".env"
+if env_path.exists():
+    load_dotenv(env_path)
+
+from .db import db_transaction, get_connection, init_db, utc_now
 from .job_manager import JobManager
 from .models import JobLane, JobResponse
 from .events import get_event_hub
@@ -189,24 +197,49 @@ class WorkbenchWorker:
             self.job_manager.complete_job(job.job_id, job.attempt, self.worker_id, res_dict)
             self.event_hub.emit(f"job:{job.job_id}", "job_succeeded", res_dict)
 
+    def _fail_course_operation(self, course_id: str, operation_id: str, error: str) -> None:
+        conn = get_connection(self.db_path)
+        try:
+            with db_transaction(conn) as cur:
+                cur.execute(
+                    """UPDATE course_operations
+                    SET status = 'failed', error = ?, updated_at = ?
+                    WHERE operation_id = ? AND course_id = ? AND status IN ('pending', 'running')""",
+                    (error, utc_now(), operation_id, course_id),
+                )
+        except Exception as db_err:
+            print(f"[{self.worker_id}] 释放操作锁失败: {db_err}")
+        finally:
+            conn.close()
+        self.event_hub.emit(
+            f"course:{course_id}",
+            "operation_failed",
+            {"course_id": course_id, "operation_id": operation_id, "error": error},
+        )
+
     async def _run_course_job(self, job: JobResponse) -> None:
         payload = job.payload
-        course_id = job.course_id or payload["course_id"]
-        operation_id = payload["operation_id"]
+        course_id = job.course_id or payload.get("course_id")
+        operation_id = payload.get("operation_id")
 
-        gateway = self.gateway_factory()
-        counselor = CounselorAgent(gateway=gateway)
-        runner = InteractiveRunner(counselor=counselor, gateway=gateway, db_path=self.db_path)
+        try:
+            gateway = self.gateway_factory()
+            counselor = CounselorAgent(gateway=gateway)
+            runner = InteractiveRunner(counselor=counselor, gateway=gateway, db_path=self.db_path)
 
-        await runner.execute_operation(course_id=course_id, operation_id=operation_id)
-        self.job_manager.complete_job(
-            job.job_id, job.attempt, self.worker_id, {"course_id": course_id, "operation_id": operation_id}
-        )
-        self.event_hub.emit(
-            f"job:{job.job_id}",
-            "job_succeeded",
-            {"course_id": course_id, "operation_id": operation_id},
-        )
+            await runner.execute_operation(course_id=course_id, operation_id=operation_id)
+            self.job_manager.complete_job(
+                job.job_id, job.attempt, self.worker_id, {"course_id": course_id, "operation_id": operation_id}
+            )
+            self.event_hub.emit(
+                f"job:{job.job_id}",
+                "job_succeeded",
+                {"course_id": course_id, "operation_id": operation_id},
+            )
+        except Exception as exc:
+            if course_id and operation_id:
+                self._fail_course_operation(course_id, operation_id, str(exc))
+            raise
 
 
 def main():

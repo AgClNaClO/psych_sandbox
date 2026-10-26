@@ -6,8 +6,15 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
+from dotenv import load_dotenv
 import uvicorn
 from .api import create_app
+
+# 优先加载项目根目录下的 .env 配置
+env_path = Path(__file__).resolve().parents[3] / ".env"
+if env_path.exists():
+    load_dotenv(env_path)
 
 
 def main():

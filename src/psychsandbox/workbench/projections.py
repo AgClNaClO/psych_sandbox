@@ -158,23 +158,53 @@ def get_run_detail(
             mem_row = cur.fetchone()
             memory_dict = json.loads(mem_row["memory_json"]) if mem_row else None
 
+            # 读取该 session 在 turns 表中的正式对话内容
+            cur.execute(
+                "SELECT turn_index, role, content FROM turns WHERE run_id = ? AND session_index = ? ORDER BY turn_index, role",
+                (run_id, s_idx),
+            )
+            turns_text_map: dict[int, dict[str, str]] = {}
+            for tr in cur.fetchall():
+                t_idx_val = tr["turn_index"]
+                if t_idx_val not in turns_text_map:
+                    turns_text_map[t_idx_val] = {}
+                turns_text_map[t_idx_val][tr["role"]] = tr["content"]
+
             # 受控投影：脱敏 turn 与决策
             projected_turns = []
             for turn in s_obj.get("turn_records", []):
-                decision = turn.get("counselor_turn", {}).get("decision")
-                planner_reasoning = decision.get("reasoning", "") if decision else ""
-                skill_evidence = decision.get("skill_evidence", []) if decision else []
-                chosen_skills = decision.get("skills_selected", []) if decision else []
+                t_idx = turn.get("turn_index")
+                decision = turn.get("decision") or turn.get("counselor_turn", {}).get("decision") or {}
+                planning = turn.get("planning") or {}
+                planner_reasoning = decision.get("reasoning") or decision.get("strategy") or planning.get("reasoning_summary") or ""
+                skill_evidence = decision.get("skill_evidence") or []
+                chosen_skills = decision.get("selected_atomic_skill_ids") or decision.get("skills_selected") or []
+
+                # 对话内容优先从 turns 表读取，次之兼容各类数据结构
+                table_texts = turns_text_map.get(t_idx, {})
+                client_text = (
+                    table_texts.get("client")
+                    or turn.get("client_generation", {}).get("utterance")
+                    or turn.get("client_input")
+                    or turn.get("client_turn", {}).get("utterance")
+                    or ""
+                )
+                counselor_text = (
+                    table_texts.get("counselor")
+                    or turn.get("counselor_response")
+                    or turn.get("counselor_turn", {}).get("utterance")
+                    or ""
+                )
 
                 projected_turns.append({
-                    "turn_index": turn.get("turn_index"),
-                    "client_utterance": turn.get("client_turn", {}).get("utterance"),
-                    "counselor_response": turn.get("counselor_turn", {}).get("utterance"),
+                    "turn_index": t_idx,
+                    "client_utterance": client_text,
+                    "counselor_response": counselor_text,
                     "counselor_plan_summary": planner_reasoning,
                     "chosen_skills": chosen_skills,
                     "skill_evidence": skill_evidence,
-                    "safety_events": turn.get("counselor_turn", {}).get("safety_events", []),
-                    "context_snapshot_available": bool(turn.get("counselor_turn", {}).get("context_payload")),
+                    "safety_events": turn.get("output_safety", {}).get("evidence") or turn.get("counselor_turn", {}).get("safety_events", []),
+                    "context_snapshot_available": bool(turn.get("context_payload") or turn.get("counselor_turn", {}).get("context_payload")),
                 })
 
             sessions_data.append({

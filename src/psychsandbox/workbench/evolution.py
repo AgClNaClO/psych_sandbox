@@ -27,6 +27,19 @@ from ..domain import utc_now
 from ..skills import SkillCatalog, SkillRegistry
 from ..therapies import normalize_therapy_id
 
+THERAPY_ASSET_DIR_MAP = {
+    "behavioral": "bt",
+    "bt": "bt",
+    "cbt": "cbt",
+    "cognitive_behavioral": "cbt",
+    "humanistic_existential": "het",
+    "het": "het",
+    "psychodynamic": "pdt",
+    "pdt": "pdt",
+    "postmodern": "pmt",
+    "pmt": "pmt",
+}
+
 
 class EvolutionValidationError(Exception):
     """技能提案或操作校验失败"""
@@ -39,12 +52,78 @@ class SkillEvolutionLab:
         self.assets_dir = assets_dir or Path("assets/skills/sect")
         self.events = get_event_hub(db_path)
 
+    def load_raw_skill_tree(self, therapy: str) -> dict[str, Any] | None:
+        """加载流派原始只读技能树资产（支持单文件与分阶段目录）"""
+        norm = normalize_therapy_id(therapy)
+        asset_name = THERAPY_ASSET_DIR_MAP.get(norm, norm)
+
+        # 1. 单 JSON 文件模式
+        for fname in (f"{norm}.json", f"{asset_name}.json"):
+            single_file = self.assets_dir / fname
+            if single_file.exists():
+                return json.loads(single_file.read_text(encoding="utf-8"))
+
+        # 2. 分阶段资产目录模式 (assets/skills/sect/{bt,cbt,het,pdt,pmt})
+        for dname in (asset_name, norm):
+            therapy_dir = self.assets_dir / dname
+            if therapy_dir.is_dir():
+                stage_titles = {
+                    "stage1": "概念化阶段 (Conceptualization)",
+                    "stage2": "干预阶段 (Intervention)",
+                    "stage3": "巩固阶段 (Consolidation)",
+                }
+                stages_data = {}
+                total_meta = 0
+                total_micro = 0
+                for stage_dir in sorted(therapy_dir.iterdir()):
+                    if not stage_dir.is_dir():
+                        continue
+                    s_name = stage_dir.name
+                    meta_file = stage_dir / "meta_skills.json"
+                    micro_file = stage_dir / "micro_skills.json"
+                    m_meta = json.loads(meta_file.read_text(encoding="utf-8")) if meta_file.exists() else {}
+                    m_micro = json.loads(micro_file.read_text(encoding="utf-8")) if micro_file.exists() else {}
+                    total_meta += len(m_meta)
+                    total_micro += len(m_micro)
+                    stages_data[s_name] = {
+                        "title": stage_titles.get(s_name, s_name),
+                        "meta_count": len(m_meta),
+                        "micro_count": len(m_micro),
+                        "meta_skills": m_meta,
+                        "micro_skills": m_micro,
+                    }
+                return {
+                    "therapy": norm,
+                    "asset_name": asset_name,
+                    "total_meta_count": total_meta,
+                    "total_micro_count": total_micro,
+                    "stages": stages_data,
+                }
+        return None
+
     def compute_tree_hash(self, therapy: str, overlay: dict[str, Any] | None = None) -> str:
         """计算原始资产加扩展层的规范化哈希"""
         norm_therapy = normalize_therapy_id(therapy)
-        tree_file = self.assets_dir / f"{norm_therapy}.json"
-        raw_content = tree_file.read_bytes() if tree_file.exists() else b"{}"
-        base_hash = hashlib.sha256(raw_content).hexdigest()
+        asset_name = THERAPY_ASSET_DIR_MAP.get(norm_therapy, norm_therapy)
+
+        hasher = hashlib.sha256()
+        single_file = self.assets_dir / f"{norm_therapy}.json"
+        if not single_file.exists():
+            single_file = self.assets_dir / f"{asset_name}.json"
+
+        if single_file.exists():
+            hasher.update(single_file.read_bytes())
+        else:
+            therapy_dir = self.assets_dir / asset_name
+            if not therapy_dir.is_dir():
+                therapy_dir = self.assets_dir / norm_therapy
+            if therapy_dir.is_dir():
+                for f in sorted(therapy_dir.rglob("*.json")):
+                    hasher.update(f.read_bytes())
+            else:
+                hasher.update(b"{}")
+
+        base_hash = hasher.hexdigest()
         overlay_str = json.dumps(overlay or {}, sort_keys=True, ensure_ascii=False)
         combined = f"{base_hash}:{hashlib.sha256(overlay_str.encode('utf-8')).hexdigest()}"
         return hashlib.sha256(combined.encode("utf-8")).hexdigest()
