@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import uuid
+import sqlite3
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -55,17 +57,21 @@ class JobManager:
         course_id: str | None = None,
         max_attempts: int = 3,
         job_id: str | None = None,
+        *,
+        connection: sqlite3.Connection | None = None,
     ) -> JobResponse:
-        jid = job_id or f"job-{uuid.uuid4().hex[:12]}"
+        operation_id = payload.get("operation_id") if kind in ("course_reply", "course_close") else None
+        jid = job_id or (f"job-operation-{operation_id}" if operation_id else f"job-{uuid.uuid4().hex[:12]}")
         now = utc_now()
-        conn = get_connection(self.db_path)
+        conn = connection or get_connection(self.db_path)
         try:
-            with db_transaction(conn) as cur:
+            with (closing(conn.cursor()) if connection else db_transaction(conn)) as cur:
                 cur.execute(
                     """INSERT INTO jobs
                     (job_id, kind, lane, status, payload_json, attempt, max_attempts,
                      stop_requested, cancel_requested, run_id, course_id, created_at, updated_at)
-                    VALUES (?, ?, ?, 'queued', ?, 0, ?, 0, 0, ?, ?, ?, ?)""",
+                    VALUES (?, ?, ?, 'queued', ?, 0, ?, 0, 0, ?, ?, ?, ?)
+                    ON CONFLICT(job_id) DO NOTHING""",
                     (
                         jid,
                         kind,
@@ -80,9 +86,13 @@ class JobManager:
                 )
             cur = conn.cursor()
             cur.execute("SELECT * FROM jobs WHERE job_id = ?", (jid,))
-            return _to_job_response(cur.fetchone())
+            job = _to_job_response(cur.fetchone())
+            if job.kind != kind or job.course_id != course_id or job.payload != payload:
+                raise ValueError("Job id is already bound to another request")
+            return job
         finally:
-            conn.close()
+            if connection is None:
+                conn.close()
 
     def claim_job(
         self, lane: JobLane, worker_id: str, lease_seconds: int = 60
@@ -121,6 +131,20 @@ class JobManager:
 
                 cur.execute("SELECT * FROM jobs WHERE job_id = ?", (jid,))
                 return _to_job_response(cur.fetchone())
+        finally:
+            conn.close()
+
+    def bind_run(self, job_id: str, attempt: int, worker_id: str, run_id: str) -> bool:
+        """Persist run identity before execution so retries resume the same trajectory."""
+        conn = get_connection(self.db_path)
+        try:
+            with db_transaction(conn) as cur:
+                cur.execute(
+                    """UPDATE jobs SET run_id = ?, updated_at = ?
+                    WHERE job_id = ? AND attempt = ? AND lease_owner = ? AND status = 'running'""",
+                    (run_id, utc_now(), job_id, attempt, worker_id),
+                )
+                return cur.rowcount > 0
         finally:
             conn.close()
 

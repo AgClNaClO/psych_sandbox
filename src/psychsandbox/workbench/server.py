@@ -9,7 +9,6 @@ import argparse
 from pathlib import Path
 from dotenv import load_dotenv
 import uvicorn
-from .api import create_app
 
 # 优先加载项目根目录下的 .env 配置
 env_path = Path(__file__).resolve().parents[3] / ".env"
@@ -24,13 +23,15 @@ def main():
     parser.add_argument("--reload", action="store_true", help="Enable reload")
     args = parser.parse_args()
 
-    app = create_app()
     print(f"==================================================")
     print(f"科研 Web 工作台服务已启动: http://{args.host}:{args.port}")
     print(f"模式: 本地科研单机模式 (监听: {args.host})")
     print(f"==================================================")
 
-    uvicorn.run(app, host=args.host, port=args.port)
+    uvicorn.run(
+        "psychsandbox.workbench.api:create_app", factory=True,
+        host=args.host, port=args.port, reload=args.reload,
+    )
 
 
 if __name__ == "__main__":

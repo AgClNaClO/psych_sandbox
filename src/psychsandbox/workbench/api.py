@@ -20,10 +20,10 @@ if env_path.exists():
 
 from fastapi import FastAPI, HTTPException, Header, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from ..artifacts import find_run_dir
+from ..artifacts import find_run_dir, create_artifact_dir
 from ..config import default_config
 from ..datasets import CaseRepository
 from ..domain import SandboxConfig
@@ -70,11 +70,14 @@ def create_app(
     trace_dir: Path | None = None,
     assets_dir: Path | None = None,
     frontend_dir: Path | None = None,
+    export_dir: Path | None = None,
 ) -> FastAPI:
     init_db(db_path)
     config = default_config()
     sim_store_path = sim_db_path or config.database_path
     sim_store = SQLiteStore(sim_store_path)
+    # All request handlers open their own short-lived connections via the path.
+    sim_store.close()
     trace_directory = trace_dir or config.trace_dir
     assets_directory = assets_dir or (config.project_root / "assets" / "skills" / "sect")
     case_repo = CaseRepository(config.processed_dataset_dir)
@@ -88,13 +91,32 @@ def create_app(
 
     app = FastAPI(title="PsychSandbox Scientific Workbench", version="1.0.0")
 
+    @app.exception_handler(SessionClosedError)
+    async def session_error_handler(request: Request, exc: SessionClosedError):
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+    @app.exception_handler(OperationBusyError)
+    @app.exception_handler(VersionConflictError)
+    async def conflict_error_handler(request: Request, exc: Exception):
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
+        allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+        allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def check_write_origin(request: Request, call_next):
+        # CORS alone does not prevent cross-site POSTs from changing local data.
+        origin = request.headers.get("origin")
+        allowed = {str(request.base_url).rstrip("/"), "http://localhost:5173", "http://127.0.0.1:5173"}
+        if (request.url.path.startswith("/api/") and request.method not in {"GET", "HEAD", "OPTIONS"}
+                and origin and origin not in allowed):
+            return JSONResponse(status_code=403, content={"detail": "Untrusted request origin"})
+        return await call_next(request)
 
     # ====================================================
     # 1. 实验台与仿真任务
@@ -144,7 +166,7 @@ def create_app(
         return job
 
     @app.get("/api/jobs", response_model=list[JobResponse])
-    def list_jobs(lane: str | None = None, limit: int = 50):
+    def list_jobs(lane: Literal["long", "short"] | None = None, limit: int = Query(50, ge=1, le=500)):
         return job_mgr.list_jobs(lane=lane, limit=limit)
 
     @app.get("/api/jobs/{job_id}", response_model=JobResponse)
@@ -219,12 +241,6 @@ def create_app(
     ):
         try:
             op = course_mgr.submit_opening(course_id, session_index, operation_id, expected_version)
-            job_mgr.enqueue_job(
-                kind="course_reply",
-                lane="short",
-                payload={"course_id": course_id, "operation_id": operation_id},
-                course_id=course_id,
-            )
             return op
         except VersionConflictError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
@@ -245,12 +261,6 @@ def create_app(
                 content=req.content,
                 source=req.source,
             )
-            job_mgr.enqueue_job(
-                kind="course_reply",
-                lane="short",
-                payload={"course_id": course_id, "operation_id": req.operation_id},
-                course_id=course_id,
-            )
             return {"message": msg, "operation": op}
         except VersionConflictError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
@@ -268,12 +278,6 @@ def create_app(
     ):
         try:
             op = course_mgr.submit_close_session(course_id, session_index, operation_id, expected_version)
-            job_mgr.enqueue_job(
-                kind="course_close",
-                lane="short",
-                payload={"course_id": course_id, "operation_id": operation_id},
-                course_id=course_id,
-            )
             return op
         except VersionConflictError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
@@ -395,7 +399,7 @@ def create_app(
 
     @app.post("/api/exports/sft", response_model=ExportAuditResponse)
     def export_sft(req: ExportSFTRequest):
-        target = Path("runs/exports") / req.output_filename
+        target = create_artifact_dir(export_dir or trace_directory, "export-sft") / req.output_filename
         return exporter.export_sft(
             output_path=target,
             run_ids=req.run_ids,
@@ -405,7 +409,7 @@ def create_app(
 
     @app.post("/api/exports/dpo", response_model=ExportAuditResponse)
     def export_dpo(req: ExportDPORequest):
-        target = Path("runs/exports") / req.output_filename
+        target = create_artifact_dir(export_dir or trace_directory, "export-dpo") / req.output_filename
         return exporter.export_dpo(
             output_path=target,
             run_ids=req.run_ids,
@@ -423,7 +427,7 @@ def create_app(
     @app.get("/api/events")
     async def sse_events(
         stream: str = Query("jobs"),
-        after_seq: int = Query(0),
+        after_seq: int = Query(0, ge=0),
         last_event_id: str | None = Header(None, alias="Last-Event-ID"),
     ):
         start_seq = after_seq

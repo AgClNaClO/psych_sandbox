@@ -82,6 +82,21 @@ psych-sandbox simulate --case psycheval-cbt-001 --sessions 6 --resume-run run-xx
 
 ## 保留与清理
 
+### Web 工作台训练导出
+
+Web API 的 SFT / DPO 导出各自新建 `runs/runtime/时间__export-sft__编号/` 或
+`runs/runtime/时间__export-dpo__编号/`，目录内保存请求指定的 `.jsonl` 文件；使用自定义
+`trace_dir` 时跟随该产物根目录。文件名必须为单个普通 `.jsonl` 文件名，不接受目录、绝对路径
+或 Windows 设备名。相同文件名的再次导出建立另一目录，不覆盖历史文件；路径、行数和内容哈希
+仍写入 `workbench.sqlite3` 的 `export_audits`。旧 `runs/exports` 不迁移、不自动删除。
+
+这些文件保留原始公开对话，`anonymized=false`，并未自动脱敏。重建的训练上下文标记为
+`context_reconstructed=true`；SFT 仅使用会前记忆，不把会后记忆注入早先轮次。
+未指定 `run_ids` 表示全部仿真运行，显式空列表表示不导出仿真运行。
+DPO 只读取已提交批次与合格候选，在相同对话前缀后第一条不同的咨询师回复处配对；
+其奖励来源是完整会谈的排序信号，不是该单轮回复的独立临床分数。共同输入或提交证据不足时跳过，
+不会拼接分支末句。人工数据仍须显式开启 `include_interactive`，且仅导出已闭环会谈。
+
 测试产物可在进程退出后按次删除；`pytest` 会话结束默认删除本次调用目录，因此不设置 `PSYCHSANDBOX_KEEP_TESTS=1` 时不会持续占用空间。正式运行的目录与共享 SQLite 数据库应一起备份。只删除报告目录不会删除数据库记录，也不要只删除数据库，否则评估、重新生成报告和续跑将失去来源。诊断、轨迹和报告可能含有案例内容；全部被 Git 忽略，不提交、不自动上传。
 
 ### 清理测试日志（runs clean-tests）

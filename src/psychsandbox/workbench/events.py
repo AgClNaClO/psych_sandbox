@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sqlite3
 from typing import Any, AsyncGenerator
 
 from .db import db_transaction, get_connection
@@ -19,8 +18,6 @@ from ..domain import utc_now
 class EventHub:
     def __init__(self, db_path: str | None = None):
         self.db_path = db_path
-        self._listeners: dict[str, set[asyncio.Queue[WorkbenchEvent]]] = {}
-        self._lock = asyncio.Lock()
 
     def emit(
         self,
@@ -57,17 +54,7 @@ class EventHub:
         finally:
             conn.close()
 
-        # 内存通知队列（若在 asyncio 事件循环中）
-        self._dispatch_memory(stream, event)
         return event
-
-    def _dispatch_memory(self, stream: str, event: WorkbenchEvent) -> None:
-        queues = self._listeners.get(stream, set())
-        for q in list(queues):
-            try:
-                q.put_nowait(event)
-            except Exception:
-                pass
 
     def get_events(
         self, stream: str, after_seq: int = 0, limit: int = 200
@@ -101,61 +88,31 @@ class EventHub:
     async def subscribe(
         self, stream: str, after_seq: int = 0
     ) -> AsyncGenerator[WorkbenchEvent, None]:
-        """订阅指定 stream 的事件流：支持跨进程 SQLite 持久化事件与实时推送"""
-        q: asyncio.Queue[WorkbenchEvent] = asyncio.Queue()
-        async with self._lock:
-            if stream not in self._listeners:
-                self._listeners[stream] = set()
-            self._listeners[stream].add(q)
-
-        loop = asyncio.get_event_loop()
+        """顺序读取持久事件；线程、进程与分页都不能跳过尚未重放的序号。"""
+        loop = asyncio.get_running_loop()
         last_yielded_seq = after_seq
         last_ping_time = loop.time()
 
-        try:
-            while True:
-                # 1. 优先拉取 SQLite 中新增事件（支持独立 Worker 跨进程写入）
-                new_events = self.get_events(stream, after_seq=last_yielded_seq, limit=200)
-                if new_events:
-                    for ev in new_events:
-                        if ev.seq > last_yielded_seq:
-                            last_yielded_seq = ev.seq
-                            yield ev
-                    last_ping_time = loop.time()
-
-                # 2. 等待内存队列唤醒（同进程 emit），最多等待 0.5 秒
-                try:
-                    mem_event = await asyncio.wait_for(q.get(), timeout=0.5)
-                    if mem_event.seq > last_yielded_seq:
-                        last_yielded_seq = mem_event.seq
-                        yield mem_event
-                        last_ping_time = loop.time()
-                except asyncio.TimeoutError:
-                    pass
-
-                # 3. 每 10 秒发送心跳保活包
-                now_time = loop.time()
-                if now_time - last_ping_time >= 10.0:
-                    yield WorkbenchEvent(
-                        stream=stream,
-                        seq=last_yielded_seq,
-                        type="ping",
-                        payload={"timestamp": utc_now()},
-                    )
-                    last_ping_time = now_time
-        finally:
-            async with self._lock:
-                if stream in self._listeners and q in self._listeners[stream]:
-                    self._listeners[stream].remove(q)
-                    if not self._listeners[stream]:
-                        del self._listeners[stream]
-
-
-_GLOBAL_EVENT_HUB: EventHub | None = None
+        while True:
+            new_events = await asyncio.to_thread(
+                self.get_events, stream, after_seq=last_yielded_seq, limit=200
+            )
+            for ev in new_events:
+                last_yielded_seq = ev.seq
+                yield ev
+            if new_events:
+                last_ping_time = loop.time()
+                # Drain every page before waiting for new events.
+                continue
+            if loop.time() - last_ping_time >= 10.0:
+                yield WorkbenchEvent(
+                    stream=stream, seq=last_yielded_seq, type="ping",
+                    payload={"timestamp": utc_now()},
+                )
+                last_ping_time = loop.time()
+            await asyncio.sleep(0.5)
 
 
 def get_event_hub(db_path: str | None = None) -> EventHub:
-    global _GLOBAL_EVENT_HUB
-    if _GLOBAL_EVENT_HUB is None or (_GLOBAL_EVENT_HUB.db_path != db_path and db_path is not None):
-        _GLOBAL_EVENT_HUB = EventHub(db_path)
-    return _GLOBAL_EVENT_HUB
+    # No process-global DB binding: app instances and tests remain isolated.
+    return EventHub(db_path)

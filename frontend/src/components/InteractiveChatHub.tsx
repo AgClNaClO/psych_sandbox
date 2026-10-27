@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { api, subscribeSSE } from '../services/api';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { api, isVersionConflict, subscribeSSE } from '../services/api';
 import type { Course, CourseSessionDetail, TherapyDefinition } from '../types';
 import { Send, Plus, AlertCircle, PlayCircle, StopCircle, LogOut } from 'lucide-react';
 
@@ -26,77 +26,76 @@ export const InteractiveChatHub: React.FC<InteractiveChatHubProps> = ({ observer
   const [inputText, setInputText] = useState<string>('');
   const [isSending, setIsSending] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const selection = useRef('');
+  const refreshSequence = useRef(0);
 
-  useEffect(() => {
-    api.getTherapies().then(setTherapies).catch(console.error);
-    fetchCourses();
-  }, []);
-
-  const fetchCourses = () => {
-    api.getCourses().then((data) => {
-      setCourses(data);
-      if (!selectedCourseId && data.length > 0) {
-        setSelectedCourseId(data[0].course_id);
-      }
-    }).catch(console.error);
-  };
-
-  useEffect(() => {
-    if (!selectedCourseId) {
-      setCourseDetail(null);
-      setSessionDetail(null);
-      return;
-    }
-    api.getCourse(selectedCourseId).then((c) => {
-      setCourseDetail(c);
-      setSelectedSessionIdx(c.current_session || 1);
-    }).catch(console.error);
-  }, [selectedCourseId]);
-
-  useEffect(() => {
-    if (!selectedCourseId || !selectedSessionIdx) return;
-    fetchSessionDetail();
+  useLayoutEffect(() => {
+    selection.current = `${selectedCourseId}:${selectedSessionIdx}`;
   }, [selectedCourseId, selectedSessionIdx]);
 
-  const fetchSessionDetail = () => {
+  const fetchCourses = useCallback(() => {
+    return api.getCourses().then((data) => {
+      setCourses(data);
+      setSelectedCourseId((current) => current ?? data[0]?.course_id ?? null);
+    }).catch((error: Error) => setErrorMsg(error.message));
+  }, []);
+
+  const fetchSessionDetail = useCallback(() => {
     if (!selectedCourseId) return;
-    api.getSessionDetail(selectedCourseId, selectedSessionIdx)
+    const key = `${selectedCourseId}:${selectedSessionIdx}`;
+    const sequence = ++refreshSequence.current;
+    return api.getSessionDetail(selectedCourseId, selectedSessionIdx)
       .then((detail) => {
+        if (selection.current !== key || sequence !== refreshSequence.current) return;
         setSessionDetail(detail);
-        if (!detail.active_operation) {
-          setIsSending(false);
-        } else {
-          setIsSending(true);
-        }
-        if (detail.last_operation && detail.last_operation.status === 'failed') {
+        setCourseDetail((prev) => (prev?.course_id === detail.course_id
+          ? { ...prev, version: Math.max(prev.version, detail.course_version ?? prev.version) } : prev));
+        setIsSending(Boolean(detail.active_operation));
+        if (detail.last_operation?.status === 'failed') {
           setErrorMsg(`操作失败: ${detail.last_operation.error || '未知错误'}`);
         } else if (!detail.active_operation) {
           setErrorMsg(null);
         }
       })
-      .catch(console.error);
-  };
+      .catch((error: Error) => { if (selection.current === key) setErrorMsg(error.message); });
+  }, [selectedCourseId, selectedSessionIdx]);
+
+  useEffect(() => {
+    api.getTherapies().then(setTherapies).catch(console.error);
+    fetchCourses();
+  }, [fetchCourses]);
+
+  useEffect(() => {
+    if (!selectedCourseId) {
+      return;
+    }
+    let cancelled = false;
+    api.getCourse(selectedCourseId).then((c) => {
+      if (cancelled) return;
+      setCourseDetail(c);
+      setSelectedSessionIdx(c.current_session || 1);
+    }).catch(console.error);
+    return () => { cancelled = true; };
+  }, [selectedCourseId]);
+
+  useEffect(() => {
+    if (!selectedCourseId || !selectedSessionIdx) return;
+    fetchSessionDetail();
+  }, [selectedCourseId, selectedSessionIdx, fetchSessionDetail]);
 
   // SSE 实时事件监听
   useEffect(() => {
     if (!selectedCourseId) return;
-    const unsub = subscribeSSE(`course:${selectedCourseId}`, (event) => {
+    let cancelled = false;
+    const unsub = subscribeSSE(`course:${selectedCourseId}`, () => {
       fetchSessionDetail();
-      if (event.type === 'counselor_replied') {
-        setIsSending(false);
-        setErrorMsg(null);
-      }
-      if (event.type === 'operation_failed') {
-        setIsSending(false);
-        setErrorMsg(`操作失败: ${event.payload?.error || '未知错误'}`);
-      }
-      if (event.type === 'session_closed') {
-        setIsSending(false);
-        api.getCourse(selectedCourseId).then(setCourseDetail).catch(console.error);
-      }
+      api.getCourse(selectedCourseId).then((course) => {
+        if (!cancelled) setCourseDetail((previous) => previous?.course_id === course.course_id
+          ? { ...course, version: Math.max(previous.version, course.version) } : previous);
+      }).catch(console.error);
     });
-    return unsub;
-  }, [selectedCourseId, selectedSessionIdx]);
+    return () => { cancelled = true; unsub(); };
+  }, [selectedCourseId, fetchSessionDetail]);
 
   // 发送中短轮询自愈（以防网络延迟或丢帧）
   useEffect(() => {
@@ -105,16 +104,33 @@ export const InteractiveChatHub: React.FC<InteractiveChatHubProps> = ({ observer
       fetchSessionDetail();
     }, 1500);
     return () => clearInterval(timer);
-  }, [isSending, selectedCourseId, selectedSessionIdx]);
+  }, [isSending, selectedCourseId, fetchSessionDetail]);
+
+  // 获取当前最新权威版本号（支持主动同步远端）
+  const getLatestVersion = async (forceRefresh = false): Promise<number> => {
+    if (forceRefresh && selectedCourseId) {
+      const fresh = await api.getCourse(selectedCourseId);
+      setCourseDetail((prev) => prev?.course_id === fresh.course_id ? fresh : prev);
+      return fresh.version;
+    }
+    return Math.max(sessionDetail?.course_version ?? 1, courseDetail?.version ?? 1);
+  };
+
+  const refreshCourse = (courseId: string) => api.getCourse(courseId).then((fresh) => {
+    setCourseDetail((previous) => previous?.course_id === courseId
+      ? { ...fresh, version: Math.max(previous.version, fresh.version) } : previous);
+  }).catch(console.error);
 
   const handleResetLock = async () => {
     if (!courseDetail || !sessionDetail) return;
+    const key = selection.current;
     try {
       await api.resetSessionLock(courseDetail.course_id, sessionDetail.session_index);
+      if (selection.current !== key) return;
       setErrorMsg(null);
       setIsSending(false);
+      await refreshCourse(courseDetail.course_id);
       fetchSessionDetail();
-      api.getCourse(courseDetail.course_id).then(setCourseDetail).catch(console.error);
     } catch (err: any) {
       alert(`解除失败: ${err.message}`);
     }
@@ -130,6 +146,7 @@ export const InteractiveChatHub: React.FC<InteractiveChatHubProps> = ({ observer
       });
       setShowCreateModal(false);
       fetchCourses();
+      setCourseDetail(null); setSessionDetail(null); setInputText(''); setErrorMsg(null); setIsSending(false);
       setSelectedCourseId(created.course_id);
     } catch (err: any) {
       alert(`创建失败: ${err.message}`);
@@ -138,12 +155,26 @@ export const InteractiveChatHub: React.FC<InteractiveChatHubProps> = ({ observer
 
   const handleTriggerOpening = async () => {
     if (!courseDetail || !sessionDetail) return;
+    const key = selection.current;
     try {
       setIsSending(true);
       setErrorMsg(null);
-      const opId = `op-open-${Date.now()}`;
-      await api.triggerOpening(courseDetail.course_id, sessionDetail.session_index, opId, courseDetail.version);
+      let version = await getLatestVersion();
+      const opId = `op-open-${crypto.randomUUID()}`;
+      try {
+        await api.triggerOpening(courseDetail.course_id, sessionDetail.session_index, opId, version);
+      } catch (err: any) {
+        // 版本冲突自动自愈重试
+        if (isVersionConflict(err)) {
+          version = await getLatestVersion(true);
+          await api.triggerOpening(courseDetail.course_id, sessionDetail.session_index, opId, version);
+        } else {
+          throw err;
+        }
+      }
+      fetchSessionDetail();
     } catch (err: any) {
+      if (selection.current !== key) return;
       setErrorMsg(err.message);
       setIsSending(false);
     }
@@ -151,65 +182,110 @@ export const InteractiveChatHub: React.FC<InteractiveChatHubProps> = ({ observer
 
   const handleSendMessage = async () => {
     if (!inputText.trim() || !courseDetail || !sessionDetail || isSending) return;
+    const key = selection.current;
     const textToSend = inputText;
     setInputText('');
     setIsSending(true);
     setErrorMsg(null);
 
-    const msgId = `msg-${Date.now()}`;
-    const opId = `op-msg-${Date.now()}`;
+    const source = courseDetail.input_mode === 'roleplay' ? 'participant_roleplay' : 'participant_natural';
 
     try {
-      await api.sendMessage(courseDetail.course_id, sessionDetail.session_index, {
-        message_id: msgId,
-        operation_id: opId,
-        expected_version: courseDetail.version,
-        content: textToSend,
-        source: courseDetail.input_mode === 'roleplay' ? 'participant_roleplay' : 'participant_natural',
-      });
-      // 乐观锁成功，等待后端 short worker 生成咨询师回复
+      let version = await getLatestVersion();
+      const msgId = `msg-${crypto.randomUUID()}`;
+      const opId = `op-msg-${crypto.randomUUID()}`;
+
+      try {
+        await api.sendMessage(courseDetail.course_id, sessionDetail.session_index, {
+          message_id: msgId,
+          operation_id: opId,
+          expected_version: version,
+          content: textToSend,
+          source: source,
+        });
+      } catch (err: any) {
+        // 自动自愈：若报版本冲突 (409 version mismatch)，立刻拉取最新版本号无缝重试一次！
+        if (isVersionConflict(err)) {
+          console.warn('Detected course version mismatch, auto-refreshing version and retrying...');
+          version = await getLatestVersion(true);
+          await api.sendMessage(courseDetail.course_id, sessionDetail.session_index, {
+            message_id: msgId,
+            operation_id: opId,
+            expected_version: version,
+            content: textToSend,
+            source: source,
+          });
+        } else {
+          throw err;
+        }
+      }
+      // 发送成功，稍后拉取并等待回复
+      fetchSessionDetail();
     } catch (err: any) {
+      if (selection.current !== key) return;
       setErrorMsg(err.message);
       setInputText(textToSend); // 恢复输入
       setIsSending(false);
+      // 后台刷新一次最新 course，确保下一次点击发送时版本是正确的
+      if (selectedCourseId) refreshCourse(selectedCourseId);
     }
   };
 
   const handleCloseSession = async () => {
     if (!courseDetail || !sessionDetail) return;
+    const key = selection.current;
     if (!confirm('确定结束当前会谈吗？系统将启动 E.7~E.9 记忆整合、自评与下一计划生成。')) return;
 
-    const opId = `op-close-${Date.now()}`;
     try {
       setErrorMsg(null);
-      await api.closeCurrentSession(courseDetail.course_id, sessionDetail.session_index, opId, courseDetail.version);
+      let version = await getLatestVersion();
+      setIsSending(true);
+      const opId = `op-close-${crypto.randomUUID()}`;
+      try {
+        await api.closeCurrentSession(courseDetail.course_id, sessionDetail.session_index, opId, version);
+      } catch (err: any) {
+        if (isVersionConflict(err)) {
+          version = await getLatestVersion(true);
+          await api.closeCurrentSession(courseDetail.course_id, sessionDetail.session_index, opId, version);
+        } else {
+          throw err;
+        }
+      }
       fetchSessionDetail();
+      if (selectedCourseId) refreshCourse(selectedCourseId);
     } catch (err: any) {
+      if (selection.current !== key) return;
       setErrorMsg(err.message);
+      setIsSending(false);
     }
   };
 
   const handleStartNextSession = async () => {
     if (!courseDetail) return;
+    const key = selection.current;
     try {
       setErrorMsg(null);
       const nextSess = await api.startNextSession(courseDetail.course_id);
+      if (selection.current !== key) return;
       setSelectedSessionIdx(nextSess.session_index);
-      api.getCourse(courseDetail.course_id).then(setCourseDetail).catch(console.error);
+      refreshCourse(courseDetail.course_id);
     } catch (err: any) {
+      if (selection.current !== key) return;
       setErrorMsg(err.message);
     }
   };
 
   const handleCloseCourse = async () => {
     if (!courseDetail) return;
+    const key = selection.current;
     if (!confirm('确定提前结束整个疗程吗？用户主动结束记录为 participant_closed_course，不记为目标达成。')) return;
 
     try {
       setErrorMsg(null);
       await api.closeCourse(courseDetail.course_id, 'participant_closed_course');
-      api.getCourse(courseDetail.course_id).then(setCourseDetail).catch(console.error);
+      refreshCourse(courseDetail.course_id);
     } catch (err: any) {
+      if (selection.current !== key) return;
       setErrorMsg(err.message);
     }
   };
@@ -229,7 +305,11 @@ export const InteractiveChatHub: React.FC<InteractiveChatHubProps> = ({ observer
             <div
               key={c.course_id}
               className={`item-card ${selectedCourseId === c.course_id ? 'selected' : ''}`}
-              onClick={() => setSelectedCourseId(c.course_id)}
+              onClick={() => {
+                if (c.course_id === selectedCourseId) return;
+                setCourseDetail(null); setSessionDetail(null); setInputText(''); setErrorMsg(null); setIsSending(false);
+                setSelectedCourseId(c.course_id);
+              }}
             >
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
                 <span style={{ fontWeight: 600, fontSize: 13 }}>{c.title}</span>
@@ -264,7 +344,10 @@ export const InteractiveChatHub: React.FC<InteractiveChatHubProps> = ({ observer
                     key={idx}
                     className={`btn ${selectedSessionIdx === idx ? 'btn-primary' : 'btn-secondary'}`}
                     style={{ padding: '3px 8px', fontSize: 12 }}
-                    onClick={() => setSelectedSessionIdx(idx)}
+                    onClick={() => {
+                      if (idx === selectedSessionIdx) return;
+                      setSessionDetail(null); setSelectedSessionIdx(idx);
+                    }}
                   >
                     第 {idx} 场
                   </button>
@@ -290,6 +373,12 @@ export const InteractiveChatHub: React.FC<InteractiveChatHubProps> = ({ observer
             {sessionDetail?.status === 'closed' && courseDetail?.status === 'active' && (
               <button className="btn btn-primary" style={{ fontSize: 12 }} onClick={handleStartNextSession}>
                 <Plus size={13} /> 开始下一场会谈
+              </button>
+            )}
+
+            {sessionDetail?.status === 'close_failed' && courseDetail?.status === 'active' && (
+              <button className="btn btn-primary" onClick={handleCloseSession} disabled={isSending || observerMode}>
+                重试会后整理
               </button>
             )}
 
@@ -319,13 +408,16 @@ export const InteractiveChatHub: React.FC<InteractiveChatHubProps> = ({ observer
                 <AlertCircle size={15} style={{ flexShrink: 0 }} />
                 <span>{errorMsg}</span>
               </div>
-              <button
-                className="btn btn-secondary"
-                style={{ fontSize: 11, padding: '2px 8px', height: 26, background: '#fff', color: '#b91c1c', borderColor: '#fca5a5' }}
-                onClick={handleResetLock}
-              >
-                清除锁定
-              </button>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button
+                  className="btn btn-secondary"
+                  style={{ fontSize: 11, padding: '2px 8px', height: 26, background: '#fff', color: '#b91c1c', borderColor: '#fca5a5' }}
+                  onClick={handleResetLock}
+                  title="重置当前操作锁并刷新版本号"
+                >
+                  清除锁定与同步
+                </button>
+              </div>
             </div>
           )}
 

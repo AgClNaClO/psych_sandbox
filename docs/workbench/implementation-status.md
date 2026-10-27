@@ -146,7 +146,42 @@ npm --prefix frontend run dev
 ```
 访问：`http://localhost:5173`。
 
+### 4.4 近期缺陷排查与修复专项记录 (2026-10-27)
+针对用户在实际使用中反馈的 3 项体验与数据缺陷进行了彻底排查、修复与全套回归验证：
+1. **五流派案例库不全问题**：
+   - *根因*：`frontend/src/components/SimulationHub.tsx` 中下拉菜单硬编码了 `.slice(0, 100)` 截断。
+   - *修复*：移除截断，增加五流派（All, CBT, BT, HET, PDT, PMT）快速分类筛选器，并采用 `<optgroup>` 按流派清晰分组展示全量 341 个案例（CBT 148例、BT 43例、HET 50例、PDT 50例、PMT 50例）。
+2. **总督导评分与评价意见缺失问题**：
+   - *根因*：`psychsandbox.sqlite3` 中 `holistic_evaluations` 表真实存储的键为 `counselor_overall`、`client_overall` 及分项量表字典，而后端投影 `projections.py` 和前端原代码取的是 `holistic_score` 和 `overall_score`。
+   - *修复*：在 `projections.py` 中规范提取 `counselor_overall` 与 `client_overall`，并在无文本时根据结构化量表自动组合多维度临床评估摘要；在前端卡片中丰富呈现总督导分（/ 7.0）、来访者评定分以及 CTRS、WAI、HTAIS、RRO、BDI-II 等各量表指标徽章。
+3. **人工多会谈 Course version mismatch 频繁死锁问题**：
+   - *根因*：会话交互中后端 `courses.version` 递增，但前端仅拉取了会谈消息并未更新本地的 `courseDetail.version`；再次发消息时携带过期版本号触发 409 异常，且异常未提供自愈重试导致界面死锁。
+   - *修复*：
+     - 后端 `CourseSessionDetailResponse` 增加并实时返回权威 `course_version`；
+     - 前端在消息交互、开场、结案以及 SSE 推送时双向同步最新版本号；
+     - 增加**乐观锁 409 异常自动自愈机制**：捕获到版本冲突时立刻拉取最新版本无缝自动重试一次；在界面提供“清除锁定与同步”双重兜底。
+
 ---
+
+### 4.5 代码质量审查与可靠性修复（2026-10-28）
+
+详细问题分级、修复依据与验证限制见 [代码质量评估](code-quality-review.md)。
+本轮修复 Worker 配置/技能目录接线、人工输入风险路由、原子入队与幂等、取消后的迟到写入、
+会谈关闭失败恢复、会谈边界检查、SSE 分页重放与前端订阅通道、异步选择竞态、
+SFT/DPO 真实 schema 与上下文隔离、导出路径/覆盖、零分与评测指标失真，以及安装依赖和 reload 参数。
+保留此前未提交的修改与启动脚本的用户可调评分设置。
+
+最终验证（Python 3.14.7，本地 `.[dev]` 环境）：
+
+- `.venv\Scripts\python.exe -B -m pytest -q`：**582 passed in 56.26s**。
+- 工作台专项：**49 passed**，其中新增可靠性回归 **34 项**。
+- `npm --prefix frontend test`：**2 passed**。
+- `npm --prefix frontend run lint`：**无告警**。
+- `npm --prefix frontend run build`：**通过**，包含 TypeScript 检查，生产静态包已更新。
+- `git diff --check`：通过。
+
+验证仅使用离线模型替身，没有调用真实供应商服务；未进行人工浏览器全流程或临床有效性验收。
+Web 导出新目录与数据语义见 [运行产物约定](../RUN_ARTIFACTS.md#web-工作台训练导出)。
 
 ## 5. 边界与合规声明
 

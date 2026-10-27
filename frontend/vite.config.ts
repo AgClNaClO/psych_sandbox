@@ -15,7 +15,7 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: path.resolve(__dirname, '../src/psychsandbox/workbench/frontend_dist'),
+    outDir: path.resolve(import.meta.dirname, '../src/psychsandbox/workbench/frontend_dist'),
     emptyOutDir: true,
   },
 });

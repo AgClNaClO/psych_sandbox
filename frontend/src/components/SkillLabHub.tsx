@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { api } from '../services/api';
 import type { SkillProposal, SkillRelease, TherapyDefinition } from '../types';
 import { GitBranch, ShieldCheck, Plus, RotateCcw } from 'lucide-react';
@@ -43,6 +43,8 @@ export const SkillLabHub: React.FC<SkillLabHubProps> = ({ observerMode = false }
   const [loading, setLoading] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const therapyRef = useRef(selectedTherapy);
+  useLayoutEffect(() => { therapyRef.current = selectedTherapy; }, [selectedTherapy]);
 
   useEffect(() => {
     api.getTherapies().then((t) => {
@@ -51,33 +53,35 @@ export const SkillLabHub: React.FC<SkillLabHubProps> = ({ observerMode = false }
     }).catch(console.error);
   }, []);
 
+  const fetchReleases = useCallback(() => {
+    api.getSkillReleases(selectedTherapy).then((data) => {
+      if (therapyRef.current !== selectedTherapy) return;
+      setReleases(data);
+      setSelectedReleaseId((current) => data.some((item) => item.release_id === current)
+        ? current : data.find((item) => item.is_active)?.release_id ?? data[0]?.release_id ?? null);
+    }).catch(console.error);
+  }, [selectedTherapy]);
+
+  const fetchProposals = useCallback(() => {
+    api.getProposals(selectedTherapy).then((data) => {
+      if (therapyRef.current !== selectedTherapy) return;
+      setProposals(data);
+      setSelectedProposalId((current) => data.some((item) => item.proposal_id === current)
+        ? current : data[0]?.proposal_id ?? null);
+    }).catch(console.error);
+  }, [selectedTherapy]);
+
+  const fetchSkillTree = useCallback(() => {
+    api.getSkillTree(selectedTherapy).then((data) => {
+      if (therapyRef.current === selectedTherapy) setSkillTreeData(data);
+    }).catch(console.error);
+  }, [selectedTherapy]);
+
   useEffect(() => {
     fetchReleases();
     fetchProposals();
     fetchSkillTree();
-  }, [selectedTherapy]);
-
-  const fetchReleases = () => {
-    api.getSkillReleases(selectedTherapy).then((data) => {
-      setReleases(data);
-      if (data.length > 0 && !selectedReleaseId) {
-        setSelectedReleaseId(data[0].release_id);
-      }
-    }).catch(console.error);
-  };
-
-  const fetchProposals = () => {
-    api.getProposals(selectedTherapy).then((data) => {
-      setProposals(data);
-      if (data.length > 0 && !selectedProposalId) {
-        setSelectedProposalId(data[0].proposal_id);
-      }
-    }).catch(console.error);
-  };
-
-  const fetchSkillTree = () => {
-    api.getSkillTree(selectedTherapy).then(setSkillTreeData).catch(console.error);
-  };
+  }, [fetchReleases, fetchProposals, fetchSkillTree]);
 
   const handleSubmitProposal = async () => {
     try {
@@ -85,7 +89,7 @@ export const SkillLabHub: React.FC<SkillLabHubProps> = ({ observerMode = false }
       setErrorMsg(null);
       await api.submitProposal({
         therapy: selectedTherapy,
-        base_release_id: selectedReleaseId || 'base',
+        base_release_id: selectedReleaseId || undefined,
         title: propTitle,
         parent_meta_id: propParentMeta,
         stage: propStage,
@@ -178,7 +182,11 @@ export const SkillLabHub: React.FC<SkillLabHubProps> = ({ observerMode = false }
           <select
             style={{ width: '100%', padding: '6px 8px', marginTop: 4, borderRadius: 4, border: '1px solid var(--border-color)' }}
             value={selectedTherapy}
-            onChange={(e) => setSelectedTherapy(e.target.value)}
+            onChange={(e) => {
+              setReleases([]); setProposals([]); setSkillTreeData(null);
+              setSelectedReleaseId(null); setSelectedProposalId(null);
+              setSelectedTherapy(e.target.value);
+            }}
           >
             {therapies.map((t) => (
               <option key={t.therapy} value={t.therapy}>

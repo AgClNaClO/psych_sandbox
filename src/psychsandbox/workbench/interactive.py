@@ -30,6 +30,7 @@ from .models import (
     CloseStepRecord,
 )
 from .events import get_event_hub
+from .job_manager import JobManager
 from ..agents.counselor import CounselorAgent
 from ..domain import (
     ClinicalSummary,
@@ -104,6 +105,48 @@ class CourseManager:
     def __init__(self, db_path: str | None = None):
         self.db_path = db_path
         self.events = get_event_hub(db_path)
+
+    def _enqueue_operation(self, conn, course_id: str, operation_id: str, kind: str) -> None:
+        JobManager(self.db_path).enqueue_job(
+            kind=kind, lane="short", course_id=course_id,
+            payload={"course_id": course_id, "operation_id": operation_id},
+            connection=conn,
+        )
+
+    @staticmethod
+    def _existing_operation(cur, course_id: str, session_index: int, operation_id: str, kind: str):
+        cur.execute("SELECT * FROM course_operations WHERE operation_id = ?", (operation_id,))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        if (row["course_id"], row["session_index"], row["kind"]) != (course_id, session_index, kind):
+            raise VersionConflictError("Operation id is already bound to another request")
+        return OperationResponse(
+            **{key: row[key] for key in (
+                "operation_id", "course_id", "session_index", "kind", "status",
+                "expected_version", "error", "created_at", "updated_at",
+            )},
+            payload=json.loads(row["payload_json"]),
+            result=json.loads(row["result_json"]) if row["result_json"] else None,
+        )
+
+    @staticmethod
+    def _check_session(cur, course_id: str, session_index: int, *, closing: bool = False) -> None:
+        cur.execute(
+            "SELECT status FROM course_sessions WHERE course_id = ? AND session_index = ?",
+            (course_id, session_index),
+        )
+        row = cur.fetchone()
+        allowed = ("open", "close_failed") if closing else ("open",)
+        if row is None or row["status"] not in allowed:
+            raise SessionClosedError(f"Session {session_index} is not open")
+        cur.execute(
+            """SELECT 1 FROM course_operations WHERE course_id = ?
+            AND session_index = ? AND status IN ('pending', 'running')""",
+            (course_id, session_index),
+        )
+        if cur.fetchone():
+            raise OperationBusyError("Another operation is currently active in this session")
 
     def create_course(
         self,
@@ -236,11 +279,34 @@ class CourseManager:
             now = utc_now()
             with db_transaction(conn) as cur:
                 cur.execute(
-                    """INSERT OR IGNORE INTO course_sessions
+                    "SELECT 1 FROM course_sessions WHERE course_id = ? AND session_index = ?",
+                    (course_id, session_index),
+                )
+                if cur.fetchone():
+                    return self.get_session_detail(course_id, session_index)
+                cur.execute("SELECT status FROM courses WHERE course_id = ?", (course_id,))
+                if cur.fetchone()["status"] != "active":
+                    raise ValueError("Cannot create session in a closed course")
+                cur.execute(
+                    """SELECT session_index, status FROM course_sessions WHERE course_id = ?
+                    ORDER BY session_index DESC LIMIT 1""", (course_id,),
+                )
+                last = cur.fetchone()
+                if last and last["status"] != "closed":
+                    raise ValueError("Close the current session before starting the next one")
+                if session_index != (last["session_index"] + 1 if last else 1):
+                    raise ValueError("Sessions must advance exactly one boundary")
+                cur.execute(
+                    """INSERT INTO course_sessions
                     (course_id, session_index, status, plan_json, memory_before_json, created_at)
                     VALUES (?, ?, 'open', ?, ?, ?)""",
                     (course_id, session_index, plan.model_dump_json(), memory.model_dump_json(), now),
                 )
+                if session_index > 1:
+                    cur.execute(
+                        "UPDATE courses SET version = version + 1, updated_at = ? WHERE course_id = ?",
+                        (now, course_id),
+                    )
             return self.get_session_detail(course_id, session_index)
         finally:
             conn.close()
@@ -256,6 +322,10 @@ class CourseManager:
             s_row = cur.fetchone()
             if not s_row:
                 return None
+
+            cur.execute("SELECT version FROM courses WHERE course_id = ?", (course_id,))
+            c_row = cur.fetchone()
+            course_version = c_row["version"] if c_row else 1
 
             # 消息
             cur.execute(
@@ -335,6 +405,7 @@ class CourseManager:
 
             return CourseSessionDetailResponse(
                 course_id=s_row["course_id"],
+                course_version=course_version,
                 session_index=s_row["session_index"],
                 status=s_row["status"],
                 plan=json.loads(s_row["plan_json"]),
@@ -365,6 +436,25 @@ class CourseManager:
                     (utc_now(), course_id, session_index),
                 )
                 affected = cur.rowcount
+                cur.execute(
+                    """UPDATE course_sessions SET status = 'close_failed'
+                    WHERE course_id = ? AND session_index = ? AND status = 'closing'""",
+                    (course_id, session_index),
+                )
+                cur.execute(
+                    """UPDATE jobs SET cancel_requested = 1,
+                    status = CASE WHEN status = 'queued' THEN 'cancelled' ELSE status END,
+                    updated_at = ? WHERE course_id = ? AND status IN ('queued', 'running')
+                    AND json_extract(payload_json, '$.operation_id') IN (
+                        SELECT operation_id FROM course_operations WHERE course_id = ?
+                        AND session_index = ? AND status = 'cancelled')""",
+                    (utc_now(), course_id, course_id, session_index),
+                )
+                if affected:
+                    cur.execute(
+                        "UPDATE courses SET version = version + 1, updated_at = ? WHERE course_id = ?",
+                        (utc_now(), course_id),
+                    )
             if affected > 0:
                 self.events.emit(
                     f"course:{course_id}",
@@ -394,6 +484,16 @@ class CourseManager:
                 existing_msg = cur.fetchone()
                 cur.execute("SELECT * FROM course_operations WHERE operation_id = ?", (operation_id,))
                 existing_op = cur.fetchone()
+                if existing_msg or existing_op:
+                    if not (
+                        existing_msg and existing_op
+                        and (existing_msg["course_id"], existing_msg["session_index"], existing_msg["content"], existing_msg["source"])
+                        == (course_id, session_index, content, source)
+                        and (existing_op["course_id"], existing_op["session_index"], existing_op["kind"])
+                        == (course_id, session_index, "message")
+                        and json.loads(existing_op["payload_json"]).get("user_message_id") == message_id
+                    ):
+                        raise VersionConflictError("Message or operation id is already bound to another request")
                 if existing_msg and existing_op:
                     return (
                         CourseMessageResponse(
@@ -425,7 +525,7 @@ class CourseManager:
                 cur.execute("SELECT version, status FROM courses WHERE course_id = ?", (course_id,))
                 c_row = cur.fetchone()
                 if not c_row:
-                    raise ValueError(f"Course {course_id} not found")
+                    raise SessionClosedError(f"Course {course_id} not found")
                 if c_row["status"] == "closed":
                     raise SessionClosedError("Course is closed")
                 if c_row["version"] != expected_version:
@@ -473,6 +573,7 @@ class CourseManager:
                     "UPDATE courses SET version = version + 1, updated_at = ? WHERE course_id = ?",
                     (now, course_id),
                 )
+                self._enqueue_operation(conn, course_id, operation_id, "course_reply")
 
             msg_res = CourseMessageResponse(
                 message_id=message_id,
@@ -516,12 +617,23 @@ class CourseManager:
         conn = get_connection(self.db_path)
         try:
             with db_transaction(conn) as cur:
+                existing = self._existing_operation(cur, course_id, session_index, operation_id, "opening")
+                if existing:
+                    return existing
                 cur.execute("SELECT version, status FROM courses WHERE course_id = ?", (course_id,))
                 c_row = cur.fetchone()
                 if not c_row or c_row["status"] == "closed":
                     raise SessionClosedError("Course is closed")
                 if c_row["version"] != expected_version:
                     raise VersionConflictError("Course version conflict")
+
+                self._check_session(cur, course_id, session_index)
+                cur.execute(
+                    "SELECT 1 FROM course_messages WHERE course_id = ? AND session_index = ? LIMIT 1",
+                    (course_id, session_index),
+                )
+                if cur.fetchone():
+                    raise SessionClosedError("Opening is only allowed before the first message")
 
                 cur.execute(
                     """SELECT operation_id FROM course_operations
@@ -542,6 +654,7 @@ class CourseManager:
                     "UPDATE courses SET version = version + 1, updated_at = ? WHERE course_id = ?",
                     (now, course_id),
                 )
+                self._enqueue_operation(conn, course_id, operation_id, "course_reply")
 
             op_res = OperationResponse(
                 operation_id=operation_id,
@@ -573,10 +686,16 @@ class CourseManager:
         conn = get_connection(self.db_path)
         try:
             with db_transaction(conn) as cur:
-                cur.execute("SELECT version FROM courses WHERE course_id = ?", (course_id,))
+                existing = self._existing_operation(cur, course_id, session_index, operation_id, "close_session")
+                if existing:
+                    return existing
+                cur.execute("SELECT version, status FROM courses WHERE course_id = ?", (course_id,))
                 c_row = cur.fetchone()
-                if not c_row or c_row["version"] != expected_version:
+                if not c_row or c_row["status"] == "closed":
+                    raise SessionClosedError("Course is closed")
+                if c_row["version"] != expected_version:
                     raise VersionConflictError("Version conflict")
+                self._check_session(cur, course_id, session_index, closing=True)
 
                 cur.execute(
                     "UPDATE course_sessions SET status = 'closing' WHERE course_id = ? AND session_index = ?",
@@ -593,6 +712,7 @@ class CourseManager:
                     "UPDATE courses SET version = version + 1, updated_at = ? WHERE course_id = ?",
                     (now, course_id),
                 )
+                self._enqueue_operation(conn, course_id, operation_id, "course_close")
 
             op_res = OperationResponse(
                 operation_id=operation_id,
@@ -619,6 +739,18 @@ class CourseManager:
         conn = get_connection(self.db_path)
         try:
             with db_transaction(conn) as cur:
+                cur.execute("SELECT status FROM courses WHERE course_id = ?", (course_id,))
+                row = cur.fetchone()
+                if row is None:
+                    raise SessionClosedError("Course not found")
+                if row["status"] == "closed":
+                    return self.get_course(course_id)
+                cur.execute(
+                    """SELECT 1 FROM course_operations WHERE course_id = ?
+                    AND status IN ('pending', 'running') LIMIT 1""", (course_id,),
+                )
+                if cur.fetchone():
+                    raise OperationBusyError("Wait for the active operation before closing the course")
                 cur.execute(
                     """UPDATE courses
                     SET status = 'closed', close_reason = ?, version = version + 1, updated_at = ?
@@ -658,32 +790,29 @@ class InteractiveRunner:
     async def execute_operation(self, course_id: str, operation_id: str) -> None:
         conn = get_connection(self.db_path)
         try:
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT * FROM course_operations WHERE operation_id = ? AND course_id = ?",
-                (operation_id, course_id),
-            )
-            op = cur.fetchone()
-            if not op or op["status"] not in ("pending", "running"):
-                return
-
-            session_index = op["session_index"]
-            kind = op["kind"]
-
-            # 标记为 running
             with db_transaction(conn) as t_cur:
                 t_cur.execute(
+                    "SELECT * FROM course_operations WHERE operation_id = ? AND course_id = ?",
+                    (operation_id, course_id),
+                )
+                op = t_cur.fetchone()
+                if not op or op["status"] not in ("pending", "running"):
+                    return
+                session_index = op["session_index"]
+                kind = op["kind"]
+                execution_token = utc_now()
+                t_cur.execute(
                     "UPDATE course_operations SET status = 'running', updated_at = ? WHERE operation_id = ?",
-                    (utc_now(), operation_id),
+                    (execution_token, operation_id),
                 )
         finally:
             conn.close()
 
         try:
             if kind in ("message", "opening"):
-                await self._process_reply(course_id, session_index, operation_id, is_opening=(kind == "opening"))
+                await self._process_reply(course_id, session_index, operation_id, execution_token, is_opening=(kind == "opening"))
             elif kind == "close_session":
-                await self._process_close(course_id, session_index, operation_id)
+                await self._process_close(course_id, session_index, operation_id, execution_token)
         except Exception as exc:
             # 标记 operation failed
             conn = get_connection(self.db_path)
@@ -692,9 +821,15 @@ class InteractiveRunner:
                     t_cur.execute(
                         """UPDATE course_operations
                         SET status = 'failed', error = ?, updated_at = ?
-                        WHERE operation_id = ?""",
-                        (str(exc), utc_now(), operation_id),
+                        WHERE operation_id = ? AND status = 'running' AND updated_at = ?""",
+                        (str(exc), utc_now(), operation_id, execution_token),
                     )
+                    if t_cur.rowcount and kind == "close_session":
+                        t_cur.execute(
+                            """UPDATE course_sessions SET status = 'close_failed'
+                            WHERE course_id = ? AND session_index = ? AND status = 'closing'""",
+                            (course_id, session_index),
+                        )
                 self.events.emit(
                     f"course:{course_id}",
                     "operation_failed",
@@ -705,7 +840,7 @@ class InteractiveRunner:
             raise
 
     async def _process_reply(
-        self, course_id: str, session_index: int, operation_id: str, is_opening: bool
+        self, course_id: str, session_index: int, operation_id: str, execution_token: str, is_opening: bool
     ) -> None:
         conn = get_connection(self.db_path)
         try:
@@ -735,7 +870,7 @@ class InteractiveRunner:
                     last_user_msg = user_msgs[-1]["content"]
 
             counselor_turns_count = sum(1 for m in dialogue if m["role"] == "counselor")
-            risk = RiskAssessment(level=RiskLevel.LOW)
+            risk = self.safety.assess_input(last_user_msg)
 
             # 调用 CounselorAgent
             turn: CounselorTurn = await self.counselor.respond(
@@ -749,14 +884,18 @@ class InteractiveRunner:
 
             # 输出安全校验
             assessment = self.safety.assess_output(turn.response, risk)
+            if assessment.categories:
+                raise ValueError("Counselor output failed safety checks: " + ", ".join(assessment.categories))
             metadata = {
                 "decision": turn.decision.model_dump() if turn.decision else {},
+                "input_risk": risk.model_dump(mode="json"),
                 "safety_assessment": assessment.model_dump() if assessment else {},
             }
 
             reply_msg_id = f"cmsg-{uuid.uuid4().hex[:12]}"
             now = utc_now()
             with db_transaction(conn) as t_cur:
+                self._check_execution(t_cur, operation_id, execution_token)
                 # 写入咨询师消息
                 t_cur.execute(
                     """INSERT INTO course_messages
@@ -791,8 +930,21 @@ class InteractiveRunner:
         finally:
             conn.close()
 
-    async def _process_close(self, course_id: str, session_index: int, operation_id: str) -> None:
+    @staticmethod
+    def _check_execution(cur, operation_id: str, execution_token: str) -> None:
+        cur.execute(
+            "SELECT status, updated_at FROM course_operations WHERE operation_id = ?",
+            (operation_id,),
+        )
+        row = cur.fetchone()
+        if not row or row["status"] != "running" or row["updated_at"] != execution_token:
+            raise SessionClosedError("Operation was cancelled or replaced")
+
+    async def _process_close(self, course_id: str, session_index: int, operation_id: str, execution_token: str) -> None:
         """执行会后整理闭环工作流"""
+        async def run_step(course_id, session_index, name, fn):
+            return await self._run_step(course_id, session_index, name, fn, operation_id, execution_token)
+
         conn = get_connection(self.db_path)
         try:
             cur = conn.cursor()
@@ -819,7 +971,7 @@ class InteractiveRunner:
             ]
 
             # 步骤 1: E.7 提取 (Extract)
-            step1_out = await self._run_step(
+            step1_out = await run_step(
                 course_id, session_index, "extract",
                 lambda: self.extractor.extract(dialogue_msgs, [plan.therapy], session_index),
             )
@@ -829,7 +981,7 @@ class InteractiveRunner:
             )
 
             # 步骤 2: E.8 档案合并 (Merge)
-            step2_out = await self._run_step(
+            step2_out = await run_step(
                 course_id, session_index, "merge",
                 lambda: self.merger.merge(memory.known_background, extracted, [plan.therapy]),
             )
@@ -840,7 +992,7 @@ class InteractiveRunner:
             memory.known_background = unlocked
 
             # 步骤 3: E.9 临床摘要 (Summary)
-            step3_out = await self._run_step(
+            step3_out = await run_step(
                 course_id, session_index, "summary",
                 lambda: self.summarizer.summarize(session_index, dialogue_msgs, plan, [plan.therapy], SessionChecklist()),
             )
@@ -867,7 +1019,7 @@ class InteractiveRunner:
                 )
                 return new_mem.model_dump(mode="json")
 
-            step4_out = await self._run_step(course_id, session_index, "consolidate", do_consolidate)
+            step4_out = await run_step(course_id, session_index, "consolidate", do_consolidate)
             memory_after = SessionMemory.model_validate(step4_out)
 
             # 步骤 5: 咨询师自评 (Review)
@@ -877,7 +1029,7 @@ class InteractiveRunner:
                 session_index=session_index + 1,
                 objectives=plan.objectives,
             )
-            step5_out = await self._run_step(
+            step5_out = await run_step(
                 course_id, session_index, "review",
                 lambda: self.counselor.review_session(
                     session=dummy_session,
@@ -904,10 +1056,11 @@ class InteractiveRunner:
                 )
                 return next_p.model_dump(mode="json")
 
-            step6_out = await self._run_step(course_id, session_index, "plan", do_plan)
+            step6_out = await run_step(course_id, session_index, "plan", do_plan)
 
             now = utc_now()
             with db_transaction(conn) as t_cur:
+                self._check_execution(t_cur, operation_id, execution_token)
                 # 关闭会谈
                 t_cur.execute(
                     """UPDATE course_sessions
@@ -953,11 +1106,13 @@ class InteractiveRunner:
             conn.close()
 
     async def _run_step(
-        self, course_id: str, session_index: int, step_name: str, fn: Any
+        self, course_id: str, session_index: int, step_name: str, fn: Any,
+        operation_id: str, execution_token: str,
     ) -> Any:
         conn = get_connection(self.db_path)
         try:
             cur = conn.cursor()
+            self._check_execution(cur, operation_id, execution_token)
             cur.execute(
                 """SELECT status, output_json FROM course_close_steps
                 WHERE course_id = ? AND session_index = ? AND step_name = ?""",
@@ -979,6 +1134,7 @@ class InteractiveRunner:
             conn = get_connection(self.db_path)
             try:
                 with db_transaction(conn) as t_cur:
+                    self._check_execution(t_cur, operation_id, execution_token)
                     t_cur.execute(
                         """INSERT OR REPLACE INTO course_close_steps
                         (course_id, session_index, step_name, status, input_summary_json, output_json, error, created_at)
@@ -992,6 +1148,7 @@ class InteractiveRunner:
             conn = get_connection(self.db_path)
             try:
                 with db_transaction(conn) as t_cur:
+                    self._check_execution(t_cur, operation_id, execution_token)
                     t_cur.execute(
                         """INSERT OR REPLACE INTO course_close_steps
                         (course_id, session_index, step_name, status, input_summary_json, output_json, error, created_at)

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 from pathlib import Path
 import signal
@@ -33,6 +34,9 @@ from ..runtime import CounselingSandbox
 from ..domain import SandboxConfig
 from ..model_client import create_gateway
 from ..agents.counselor import CounselorAgent
+from ..config import default_config
+from ..skills import SkillCatalog, SkillRegistry
+from ..therapies import normalize_therapy_id
 
 
 class WorkbenchWorker:
@@ -77,8 +81,8 @@ class WorkbenchWorker:
 
                 print(f"[{self.worker_id}] 认领到任务 job_id={job.job_id}, kind={job.kind}, attempt={job.attempt}")
                 self._current_job = job
-                self._stop_requested_for_job = False
-                self._cancel_requested_for_job = False
+                self._stop_requested_for_job = job.stop_requested
+                self._cancel_requested_for_job = job.cancel_requested
 
                 # 3. 启动心跳协程并执行任务
                 heartbeat_task = asyncio.create_task(
@@ -142,13 +146,22 @@ class WorkbenchWorker:
             else:
                 raise ValueError(f"Unknown job kind: {kind}")
         except asyncio.CancelledError:
-            self.job_manager.mark_cancelled_job(job.job_id, job.attempt, self.worker_id)
-            self.event_hub.emit(f"job:{job.job_id}", "job_cancelled", {"job_id": job.job_id})
+            if self.job_manager.mark_cancelled_job(job.job_id, job.attempt, self.worker_id):
+                if job.course_id and job.payload.get("operation_id"):
+                    self._fail_course_operation(job.course_id, job.payload["operation_id"], "Job cancelled")
+                self.event_hub.emit(f"job:{job.job_id}", "job_cancelled", {"job_id": job.job_id})
             raise
         except Exception as exc:
             traceback.print_exc()
-            self.job_manager.fail_job(job.job_id, job.attempt, self.worker_id, str(exc))
-            self.event_hub.emit(f"job:{job.job_id}", "job_failed", {"job_id": job.job_id, "error": str(exc)})
+            if self.job_manager.fail_job(
+                job.job_id, job.attempt, self.worker_id, str(exc),
+                retryable=job.kind == "simulation" and not isinstance(exc, (ValueError, KeyError)),
+            ):
+                current = self.job_manager.get_job(job.job_id)
+                self.event_hub.emit(
+                    f"job:{job.job_id}", "job_requeued" if current.status == "queued" else "job_failed",
+                    {"job_id": job.job_id, "error": str(exc)},
+                )
 
     async def _run_simulation_job(self, job: JobResponse) -> None:
         payload = job.payload
@@ -157,31 +170,50 @@ class WorkbenchWorker:
         session_count = payload.get("session_count", 1)
         seed = payload.get("seed")
         resume_run_id = payload.get("resume_run_id")
-        run_id = job.run_id or payload.get("run_id")
+        run_id = resume_run_id or job.run_id or payload.get("run_id")
+        if run_id and not self.job_manager.bind_run(job.job_id, job.attempt, self.worker_id, run_id):
+            return
 
         gateway = self.gateway_factory()
-        sandbox = CounselingSandbox(gateway=gateway)
+        sandbox = CounselingSandbox(default_config(), gateway=gateway)
 
         def progress_cb(msg: str):
+            nonlocal run_id
+            if run_id is None and sandbox.run_dir is not None:
+                run_id = json.loads((sandbox.run_dir / "run.json").read_text(encoding="utf-8"))["run_id"]
+                if not self.job_manager.bind_run(job.job_id, job.attempt, self.worker_id, run_id):
+                    raise RuntimeError("Job lease was lost before run initialization")
             self.event_hub.emit(
                 f"job:{job.job_id}",
                 "simulation_progress",
-                {"message": msg, "run_id": run_id or sandbox.run_dir.name if hasattr(sandbox, "run_dir") else ""},
+                {"message": msg, "job_id": job.job_id, "run_id": run_id},
             )
 
         def should_stop() -> bool:
             return self._stop_requested_for_job or self._cancel_requested_for_job
 
-        result = await sandbox.run_case(
-            case_id=case_id,
-            therapy=therapy,
-            session_count=session_count,
-            seed=seed,
-            resume_run_id=resume_run_id,
-            run_id=run_id,
-            progress_callback=progress_cb,
-            should_stop=should_stop,
-        )
+        try:
+            try:
+                existing = sandbox.store.load_run_metadata(run_id) if run_id else None
+            except KeyError:
+                existing = None
+            if existing is not None:
+                resume_run_id = run_id
+            if existing and (existing["case_id"] != case_id
+                             or (therapy and existing["therapy"] != normalize_therapy_id(therapy))
+                             or (seed is not None and seed != existing["seed"])):
+                raise ValueError("Retry/resume must preserve the original case, therapy and seed")
+            if (existing and job.attempt > 1 and existing["status"] == "completed"
+                    and len(sandbox.store.load_sessions(run_id)) >= session_count):
+                result = sandbox.store.load_run(run_id)
+            else:
+                result = await sandbox.run_case(
+                    case_id=case_id, therapy=therapy, session_count=session_count,
+                    seed=seed, resume_run_id=resume_run_id, run_id=run_id,
+                    progress_callback=progress_cb, should_stop=should_stop,
+                )
+        finally:
+            sandbox.store.close()
 
         res_dict = {
             "run_id": result.run_id,
@@ -191,11 +223,11 @@ class WorkbenchWorker:
         }
 
         if should_stop():
-            self.job_manager.mark_stopped_job(job.job_id, job.attempt, self.worker_id, res_dict)
-            self.event_hub.emit(f"job:{job.job_id}", "job_stopped", res_dict)
+            if self.job_manager.mark_stopped_job(job.job_id, job.attempt, self.worker_id, res_dict):
+                self.event_hub.emit(f"job:{job.job_id}", "job_stopped", res_dict)
         else:
-            self.job_manager.complete_job(job.job_id, job.attempt, self.worker_id, res_dict)
-            self.event_hub.emit(f"job:{job.job_id}", "job_succeeded", res_dict)
+            if self.job_manager.complete_job(job.job_id, job.attempt, self.worker_id, res_dict):
+                self.event_hub.emit(f"job:{job.job_id}", "job_succeeded", res_dict)
 
     def _fail_course_operation(self, course_id: str, operation_id: str, error: str) -> None:
         conn = get_connection(self.db_path)
@@ -207,6 +239,13 @@ class WorkbenchWorker:
                     WHERE operation_id = ? AND course_id = ? AND status IN ('pending', 'running')""",
                     (error, utc_now(), operation_id, course_id),
                 )
+                if cur.rowcount:
+                    cur.execute(
+                        """UPDATE course_sessions SET status = 'close_failed'
+                        WHERE course_id = ? AND status = 'closing' AND session_index = (
+                            SELECT session_index FROM course_operations WHERE operation_id = ?
+                            AND kind = 'close_session')""", (course_id, operation_id),
+                    )
         except Exception as db_err:
             print(f"[{self.worker_id}] 释放操作锁失败: {db_err}")
         finally:
@@ -224,22 +263,29 @@ class WorkbenchWorker:
 
         try:
             gateway = self.gateway_factory()
-            counselor = CounselorAgent(gateway=gateway)
+            config = default_config()
+            counselor = CounselorAgent(
+                gateway=gateway,
+                skill_catalog=SkillCatalog(SkillRegistry.from_project(config.project_root)),
+                temperature=config.temperature_counselor,
+                skill_selection=config.skill_selection,
+                memory_view=config.memory_view,
+            )
             runner = InteractiveRunner(counselor=counselor, gateway=gateway, db_path=self.db_path)
 
-            await runner.execute_operation(course_id=course_id, operation_id=operation_id)
-            self.job_manager.complete_job(
-                job.job_id, job.attempt, self.worker_id, {"course_id": course_id, "operation_id": operation_id}
-            )
-            self.event_hub.emit(
-                f"job:{job.job_id}",
-                "job_succeeded",
-                {"course_id": course_id, "operation_id": operation_id},
-            )
         except Exception as exc:
             if course_id and operation_id:
                 self._fail_course_operation(course_id, operation_id, str(exc))
             raise
+
+        await runner.execute_operation(course_id=course_id, operation_id=operation_id)
+        if self.job_manager.complete_job(
+            job.job_id, job.attempt, self.worker_id, {"course_id": course_id, "operation_id": operation_id}
+        ):
+            self.event_hub.emit(
+                f"job:{job.job_id}", "job_succeeded",
+                {"course_id": course_id, "operation_id": operation_id},
+            )
 
 
 def main():

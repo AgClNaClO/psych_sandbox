@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { api } from '../services/api';
 import type { ComparisonRow, ExportAudit } from '../types';
 import {
@@ -21,7 +21,7 @@ interface EvaluationHubProps {
 export const EvaluationHub: React.FC<EvaluationHubProps> = ({ observerMode = false }) => {
   const [rows, setRows] = useState<ComparisonRow[]>([]);
   const [audits, setAudits] = useState<ExportAudit[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   // 筛选与表单
@@ -34,26 +34,23 @@ export const EvaluationHub: React.FC<EvaluationHubProps> = ({ observerMode = fal
   const [exportingDPO, setExportingDPO] = useState(false);
   const [lastAuditResult, setLastAuditResult] = useState<ExportAudit | null>(null);
 
-  const fetchData = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const [compData, auditData] = await Promise.all([
-        api.getComparisons(),
-        api.getExportAudits().catch(() => []),
-      ]);
+  const fetchData = useCallback(() => {
+    return Promise.all([
+      api.getComparisons(),
+      api.getExportAudits(),
+    ]).then(([compData, auditData]) => {
       setRows(compData);
       setAudits(auditData);
-    } catch (err: any) {
+    }).catch((err: Error) => {
       setError(err.message || '加载评测与导出数据失败');
-    } finally {
+    }).finally(() => {
       setLoading(false);
-    }
-  };
+    });
+  }, []);
 
   useEffect(() => {
     fetchData();
-  }, []);
+  }, [fetchData]);
 
   const handleExportSFT = async () => {
     setExportingSFT(true);
@@ -118,7 +115,7 @@ export const EvaluationHub: React.FC<EvaluationHubProps> = ({ observerMode = fal
           <button
             className="btn btn-secondary"
             style={{ padding: '3px 8px', height: 26, fontSize: 11 }}
-            onClick={fetchData}
+            onClick={() => { setLoading(true); setError(null); fetchData(); }}
             disabled={loading}
             title="刷新数据"
           >
@@ -362,8 +359,8 @@ export const EvaluationHub: React.FC<EvaluationHubProps> = ({ observerMode = fal
                         {r.auto_sim_score !== null ? r.auto_sim_score.toFixed(3) : '-'}
                       </td>
                       <td style={{ padding: '10px 12px', fontSize: 11, color: 'var(--text-muted)' }}>
-                        <div>{r.latency_sec_avg ? `${r.latency_sec_avg.toFixed(1)}s` : '未知'}</div>
-                        <div style={{ color: '#94a3b8' }}>{r.cost_estimate_cny ? `¥${r.cost_estimate_cny.toFixed(2)}` : '未知'}</div>
+                        <div>{r.latency_sec_avg !== null ? `${r.latency_sec_avg.toFixed(1)}s` : '未知'}</div>
+                        <div style={{ color: '#94a3b8' }}>{r.cost_estimate_cny !== null ? `¥${r.cost_estimate_cny.toFixed(2)}` : '未知'}</div>
                       </td>
                       <td style={{ padding: '10px 12px' }}>
                         <span

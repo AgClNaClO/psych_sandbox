@@ -16,6 +16,19 @@ import type {
 
 const API_BASE = '/api';
 
+export class ApiError extends Error {
+  status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+    this.name = 'ApiError';
+  }
+}
+
+export const isVersionConflict = (error: unknown): boolean =>
+  error instanceof ApiError && error.status === 409 && /version/i.test(error.message);
+
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const url = endpoint.startsWith('http') ? endpoint : `${API_BASE}${endpoint}`;
   const headers = {
@@ -34,7 +47,7 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
     } catch {
       // ignore
     }
-    throw new Error(errDetail);
+    throw new ApiError(response.status, errDetail);
   }
   return response.json();
 }
@@ -113,7 +126,7 @@ export const api = {
       method: 'POST',
     }),
   closeCourse: (courseId: string, reason = 'participant_closed_course') =>
-    request<Course>(`/courses/${courseId}/close?reason=${reason}`, { method: 'POST' }),
+    request<Course>(`/courses/${courseId}/close?reason=${encodeURIComponent(reason)}`, { method: 'POST' }),
 
   // 3. 技能实验室
   getSkillReleases: (therapy?: string) =>
@@ -178,6 +191,7 @@ export function subscribeSSE(
 ): () => void {
   const url = `${API_BASE}/events?stream=${encodeURIComponent(stream)}`;
   const es = new EventSource(url);
+  let lastSeq = 0;
 
   es.onopen = () => {
     if (onOpen) onOpen();
@@ -202,6 +216,12 @@ export function subscribeSSE(
   };
 
   const eventTypes = [
+    'job_enqueued',
+    'job_requeued',
+    'job_stopped',
+    'job_cancelled',
+    'opening_requested',
+    'course_closed',
     'simulation_progress',
     'message_submitted',
     'counselor_replied',
@@ -218,6 +238,8 @@ export function subscribeSSE(
       try {
         const payload = JSON.parse(e.data);
         const seq = e.lastEventId ? parseInt(e.lastEventId, 10) : 0;
+        if (seq > 0 && seq <= lastSeq) return;
+        lastSeq = Math.max(lastSeq, seq);
         onEvent({ seq, type, payload });
       } catch {
         onEvent({ seq: 0, type, payload: e.data });
@@ -226,10 +248,7 @@ export function subscribeSSE(
   });
 
   es.onerror = (err) => {
-    // 仅在明确彻底关闭时才通知断开；如果处于自动重连中则等待重连握手
-    if (es.readyState === EventSource.CLOSED) {
-      if (onError) onError(err);
-    }
+    if (onError) onError(err);
   };
 
   return () => {

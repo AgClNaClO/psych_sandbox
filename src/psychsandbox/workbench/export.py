@@ -25,6 +25,8 @@ from .models import (
     MetricStats,
 )
 from ..domain import utc_now
+from ..domain import SessionMemory
+from ..runtime.memory_view import MemoryViewBuilder
 from ..runtime.storage import SQLiteStore
 
 
@@ -38,6 +40,32 @@ def _stable_case_split(case_id: str, train_ratio: float = 0.7, val_ratio: float 
         return "val"
     else:
         return "test"
+
+
+def _public_memory(value: dict[str, Any]) -> dict[str, Any]:
+    return MemoryViewBuilder().build(SessionMemory.model_validate(value)) if value else {}
+
+
+def _dialogue(session: dict[str, Any]) -> list[dict[str, str]]:
+    """Use stored, ordered messages rather than private generation/debug fields."""
+    roles = {"client": "user", "counselor": "assistant"}
+    return [
+        {"role": roles[message["role"]], "content": message["content"]}
+        for message in session.get("messages", [])
+        if message.get("role") in roles and message.get("content")
+    ]
+
+
+def _first_response_pair(chosen: list[dict], rejected: list[dict]):
+    prefix = []
+    for left, right in zip(chosen, rejected):
+        if left == right:
+            prefix.append(left)
+            continue
+        if left["role"] == right["role"] == "assistant":
+            return prefix, left["content"], right["content"]
+        return None
+    return None
 
 
 class DataExporter:
@@ -63,14 +91,14 @@ class DataExporter:
         try:
             cur = sim_conn.cursor()
 
-            query = """SELECT r.run_id, r.case_id, r.therapy, s.session_index, s.session_json, m.memory_json
+            query = """SELECT r.run_id, r.case_id, r.therapy, s.session_index, s.session_json, t.trajectory_json
                        FROM experiment_runs r
                        JOIN sessions s ON s.run_id = r.run_id
-                       LEFT JOIN memories m ON m.run_id = r.run_id AND m.session_index = s.session_index"""
+                       LEFT JOIN trajectories t ON t.run_id = r.run_id AND t.session_index = s.session_index"""
             params = []
-            if run_ids:
+            if run_ids is not None:
                 placeholders = ",".join(["?"] * len(run_ids))
-                query += f" WHERE r.run_id IN ({placeholders})"
+                query += f" WHERE r.run_id IN ({placeholders})" if run_ids else " WHERE 0"
                 params.extend(run_ids)
             query += " ORDER BY r.run_id, s.session_index"
 
@@ -90,20 +118,17 @@ class DataExporter:
 
             split = _stable_case_split(case_id)
             sess_data = json.loads(r["session_json"])
-            mem_data = json.loads(r["memory_json"]) if r["memory_json"] else {}
+            trajectory = json.loads(r["trajectory_json"]) if r["trajectory_json"] else {}
+            # The memories table is post-session; it leaks future evidence into earlier turns.
+            mem_data = _public_memory(trajectory.get("memory_before") or {})
 
             turn_records = sess_data.get("turn_records", [])
             dialogue_history = []
-            for t in turn_records:
-                client_turn = t.get("client_turn", {})
-                counselor_turn = t.get("counselor_turn", {})
-
-                client_utterance = client_turn.get("utterance", "")
-                if client_utterance:
-                    dialogue_history.append({"role": "user", "content": client_utterance})
-
-                counselor_utterance = counselor_turn.get("utterance", "")
-                if counselor_utterance:
+            counselor_index = 0
+            for message in _dialogue(sess_data):
+                if message["role"] == "assistant":
+                    t = turn_records[counselor_index] if counselor_index < len(turn_records) else {}
+                    counselor_index += 1
                     # 受控上下文：包含合法前缀、记忆、目标和安全事件
                     row = {
                         "source": "simulation_committed",
@@ -113,21 +138,23 @@ class DataExporter:
                         "session_index": s_idx,
                         "split": split,
                         "allowed_use": ["model_training", "research"],
-                        "anonymized": True,
+                        "anonymized": False,
                         "protocol_version": protocol_version,
                         "system_prompt": f"你是一名专业的{therapy}心理咨询师。",
-                        "dialogue_context": list(dialogue_history[:-1]) if dialogue_history else [],
-                        "counselor_response": counselor_utterance,
-                        "structured_planning": counselor_turn.get("plan_trace"),
-                        "skill_evidence": counselor_turn.get("selected_skill_id"),
-                        "memory_context": mem_data.get("disclosed_evidence", {}),
+                        "dialogue_context": list(dialogue_history),
+                        "counselor_response": message["content"],
+                        "structured_planning": t.get("planning"),
+                        "skill_evidence": (t.get("decision") or {}).get("skill_evidence", []),
+                        "memory_context": mem_data,
+                        "context_reconstructed": True,
+                        "memory_snapshot_available": bool(trajectory.get("memory_before")),
                     }
                     raw_bytes = json.dumps(row, sort_keys=True, ensure_ascii=False).encode("utf-8")
                     row["row_hash"] = hashlib.sha256(raw_bytes).hexdigest()
                     sft_rows.append(row)
                     split_counts[split] += 1
 
-                    dialogue_history.append({"role": "assistant", "content": counselor_utterance})
+                dialogue_history.append(message)
 
         # 人工数据默认排除：仅当明确请求 include_interactive 时，才加入已完成且闭环的人工会谈
         if include_interactive and self.wb_db_path:
@@ -170,7 +197,7 @@ class DataExporter:
                                 "session_index": s_idx,
                                 "split": split,
                                 "allowed_use": ["model_training", "research_consent"],
-                                "anonymized": True,
+                                "anonymized": False,
                                 "protocol_version": protocol_version,
                                 "system_prompt": f"你是一名专业的{ther}心理咨询师。",
                                 "dialogue_context": list(history),
@@ -248,114 +275,133 @@ class DataExporter:
         """
         output_path.parent.mkdir(parents=True, exist_ok=True)
         sim_conn = self._get_sim_conn()
-        cur = sim_conn.cursor()
+        try:
+            cur = sim_conn.cursor()
 
-        # 1. 查找所有有效的 RFT selection 记录
-        query = """SELECT s.run_id, s.session_index, s.batch_id, s.selection_json,
-                          r.case_id, r.therapy
-                   FROM rollout_batches s
-                   JOIN experiment_runs r ON r.run_id = s.run_id"""
-        params = []
-        if run_ids:
-            placeholders = ",".join(["?"] * len(run_ids))
-            query += f" WHERE s.run_id IN ({placeholders})"
-            params.extend(run_ids)
-        query += " ORDER BY s.run_id, s.session_index"
+            # 1. 查找所有有效的 RFT selection 记录
+            query = """SELECT s.run_id, s.session_index, s.batch_id, s.selection_json,
+                              r.case_id, r.therapy, t.trajectory_json
+                       FROM rollout_batches s
+                       JOIN experiment_runs r ON r.run_id = s.run_id
+                       JOIN trajectories t ON t.run_id = s.run_id AND t.session_index = s.session_index"""
+            params = []
+            if run_ids is not None:
+                placeholders = ",".join(["?"] * len(run_ids))
+                query += f" WHERE s.run_id IN ({placeholders})" if run_ids else " WHERE 0"
+                params.extend(run_ids)
+            query += " ORDER BY s.run_id, s.session_index"
 
-        cur.execute(query, params)
-        selections = cur.fetchall()
+            cur.execute(query, params)
+            selections = cur.fetchall()
 
-        dpo_pairs = []
-        split_counts = {"train": 0, "val": 0, "test": 0}
+            dpo_pairs = []
+            split_counts = {"train": 0, "val": 0, "test": 0}
 
-        for sel_row in selections:
-            run_id = sel_row["run_id"]
-            s_idx = sel_row["session_index"]
-            bid = sel_row["batch_id"]
-            case_id = sel_row["case_id"]
-            therapy = sel_row["therapy"]
-            sel = json.loads(sel_row["selection_json"])
-            winner_idx = sel.get("winner_index")
-
-            # 2. 读取该批次所有的 candidate rollouts
-            cur.execute(
-                """SELECT candidate_index, candidate_json
-                   FROM rollout_candidates
-                   WHERE batch_id = ?""",
-                (bid,),
-            )
-            candidates = {}
-            for c in cur.fetchall():
-                c_idx = c["candidate_index"]
-                candidates[c_idx] = json.loads(c["candidate_json"])
-
-            winner_candidate = candidates.get(winner_idx)
-            if not winner_candidate or not winner_candidate.get("safety_passed", False):
-                continue
-
-            winner_reward = (winner_candidate.get("reward") or {}).get("total", 0.0)
-            winner_turns = winner_candidate.get("session", {}).get("turn_records", [])
-            if not winner_turns:
-                continue
-
-            split = _stable_case_split(case_id)
-
-            # 与该批次内其他合法落选候选配对
-            for c_idx, candidate in candidates.items():
-                if c_idx == winner_idx:
+            for sel_row in selections:
+                run_id = sel_row["run_id"]
+                s_idx = sel_row["session_index"]
+                bid = sel_row["batch_id"]
+                case_id = sel_row["case_id"]
+                therapy = sel_row["therapy"]
+                sel = json.loads(sel_row["selection_json"])
+                trajectory = json.loads(sel_row["trajectory_json"])
+                committed_selection = (trajectory.get("session") or {}).get("rollout_selection") or {}
+                if (sel.get("status") != "selected" or committed_selection.get("batch_id") != bid
+                        or not trajectory.get("memory_before")):
                     continue
-                # 排除未通过安全门控、评分失败或取消的候选
-                if not candidate.get("safety_passed", False):
-                    continue
-                if candidate.get("status") not in ("eligible", "completed", "succeeded"):
-                    continue
-                cand_reward = (candidate.get("reward") or {}).get("total", 0.0)
-                if winner_reward <= cand_reward:
+                winner_idx = sel.get("winner_index")
+
+                # 2. 读取该批次所有的 candidate rollouts
+                cur.execute(
+                    """SELECT candidate_index, candidate_json
+                       FROM rollout_candidates
+                       WHERE batch_id = ?""",
+                    (bid,),
+                )
+                candidates = {}
+                for c in cur.fetchall():
+                    c_idx = c["candidate_index"]
+                    candidates[c_idx] = json.loads(c["candidate_json"])
+
+                winner_candidate = candidates.get(winner_idx)
+                winner_summary = (winner_candidate or {}).get("summary") or {}
+                winner_session = (winner_candidate or {}).get("session") or {}
+                if (winner_summary.get("status") != "selected"
+                        or not (winner_session.get("safety_verdict") or {}).get("passed")):
                     continue
 
-                cand_turns = candidate.get("session", {}).get("turn_records", [])
-                if not cand_turns:
+                winner_reward = (winner_summary.get("reward") or {}).get("total")
+                winner_turns = _dialogue(winner_session)
+                if not winner_turns or not isinstance(winner_reward, (int, float)) or not math.isfinite(winner_reward):
                     continue
 
-                # 提取共同前缀/提示上下文
-                input_context = sel.get("common_input") or {
-                    "therapy": therapy,
-                    "session_index": s_idx,
-                    "plan": sel.get("plan"),
-                    "memory_before": sel.get("memory_before"),
-                }
+                split = _stable_case_split(case_id)
 
-                pair = {
-                    "source": "simulation_rft",
-                    "batch_id": bid,
-                    "run_id": run_id,
-                    "case_id": case_id,
-                    "therapy": therapy,
-                    "session_index": s_idx,
-                    "preference_source": "model_judge_rft",
-                    "split": split,
-                    "allowed_use": ["model_training", "dpo"],
-                    "anonymized": True,
-                    "protocol_version": protocol_version,
-                    "prompt_context": input_context,
-                    "chosen_response": winner_turns[-1].get("counselor_turn", {}).get("utterance", ""),
-                    "rejected_response": cand_turns[-1].get("counselor_turn", {}).get("utterance", ""),
-                    "chosen_reward": winner_reward,
-                    "rejected_reward": cand_reward,
-                }
-                raw_bytes = json.dumps(pair, sort_keys=True, ensure_ascii=False).encode("utf-8")
-                pair["pair_hash"] = hashlib.sha256(raw_bytes).hexdigest()
-                dpo_pairs.append(pair)
-                split_counts[split] += 1
+                # 与该批次内其他合法落选候选配对
+                for c_idx, candidate in candidates.items():
+                    if c_idx == winner_idx:
+                        continue
+                    # 排除未通过安全门控、评分失败或取消的候选
+                    summary = candidate.get("summary") or {}
+                    session = candidate.get("session") or {}
+                    if not (session.get("safety_verdict") or {}).get("passed"):
+                        continue
+                    if summary.get("status") != "eligible":
+                        continue
+                    cand_reward = (summary.get("reward") or {}).get("total")
+                    if (not isinstance(cand_reward, (int, float)) or not math.isfinite(cand_reward)
+                            or winner_reward <= cand_reward):
+                        continue
 
-        file_hash = hashlib.sha256()
-        with output_path.open("w", encoding="utf-8") as f:
-            for item in dpo_pairs:
-                line = json.dumps(item, ensure_ascii=False) + "\n"
-                f.write(line)
-                file_hash.update(line.encode("utf-8"))
+                    cand_turns = _dialogue(session)
+                    response_pair = _first_response_pair(winner_turns, cand_turns)
+                    if response_pair is None:
+                        continue
 
-        sim_conn.close()
+                    # 提取共同前缀/提示上下文
+                    prefix, chosen_response, rejected_response = response_pair
+                    input_context = {
+                        "therapy": therapy,
+                        "session_index": s_idx,
+                        "plan": trajectory.get("plan"),
+                        "memory_before": _public_memory(trajectory["memory_before"]),
+                        "dialogue_context": prefix,
+                    }
+
+                    pair = {
+                        "source": "simulation_rft",
+                        "batch_id": bid,
+                        "run_id": run_id,
+                        "case_id": case_id,
+                        "therapy": therapy,
+                        "session_index": s_idx,
+                        "preference_source": "model_judge_rft",
+                        "split": split,
+                        "allowed_use": ["model_training", "dpo"],
+                        "anonymized": False,
+                        "protocol_version": protocol_version,
+                        "prompt_context": input_context,
+                        "chosen_response": chosen_response,
+                        "rejected_response": rejected_response,
+                        "preference_unit": "first_divergent_counselor_turn",
+                        "context_reconstructed": True,
+                        "chosen_reward": winner_reward,
+                        "rejected_reward": cand_reward,
+                    }
+                    raw_bytes = json.dumps(pair, sort_keys=True, ensure_ascii=False).encode("utf-8")
+                    pair["pair_hash"] = hashlib.sha256(raw_bytes).hexdigest()
+                    dpo_pairs.append(pair)
+                    split_counts[split] += 1
+
+            file_hash = hashlib.sha256()
+            with output_path.open("w", encoding="utf-8") as f:
+                for item in dpo_pairs:
+                    line = json.dumps(item, ensure_ascii=False) + "\n"
+                    f.write(line)
+                    file_hash.update(line.encode("utf-8"))
+
+        finally:
+            sim_conn.close()
 
         sha256 = file_hash.hexdigest()
         audit_id = f"exp-{uuid.uuid4().hex[:12]}"
@@ -451,7 +497,8 @@ class ExperimentAnalytics:
                 if r["h_json"]:
                     try:
                         data = json.loads(r["h_json"])
-                        h_score = data.get("holistic_score") or data.get("overall_score")
+                        h_score = next((data[key] for key in ("counselor_overall", "holistic_score", "overall_score")
+                                        if data.get(key) is not None), None)
                     except Exception:
                         pass
 
@@ -464,7 +511,7 @@ class ExperimentAnalytics:
                         sessions_completed=r["sess_cnt"] or 0,
                         model_supervisor_score=h_score,
                         human_feedback_score=None,  # 真实人工反馈未发生时保持真实 None，不造假
-                        auto_sim_score=h_score,
+                        auto_sim_score=None,
                         cost_estimate_cny=None,  # 无精确计量时显示 None（未知）
                         latency_sec_avg=None,
                         failure_rate=1.0 if r["status"] == "failed" else 0.0,

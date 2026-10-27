@@ -157,6 +157,7 @@ export interface OperationRecord {
 
 export interface CourseSessionDetail {
   course_id: string;
+  course_version?: number;
   session_index: number;
   status: 'open' | 'closing' | 'closed' | 'close_failed';
   plan: Record<string, any>;

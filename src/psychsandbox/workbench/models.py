@@ -2,9 +2,27 @@
 from __future__ import annotations
 
 from typing import Any, Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ..domain import utc_now
+from ..therapies import normalize_therapy_id
+
+
+class TherapyRequest(BaseModel):
+    therapy: str
+
+    @field_validator("therapy")
+    @classmethod
+    def normalize_therapy(cls, value: str) -> str:
+        return normalize_therapy_id(value)
+
+
+class SimulationJobPayload(BaseModel):
+    case_id: str = Field(min_length=1)
+    therapy: str | None = None
+    session_count: int = Field(default=1, ge=1, le=100, strict=True)
+    seed: int | None = None
+    resume_run_id: str | None = None
 
 
 # ==========================================
@@ -22,7 +40,22 @@ class JobCreateRequest(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
     run_id: str | None = None
     course_id: str | None = None
-    max_attempts: int = 3
+    max_attempts: int = Field(default=3, ge=1, le=10)
+
+    @model_validator(mode="after")
+    def validate_worker_contract(self):
+        if self.kind not in ("simulation", "course_reply", "course_close"):
+            raise ValueError("This job kind is not implemented by the workbench worker")
+        expected_lane = "long" if self.kind == "simulation" else "short"
+        if self.lane != expected_lane:
+            raise ValueError(f"{self.kind} requires the {expected_lane} lane")
+        if self.kind == "simulation":
+            payload = SimulationJobPayload.model_validate(self.payload)
+            if payload.therapy is not None:
+                normalize_therapy_id(payload.therapy)
+        elif not self.payload.get("course_id") or not self.payload.get("operation_id"):
+            raise ValueError("Course jobs require course_id and operation_id")
+        return self
 
 
 class JobResponse(BaseModel):
@@ -68,8 +101,7 @@ InputMode = Literal["natural", "roleplay"]
 CourseSessionStatus = Literal["open", "closing", "closed", "close_failed"]
 
 
-class CourseCreateRequest(BaseModel):
-    therapy: str
+class CourseCreateRequest(TherapyRequest):
     title: str
     input_mode: InputMode = "natural"
     roleplay_card: str | None = None
@@ -109,7 +141,7 @@ class SendMessageRequest(BaseModel):
     message_id: str
     operation_id: str
     expected_version: int
-    content: str
+    content: str = Field(min_length=1)
     source: Literal["participant_natural", "participant_roleplay"] = "participant_natural"
 
 
@@ -138,6 +170,7 @@ class CloseStepRecord(BaseModel):
 
 class CourseSessionDetailResponse(BaseModel):
     course_id: str
+    course_version: int = 1
     session_index: int
     status: str
     plan: dict[str, Any]
@@ -171,8 +204,7 @@ class SkillReleaseResponse(BaseModel):
     is_active: bool = False
 
 
-class SkillProposalCreateRequest(BaseModel):
-    therapy: str
+class SkillProposalCreateRequest(TherapyRequest):
     base_release_id: str | None = None
     title: str
     target_skill_id: str | None = None
@@ -235,14 +267,29 @@ class ReplayValidationResponse(BaseModel):
 # 训练数据导出与评测比较 (Export & Analytics)
 # ==========================================
 
-class ExportSFTRequest(BaseModel):
+class ExportFileRequest(BaseModel):
+    output_filename: str = Field(default="export.jsonl", min_length=1, max_length=200)
+
+    @field_validator("output_filename")
+    @classmethod
+    def validate_filename(cls, value: str) -> str:
+        # Reject POSIX/Windows paths, ADS and Windows device names on every host.
+        import re
+        if not re.fullmatch(r'[^<>:"/\\|?*\x00-\x1f]+\.jsonl', value) or value != value.strip():
+            raise ValueError("output_filename must be a plain .jsonl filename")
+        if value.split(".", 1)[0].upper() in {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}:
+            raise ValueError("Reserved output filename")
+        return value
+
+
+class ExportSFTRequest(ExportFileRequest):
     run_ids: list[str] | None = None
     include_interactive: bool = False
     output_filename: str = "sft_export.jsonl"
     protocol_version: str = "v1"
 
 
-class ExportDPORequest(BaseModel):
+class ExportDPORequest(ExportFileRequest):
     run_ids: list[str] | None = None
     output_filename: str = "dpo_export.jsonl"
     protocol_version: str = "v1"

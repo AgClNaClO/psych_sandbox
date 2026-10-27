@@ -47,6 +47,22 @@ def list_therapy_definitions() -> list[dict[str, Any]]:
     return therapies
 
 
+def _to_standard_therapy_code(therapy: str) -> str:
+    s = str(therapy).strip().lower().replace("-", "_")
+    mapping = {
+        "behavioral": "bt",
+        "bt": "bt",
+        "cbt": "cbt",
+        "humanistic_existential": "het",
+        "het": "het",
+        "psychodynamic": "pdt",
+        "pdt": "pdt",
+        "postmodern": "pmt",
+        "pmt": "pmt",
+    }
+    return mapping.get(s, s)
+
+
 def list_case_summaries(repo: CaseRepository) -> list[CaseSummary]:
     summaries = []
     for case in repo.list():
@@ -59,7 +75,7 @@ def list_case_summaries(repo: CaseRepository) -> list[CaseSummary]:
         summaries.append(
             CaseSummary(
                 case_id=case.case_id,
-                therapy=case.therapy,
+                therapy=_to_standard_therapy_code(case.therapy),
                 title=st.name or case.case_id,
                 client_name=st.name or "匿名来访者",
                 client_gender=st.gender or "未知",
@@ -96,7 +112,9 @@ def list_experiment_runs(store: SQLiteStore, trace_dir: Path) -> list[RunSummary
             if row["holistic_json"]:
                 try:
                     h_data = json.loads(row["holistic_json"])
-                    holistic_score = h_data.get("holistic_score") or h_data.get("overall_score")
+                    holistic_score = next((h_data[key] for key in (
+                        "counselor_overall", "holistic_score", "overall_score"
+                    ) if h_data.get(key) is not None), None)
                 except Exception:
                     pass
 
@@ -223,7 +241,42 @@ def get_run_detail(
         # 读取整体督导报告
         cur.execute("SELECT report_json FROM holistic_evaluations WHERE run_id = ?", (run_id,))
         h_row = cur.fetchone()
-        holistic_report = json.loads(h_row["report_json"]) if h_row else None
+        holistic_report = None
+        if h_row and h_row["report_json"]:
+            try:
+                h_data = json.loads(h_row["report_json"])
+                c_overall = next((h_data[key] for key in (
+                    "counselor_overall", "holistic_score", "overall_score"
+                ) if h_data.get(key) is not None), None)
+                cl_overall = h_data.get("client_overall") if h_data.get("client_overall") is not None else h_data.get("client_score")
+                h_data["holistic_score"] = c_overall
+                h_data["client_score"] = cl_overall
+
+                # 若无显式 summary，根据结构化量表自动组合多维度临床评估摘要
+                if not h_data.get("summary"):
+                    parts = []
+                    if c_overall is not None:
+                        parts.append(f"咨询师督导综合评分为 {c_overall:.2f}/10.0")
+                    if cl_overall is not None:
+                        parts.append(f"来访者综合评分为 {cl_overall:.2f}/10.0")
+
+                    scale_scores = []
+                    for item in h_data.get("counselor_specific", []):
+                        if isinstance(item, dict) and "name" in item and "score" in item:
+                            scale_scores.append(f"{item['name'].upper()}: {item['score']:.2f}")
+                    for item in h_data.get("counselor_shared", []):
+                        if isinstance(item, dict) and item.get("name") in ("wai", "htais", "rro") and "score" in item:
+                            scale_scores.append(f"{item['name'].upper()}: {item['score']:.2f}")
+                    for item in h_data.get("client_specific", []):
+                        if isinstance(item, dict) and "name" in item and "score" in item:
+                            scale_scores.append(f"{item['name'].upper()}: {item['score']:.2f}")
+
+                    if scale_scores:
+                        parts.append(f"核心量表表现（{', '.join(scale_scores)}）")
+                    h_data["summary"] = "；".join(parts) + "。" if parts else "未记录督导评语。"
+                holistic_report = h_data
+            except Exception:
+                holistic_report = None
 
         # 读取 RFT 批次与候选对比
         cur.execute(
