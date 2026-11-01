@@ -100,6 +100,7 @@ class CounselingSandbox:
             config.temperature_counselor,
             skill_selection=config.skill_selection,
             memory_view=config.memory_view,
+            control_temperature=config.temperature_control,
         )
         self.safety_gate = SessionSafetyGate()
         self.holistic_supervisor = PsychEvalSupervisor(
@@ -125,9 +126,9 @@ class CounselingSandbox:
         self.consolidator = MemoryConsolidator()
         self.longitudinal = LongitudinalEvaluator()
         self.plan_builder = PlanBuilder()
-        self.memory_extractor = MemoryExtractionAgent(self.gateway)
-        self.client_merger = ClientMergeAgent(self.gateway)
-        self.summarizer = DialogueSummaryAgent(self.gateway)
+        self.memory_extractor = MemoryExtractionAgent(self.gateway, config.temperature_control)
+        self.client_merger = ClientMergeAgent(self.gateway, config.temperature_control)
+        self.summarizer = DialogueSummaryAgent(self.gateway, config.temperature_control)
         self.store = store or SQLiteStore(config.database_path)
 
     async def run_case(
@@ -188,6 +189,11 @@ class CounselingSandbox:
             previous_rft = RFTConfig.model_validate(existing["config"].get("rft", {}))
             if (previous_rft.enabled or self.config.rft.enabled) and previous_rft != self.config.rft:
                 raise ValueError("Resume must preserve the original RFT configuration; start a new run for comparisons")
+            old_scoring = existing["config"].get("logprob_scoring", {})
+            old_method = old_scoring.get("method", "instrument_logprob_v1") if old_scoring.get("enabled", True) else "discrete_items_v1"
+            new_method = self.config.logprob_scoring.method if self.config.logprob_scoring.enabled else "discrete_items_v1"
+            if (previous_rft.enabled or self.config.rft.enabled) and old_method != new_method:
+                raise ValueError("RFT scoring method differs from saved baseline; start a new run")
             if seed is not None and seed != existing["seed"]:
                 raise ValueError("Resume must preserve the original seed")
             seed = existing["seed"]
@@ -356,6 +362,9 @@ class CounselingSandbox:
                             "provider": self.gateway.provider_name,
                             "seed": seed,
                             "temperature_client": self.config.temperature_client,
+                            "temperature_control": self.config.temperature_control,
+                            "temperature_supervisor": self.config.temperature_supervisor,
+                            "scoring_method": self.config.logprob_scoring.method if self.config.logprob_scoring.enabled else "discrete_items_v1",
                             "temperature_client_planner": self.config.temperature_client_planner,
                             "client_policy": self.config.client_policy,
                             "client_ablation": {
@@ -648,6 +657,7 @@ class CounselingSandbox:
                 self.gateway, self.skill_catalog, self.config.rft.counselor_temperature,
                 skill_selection=self.config.skill_selection,
                 memory_view=self.config.memory_view,
+                control_temperature=self.config.temperature_control,
             )
             client = ClientAgent(
                 self.gateway, self.config.temperature_client,

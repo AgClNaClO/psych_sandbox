@@ -82,8 +82,9 @@ spans 按位置升序、不得重叠，并应覆盖全部有意义的原文内�
 
 
 class ExtractiveAtomizer:
-    def __init__(self, gateway: ModelGateway, cache_dir: Path):
+    def __init__(self, gateway: ModelGateway, cache_dir: Path, temperature: float = 0.0):
         self.gateway = gateway
+        self.temperature = temperature
         self.cache_dir = cache_dir
 
     async def atomize(
@@ -102,7 +103,7 @@ class ExtractiveAtomizer:
         try:
             validation_error = ""
             previous_output: dict | None = None
-            repair_temperatures = (0.0, 0.1, 0.2)
+            repair_temperatures = (self.temperature,) * 3
             allowed_kinds = {
                 "growth": "event/emotion/belief/meaning/coping/consequence/resource",
                 "language": (
@@ -163,7 +164,7 @@ class ExtractiveAtomizer:
         models = getattr(self.gateway, "models", {})
         model = models.get("profile", getattr(self.gateway, "provider_name", "unknown"))
         material = "\0".join(
-            (source_path, source_text, purpose, ATOMIZER_PROMPT_VERSION, "4", str(model))
+            (source_path, source_text, purpose, ATOMIZER_PROMPT_VERSION, "4", str(model), str(self.temperature))
         )
         return hashlib.sha256(material.encode("utf-8")).hexdigest()
 

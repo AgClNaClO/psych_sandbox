@@ -781,9 +781,9 @@ class InteractiveRunner:
         self.db_path = db_path
         self.events = get_event_hub(db_path)
         self.safety = SafetyStateMachine()
-        self.extractor = MemoryExtractionAgent(gateway)
-        self.merger = ClientMergeAgent(gateway)
-        self.summarizer = DialogueSummaryAgent(gateway)
+        self.extractor = MemoryExtractionAgent(gateway, getattr(counselor, "control_temperature", 0.0))
+        self.merger = ClientMergeAgent(gateway, getattr(counselor, "control_temperature", 0.0))
+        self.summarizer = DialogueSummaryAgent(gateway, getattr(counselor, "control_temperature", 0.0))
         self.consolidator = MemoryConsolidator()
         self.plan_builder = PlanBuilder()
 

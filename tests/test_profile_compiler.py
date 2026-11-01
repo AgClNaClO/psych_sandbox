@@ -300,7 +300,7 @@ def test_extractive_atomizer_repairs_invalid_core_demands_kind(tmp_path):
     assert [item.kind for item in spans] == ["client_goal"]
     assert audit.fallback is False
     assert gateway.calls == 3
-    assert [request["temperature"] for request in gateway.requests] == [0.0, 0.1, 0.2]
+    assert [request["temperature"] for request in gateway.requests] == [0.0, 0.0, 0.0]
     assert "client_goal/treatment_instruction" in (
         gateway.requests[1]["input_payload"]["atomizer_repair_instruction"]
     )

@@ -1342,6 +1342,7 @@ class ScaleScore(StrictModel):
     direction: Literal["higher_better", "lower_better"]
     score: float = Field(ge=0, le=10)
     item_scores: dict[str, float] = Field(default_factory=dict)
+    item_logprobs: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
 class HolisticEvaluationReport(StrictModel):
@@ -1579,8 +1580,8 @@ class LogprobScoringConfig(StrictModel):
     whose total in-band probability mass stays below ``mass_floor`` is reported
     as a refusal instead of being replaced by a zero or an item average.
 
-    Default values are the paper's scoring request (temperature 0.7, max 16
-    tokens, top 20 candidates, mass floor 0.25). The path is on by default: it
+    Batch item scoring uses temperature 0, max 8192 tokens, top 20
+    candidates and mass floor 0.25. Expectations are conditional on the JSON prefix. The path is on by default: it
     needs an endpoint that actually returns ``logprobs``/``top_logprobs``, so
     probe it with ``psych-sandbox probe logprob-scoring`` before a run. An
     endpoint without the payload (or a judgement below the floor) fails loudly
@@ -1591,8 +1592,9 @@ class LogprobScoringConfig(StrictModel):
     enabled: bool = True
     mass_floor: float = Field(default=0.25, gt=0, le=1)
     top_logprobs: int = Field(default=20, ge=1, le=20)
-    max_tokens: int = Field(default=16, ge=1, le=64)
-    temperature: float = Field(default=0.7, ge=0, le=2)
+    max_tokens: int = Field(default=8192, ge=1, le=32768)
+    temperature: float = Field(default=0.0, ge=0, le=2)
+    method: Literal["item_logprob_v2"] = "item_logprob_v2"
 
 
 class MemoryViewConfig(StrictModel):
@@ -1622,10 +1624,11 @@ class SandboxConfig(StrictModel):
     database_path: Path | None = None
     trace_dir: Path | None = None
     processed_dataset_dir: Path | None = None
-    temperature_client: float = Field(default=0.8, ge=0, le=2)
-    temperature_client_planner: float = Field(default=0.1, ge=0, le=2)
-    temperature_counselor: float = Field(default=0.4, ge=0, le=2)
-    temperature_supervisor: float = Field(default=0.1, ge=0, le=2)
+    temperature_client: float = Field(default=0.7, ge=0, le=2)
+    temperature_client_planner: float = Field(default=0.0, ge=0, le=2)
+    temperature_counselor: float = Field(default=0.9, ge=0, le=2)
+    temperature_supervisor: float = Field(default=0.0, ge=0, le=2)
+    temperature_control: float = Field(default=0.0, ge=0, le=2)
     patientact_enabled: bool = True
     client_policy: Literal[
         "compact_patientact", "faithful_patientact", "simple"

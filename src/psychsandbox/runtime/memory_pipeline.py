@@ -38,8 +38,9 @@ class _SessionSummaryWrapper(StrictModel):
 
 
 class MemoryExtractionAgent:
-    def __init__(self, gateway):
+    def __init__(self, gateway, temperature: float = 0.0):
         self.gateway = gateway
+        self.temperature = temperature
 
     async def extract(
         self,
@@ -58,7 +59,7 @@ class MemoryExtractionAgent:
             system_prompt=render_prompt(MEMORY_EXTRACTION_TEMPLATE, **extraction_payload),
             input_payload=extraction_payload,
             output_schema=_ClientInfoGet,
-            temperature=0.1,
+            temperature=self.temperature,
         )
         raw = _ClientInfoGet.model_validate(result).client_info_get
         raw.source_session = session_number
@@ -81,8 +82,9 @@ class MemoryExtractionAgent:
 
 
 class ClientMergeAgent:
-    def __init__(self, gateway):
+    def __init__(self, gateway, temperature: float = 0.0):
         self.gateway = gateway
+        self.temperature = temperature
 
     async def merge(
         self,
@@ -103,7 +105,7 @@ class ClientMergeAgent:
             system_prompt=render_prompt(CLIENT_MERGE_TEMPLATE, **merge_payload),
             input_payload=merge_payload,
             output_schema=_ClientInfoMerge,
-            temperature=0.1,
+            temperature=self.temperature,
         )
         merged = _ClientInfoMerge.model_validate(result).client_info_merge
         merged = _prevent_global_backfill(merged, history, current)
@@ -119,8 +121,9 @@ class ClientMergeAgent:
 
 
 class DialogueSummaryAgent:
-    def __init__(self, gateway):
+    def __init__(self, gateway, temperature: float = 0.0):
         self.gateway = gateway
+        self.temperature = temperature
 
     async def summarize(
         self,
@@ -151,7 +154,7 @@ class DialogueSummaryAgent:
             system_prompt=render_prompt(DIALOGUE_SUMMARY_TEMPLATE, **summary_payload),
             input_payload=summary_payload,
             output_schema=_SessionSummaryWrapper,
-            temperature=0.1,
+            temperature=self.temperature,
         )
         summary = _SessionSummaryWrapper.model_validate(result).session_summary
         summary.session_index = session_index

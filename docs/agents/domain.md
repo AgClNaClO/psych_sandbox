@@ -1,48 +1,42 @@
-# Domain and module map
+# 领域术语与模块边界
 
-Read this file when changing simulation flow, information permissions, therapy adapters, evaluation or persistence.
+修改仿真边界、权限、评估或存储时先读本文。运行约束由 [AGENTS.md](../../AGENTS.md) 规定。
 
-## Stable terms
+## 术语
 
-- **Case**: one source-grounded runnable record from `data/<therapy>`.
-- **Session**: one bounded consultation containing several counselor/client turns and consolidation.
-- **Plan**: the current therapy stage, objectives, allowed meta skills and carry-over strategy.
-- **Memory**: the four-field `SessionMemory` the counselor keeps across sessions — `known_background` (disclosed evidence with fact-level provenance), `session_recaps` (one recap per finished session), `last_homework` (open assignments with status), and `checklist` (per-session archived items plus the still-open follow-up items). A private evidence atom is not counselor memory until client wording supplies verifiable evidence; `case_id` and `migration_warnings` are management fields.
-- **Memory read view**: the bounded, layered projection of that memory that the counselor actually reads each turn (`runtime/memory_view.py`, `SandboxConfig.memory_view`). It drops management fields and audit-only logs and, in `recap_window` mode, keeps the current focus plus a recent window inside an explicit character budget.
-- **Session checklist**: model-selected working memory for completed items, important information, methods, results and pending items. It starts empty for each session and is archived into `checklist.per_session` at session close (and reconciled with the full dialogue by E.9).
-- **Counselor review**: session-boundary API assessment of goal evidence and, when needed, a revised strategy.
-- **Rule evaluation**: deterministic per-session audit; it does not choose the next plan.
-- **Holistic supervision**: API PsychEval scoring once after all sessions; it does not choose the next plan.
-- **Session candidate**: one complete simulated session from a common pre-session context; unselected candidates never become counselor memory or committed sessions.
-- **RFT selection reward**: a separate, evidence-bound research score for comparing eligible session candidates. It selects a session, not the next plan, and is not a clinical outcome measure.
-
-## Ownership
-
-| Path | Owns |
+| 名称 | 含义与权限 |
 |---|---|
-| `domain/` | Pydantic contracts for cases, plans, turns, memory, evaluation and results |
-| `datasets/` | five-therapy conversion and runnable-case indexing |
-| `therapies/` | therapy identifiers, stages, objectives and metric mapping |
-| `agents/` | client planning/generation and counselor plan→act→observe→respond/review |
-| `skills/` | skill registry, exact-ID catalog observation and conditional vector narrowing |
-| `runtime/` | orchestration, isolated session candidates, disclosure, safety, state, memory and storage |
-| `runtime/run_management.py` | read-only deletion previews, confirmed run cleanup and retry journals |
-| `runtime/progress.py` | live CLI progress labels and the rendering contract for candidate and scoring bars |
-| `evaluation/` | rule, longitudinal, independent session RFT and holistic evaluation |
-| `visualization/` | read-only HTML/SVG reporting from normalized results |
+| Case / 病例真相 | `data/<therapy>` 的有来源记录；私有画像不是咨询师输入 |
+| Evidence atom / 证据原子 | 带来源的完整事实；被规划或检索不等于已披露 |
+| Spoken evidence / 已说证据 | 来访者台词中经过核验的事实片段，才可进入允许记忆 |
+| Interaction prior / 互动先验 | 有来源的应对或互动倾向，不是独立病例事实或诊断 |
+| Attachment conditioning / 依恋条件 | 有证据、置信度足够时才出现的私有提示先验，只调节规划的信任变化 |
+| Session / 会谈 | 有界多轮咨询及其会后整理；疗程由多个会谈组成 |
+| Plan / 计划 | 阶段、目标、允许元技能与延续策略 |
+| Memory / 记忆 | 已知背景、每场回顾、上轮作业、事项清单四字段；管理字段不投喂 |
+| Memory read view / 读取视图 | 记忆的受限投影，排除管理和审计日志，可使用近期窗口与字符预算 |
+| Checklist / 场内清单 | 每场从空开始，结束后归档，不作为下一场活跃清单继承 |
+| Counselor review / 咨询师自评 | 会后用完整对话核对目标证据，并提出后续策略 |
+| Rule evaluation / 规则评估 | 工程审计证据，不是外部临床评分 |
+| RFT reward / 候选奖励 | 完整会谈候选的研究排序信号，只选择赢家 |
+| Holistic supervision / 整体督导 | 完整疗程后执行一次的 PsychEval 评分，不参与下一计划 |
 
-## Cross-module invariants
+五流派保留独立病例、技能树、原生概念化和专属量表；5Ps 是跨流派查看投影，不能取代原生理论。
 
-1. Counselor-visible context is assembled from disclosed evidence and allowed memory only.
-2. Client language generation receives planner-authorized new facts plus already spoken evidence only.
-3. Final strategy choice stays with the model; code validates IDs/public evidence, narrows large candidate sets by vector similarity and enforces the single-correction budget. See `../SKILL_SELECTION.md` for this boundary.
-4. The next plan combines counselor review with longitudinal stage action, not evaluator scores.
-5. SQLite, JSONL and HTML represent the same normalized `RunResult` contracts.
-6. RFT uses the previous committed winner as its sole baseline. Only the selected session enters consolidation; failed, duplicate and rejected branches stay in separate audit storage. See `../SESSION_RFT.md`.
-7. Confirmed run deletion removes only that run's records/files. Shared cases/skills survive; deletion journals block resume and report writers until cleanup is complete. Directory absence alone is not deletion consent.
-8. `ClientProfile.schema_version="4"` versions the private client case contract. `trace_schema_version=6` independently versions persisted trajectory/memory structure (version 5 introduced the four-field `SessionMemory`; version 6 adds dialogue provenance and separates session stopping, objective review, stage advancement and trajectory termination); matching numbers do not make them the same schema.
-9. The session checklist never carries over as active state. E.9 reconciles it with the full dialogue, then it is archived into `checklist.per_session` as counselor-visible longitudinal memory.
-10. Memory retirement is evidence-bound: an item only leaves `last_homework`/`checklist.open_items` through an id-addressed `item_updates` entry whose `done` evidence occurs in that session's dialogue (or through a normalized/fuzzy match with the session's `completed_items`).
-11. Optional probability-weighted (logprob) scoring changes only how a PsychEval scale total is aggregated. An endpoint without a logprob payload, or a judgement whose numeric mass falls below the floor, fails loudly and is never replaced by an item average or zero. See `../../notes/logprob_scoring_borrowing.md`.
-12. Client idling detection is counselor-side engineering evidence read only from the visible dialogue and previous `ClientTurnSignal` behaviours. It needs at least three observed client turns and two of three cues (repeated content, consecutive `simple_response`, minimal-answer density); the thresholds are hypotheses, not clinical cut-offs, and a detected idle turn replaces one skill-based counselor turn.
-13. Attachment conditioning is prompt-level guidance for the planned `trust_change` only, and only when the profile carries a conditioned pattern whose `source_fact_ids` resolve to existing evidence nodes at sufficient confidence. It is never case evidence, never a disclosure permission and never counselor memory; without that evidence it stays absent rather than inferred from the case.
+## 模块职责
+
+`domain` 定义 Pydantic 契约；`datasets` 编译与索引来源病例；`therapies` 管理流派和阶段；`agents` 规划及生成；`skills` 做资源目录、精确展开和条件向量筛选；`runtime` 编排、隔离、披露、安全、记忆、持久化和运行管理；`evaluation` 负责规则、纵向、候选排序与整体督导；`visualization` 只读渲染；`workbench` 提供本地任务、交互、版本和导出。
+
+## 跨模块约束
+
+1. 生产模拟 API-only；确定性网关仅用于测试。
+2. 咨询师只读已披露证据与允许记忆；来访者发言器只接收本轮授权事实、已说片段和纯表达指令。
+3. 技能按流派/阶段/审核过滤，有依据的元技能 ID 精确展开后才按阈值向量缩减，最多一次排除旧组的纠错；最终选技由模型决定。
+4. 下一计划由咨询师自评与纵向进度形成，规则分和外部督导分均不驱动计划。
+5. RFT 只提交赢家，上一已提交赢家是唯一跨会谈奖励基线；失败分支只留审计。
+6. `SessionRecord` 不保存每场 `SessionEvaluationReport`；RFT 报告属于候选审计，整体分只在 `holistic_report`。
+7. 条目 logprob 缺失、对齐失败或质量低于门限必须报错，不用离散分、条目子集均值或零分替代。
+8. SQLite、JSONL、结果 JSON 与 HTML 来源于同一规范契约。删除须核对运行锁和删除日志；目录缺失不代表授权，共享病例和技能始终保留。
+9. 清单退役须有带 ID 的完成证据或本场已完成项匹配。空转检测至少观察三轮并满足三项线索中的两项，是工程假设而非临床阈值。
+
+`ClientProfile.schema_version="4"` 版本化病例；`trace_schema_version=6` 版本化轨迹。评分方法另标 `item_logprob_v2`，三个编号互不替代。详情见 [记忆](../MEMORY.md)、[RFT](../SESSION_RFT.md) 和 [产物](../RUN_ARTIFACTS.md)。

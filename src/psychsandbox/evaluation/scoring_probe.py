@@ -1,16 +1,9 @@
 """Endpoint feasibility probe for the probability-weighted scoring path.
 
-The logprob scoring path (Zhang et al., npj Artificial Intelligence, DOI
-10.1038/s44387-026-00160-9, Eq. 8) only works on an endpoint that actually
-returns ``logprobs``/``top_logprobs``. That is a property of the deployment
-rather than of the code, so this module issues one real judgement and records
-exactly what came back: the in-band distribution, the total mass, and either the
-continuous rating or the explicit failure. It never substitutes a score, and the
-record belongs to one artifact directory per invocation.
-
-When the caller supplies no dialogue, the probe uses a fixed synthetic fixture.
-It asks "can this endpoint return a numeric logprob distribution?", so the
-fixture is not a measurement of the instrument or of any case.
+The probe exercises the same batch-JSON per-item path as production. All
+required items must pass JSON/byte alignment and the original numeric-mass
+gate. Each invocation records the conditional item distributions or an explicit
+failure; fixture dialogue is synthetic capability input, not research data.
 """
 
 from __future__ import annotations
@@ -88,24 +81,25 @@ async def probe_instrument_rating(
         "rating": None,
         "error": None,
     }
+    record["scoring_method"] = effective.method
+    record["items"] = {}
     try:
-        rating = await supervisor.score_instrument_rating(instrument, intake, dialogue)
-    except LogprobScoringUnsupported as exc:
-        record["error"] = f"unsupported: {exc}"
-    except LogprobRefusalError as exc:
-        record["supported"] = True
-        record["mass"] = exc.mass
-        record["distribution"] = {
-            str(token): probability
-            for token, probability in sorted(exc.distribution.items())
-        }
-        record["error"] = f"refused: {exc}"
+        score = await supervisor.score_instrument_items(instrument, intake, dialogue)
+    except (LogprobScoringUnsupported, LogprobRefusalError, ValueError, RuntimeError) as exc:
+        record["supported"] = getattr(exc, "supported", isinstance(exc, LogprobRefusalError))
+        record["items"] = getattr(exc, "records", {})
+        record["error"] = ("unsupported: " if not record["supported"] else "scoring_failed: ") + str(exc)
+        if isinstance(exc, LogprobRefusalError):
+            record["mass"] = exc.mass
+            record["distribution"] = {str(k): v for k, v in exc.distribution.items()}
+        record["mass"] = record["mass"] if record["mass"] is not None else min(
+            (item["mass"] for item in record["items"].values() if "mass" in item), default=None)
     else:
         record["supported"] = True
         record["accepted"] = True
-        record["mass"] = rating.mass
-        record["distribution"] = rating.as_record()["distribution"]
-        record["rating"] = rating.as_record()
+        record["items"] = score.item_logprobs
+        record["mass"] = min(item["mass"] for item in score.item_logprobs.values())
+        record["rating"] = {"value": score.score, "scale": [0, 10]}
     return record
 
 

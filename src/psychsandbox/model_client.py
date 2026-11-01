@@ -11,10 +11,15 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel
+
+from .domain import ScaleItems
+
+if TYPE_CHECKING:
+    from .evaluation.item_logprob import BatchItemRatings
 from tenacity import AsyncRetrying, stop_after_attempt, wait_exponential
 
 from .logprob import (
@@ -79,6 +84,17 @@ def _max_attempts_from_env() -> int:
 
 class ModelGateway(ABC):
     provider_name = "abstract"
+
+    async def complete_item_ratings(
+        self, *, role: str, system_prompt: str, input_payload: dict[str, Any],
+        expected_ids: tuple[str, ...], band: RatingBand,
+        temperature: float = DEFAULT_TEMPERATURE,
+        top_logprobs: int = DEFAULT_TOP_LOGPROBS,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+        mass_floor: float = DEFAULT_MASS_FLOOR,
+    ) -> BatchItemRatings:
+        """Return complete per-item expectations or raise; never use discrete fallback."""
+        raise LogprobScoringUnsupported("This gateway does not support batch item logprob scoring")
 
     @abstractmethod
     async def complete_structured(
@@ -360,6 +376,46 @@ class OpenAICompatibleGateway(ModelGateway):
             call=lambda: self.client.chat.completions.create(**request),
         )
 
+    async def complete_item_ratings(
+        self, *, role: str, system_prompt: str, input_payload: dict[str, Any],
+        expected_ids: tuple[str, ...], band: RatingBand,
+        temperature: float = DEFAULT_TEMPERATURE,
+        top_logprobs: int = DEFAULT_TOP_LOGPROBS,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+        mass_floor: float = DEFAULT_MASS_FLOOR,
+    ) -> BatchItemRatings:
+        from .evaluation.item_logprob import ratings_from_choice, SCORING_METHOD
+
+        request = {
+            "model": self.models[role], "temperature": temperature,
+            "max_tokens": max_tokens, "logprobs": True, "top_logprobs": top_logprobs,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": json.dumps({
+                    **input_payload, "expected_item_ids": list(expected_ids),
+                    "output_schema": ScaleItems.model_json_schema(),
+                    "instruction": "严格输出 JSON；完整覆盖 expected_item_ids；score 必须为范围内的单数字整数。",
+                }, ensure_ascii=False)},
+            ],
+        }
+        _request_meta.set({"response_format": "none", "temperature": temperature,
+                           "top_logprobs": top_logprobs, "band": list(band),
+                           "scoring_method": SCORING_METHOD})
+        result = await self._call_transport(
+            role=role, output_schema_name="BatchItemRatings",
+            call=lambda: self.client.chat.completions.create(**request))
+        choices = getattr(result, "choices", None) or []
+        if not choices:
+            raise LogprobScoringUnsupported("batch item response returned no choices")
+        try:
+            return ratings_from_choice(choices[0], expected_ids=expected_ids,
+                                       band=band, mass_floor=mass_floor)
+        except LogprobScoringUnsupported as exc:
+            self._write_invalid_output(role=role, output_schema=ScaleItems,
+                                       attempt=1, error=str(exc),
+                                       text=json.dumps(getattr(exc, "records", {}), ensure_ascii=False))
+            raise
+
     async def complete_numeric_rating(
         self,
         *,
@@ -435,7 +491,7 @@ class OpenAICompatibleGateway(ModelGateway):
                 role=role,
                 system_prompt=system_prompt,
                 user_prompt=json.dumps(payload, ensure_ascii=False),
-                temperature=0.1 if attempt > 0 else temperature,
+                temperature=temperature,
                 output_schema=output_schema,
                 force_json_schema=attempt > 0,
             )

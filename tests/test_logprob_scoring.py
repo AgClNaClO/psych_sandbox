@@ -27,6 +27,7 @@ from psychsandbox.domain import (
     ScaleItems,
 )
 from psychsandbox.evaluation import instrument_registry
+from psychsandbox.evaluation.item_logprob import BatchItemRatings
 from psychsandbox.evaluation.psycheval_supervisor import PsychEvalSupervisor
 from psychsandbox.evaluation.scoring_probe import (
     PROBE_FIXTURE_DIALOGUE,
@@ -352,18 +353,18 @@ class ScriptedSupervisorGateway(ModelGateway):
             items=[ScaleItem(item=label, score=self.item_score) for label in self.labels]
         )
 
-    async def complete_numeric_rating(self, **kwargs):
+    async def complete_item_ratings(self, **kwargs):
         self.rating_calls.append(kwargs)
         if self.rating_error is not None:
             raise self.rating_error
-        return rating_from_top_logprobs(
-            [
-                _token(str(token), probability)
-                for token, probability in self.probabilities.items()
-            ],
-            band=kwargs["band"],
-            mass_floor=kwargs["mass_floor"],
+        rating = rating_from_top_logprobs(
+            [_token(str(token), probability) for token, probability in self.probabilities.items()],
+            band=kwargs["band"], mass_floor=kwargs["mass_floor"],
         )
+        labels = kwargs["expected_ids"]
+        return BatchItemRatings(
+            ScaleItems(items=[ScaleItem(item=label, score=rating.value) for label in labels]),
+            {label: {**rating.as_record(), "accepted": True} for label in labels})
 
 
 def _supervisor(root, gateway, **kwargs) -> PsychEvalSupervisor:
@@ -407,17 +408,18 @@ def test_enabled_scoring_uses_the_weighted_rating_and_keeps_item_audit(root):
 
     # Weighted rating 4.0 on the 1-5 band instead of the 5.0 item average.
     assert score.score == pytest.approx(7.5)
-    assert score.item_scores == {"1": 5.0, "2": 5.0, "3": 5.0}
-    assert len(gateway.structured_calls) == 1
+    assert score.item_scores == {str(i): 4.0 for i in range(1, 13)}
+    assert len(score.item_logprobs) == 12
+    assert len(gateway.structured_calls) == 0
     call = gateway.rating_calls[0]
     assert call["role"] == "supervisor"
     assert call["band"] == (1, 5)
-    assert call["temperature"] == pytest.approx(0.7)
+    assert call["temperature"] == pytest.approx(0.0)
     assert call["top_logprobs"] == 20
-    assert call["max_tokens"] == 16
+    assert call["max_tokens"] == 8192
     assert call["mass_floor"] == pytest.approx(0.25)
     assert "WAI" in call["system_prompt"]
-    assert "只输出一个阿拉伯数字" in call["system_prompt"]
+    assert "JSON" in call["system_prompt"]
     # Intake and dialogue are carried once, not appended twice.
     assert call["system_prompt"].count("背景标记INT") == 1
     assert call["system_prompt"].count("对话标记DLG") == 1
@@ -443,7 +445,7 @@ def test_rating_scoring_requires_the_optional_mode(root):
     supervisor = _supervisor(root, ScriptedSupervisorGateway())
 
     with pytest.raises(RuntimeError, match="not enabled"):
-        asyncio.run(supervisor.score_instrument_rating(_wai(), "背景", "对话"))
+        asyncio.run(supervisor.score_instrument_items(_wai(), "背景", "对话"))
 
 
 _PANAS_ORDER = [
@@ -469,8 +471,8 @@ def test_composite_instruments_keep_their_official_formulas(root):
     assert panas.score == pytest.approx(5.0)  # (10 - 10 + 10) / 2 for flat item scores
     assert 0.0 <= counselor.score <= 10.0
     assert 0.0 <= client.score <= 10.0
-    assert panas_gateway.rating_calls == []
-    assert rro_gateway.rating_calls == []
+    assert len(panas_gateway.rating_calls) == 1
+    assert len(rro_gateway.rating_calls) == 1
 
 
 def _probe_record(root, gateway, **overrides):
@@ -495,14 +497,15 @@ def test_probe_records_a_supported_endpoint(root, tmp_path):
     assert record["accepted"] is True
     assert record["band"] == [1, 5]
     assert record["mass"] == pytest.approx(1.0)
-    assert record["rating"]["value"] == pytest.approx(4.0)
-    assert record["distribution"] == {"3": pytest.approx(0.5), "5": pytest.approx(0.5)}
+    assert record["rating"]["value"] == pytest.approx(7.5)
+    assert len(record["items"]) == 12
+    assert all(item["distribution"] == {"3": pytest.approx(0.5), "5": pytest.approx(0.5)} for item in record["items"].values())
     assert record["dialogue_note"]  # the fixture is labelled, not passed off as data
     assert record["request"]["top_logprobs"] == 20
     path = write_probe_record(tmp_path / "invocation", record)
     assert path.name == "probe.json"
     saved = json.loads(path.read_text(encoding="utf-8"))
-    assert saved["rating"]["value"] == pytest.approx(4.0)
+    assert saved["rating"]["value"] == pytest.approx(7.5)
 
 
 def test_probe_records_an_endpoint_without_logprobs(root):
@@ -628,7 +631,7 @@ def test_runtime_config_exposes_the_scoring_block(root, tmp_path, enabled):
     assert block.enabled is enabled
     assert SandboxConfig(project_root=Path(root)).logprob_scoring.enabled is True
     assert block.mass_floor == pytest.approx(0.25)
-    assert (block.top_logprobs, block.max_tokens, block.temperature) == (20, 16, 0.7)
+    assert (block.top_logprobs, block.max_tokens, block.temperature) == (20, 8192, 0.0)
 
 
 def test_cli_flag_enables_the_scoring_block(root):

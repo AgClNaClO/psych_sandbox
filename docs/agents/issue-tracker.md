@@ -1,21 +1,13 @@
-# Issue tracker: GitHub
+# GitHub Issue操作约定
 
-Issues and specifications for this repository live in GitHub Issues. Run `gh` commands inside this checkout so the `origin` remote selects `AgClNaClO/psych_sandbox` automatically.
+需求与规格使用本仓库GitHub Issues；在当前检出目录执行gh，使origin选择正确仓库。PR用于代码审查，不自动替代需求记录。
 
-## Read operations
+## 读取
 
-- Read one issue and comments: `gh issue view <number> --comments`.
-- List open issues: `gh issue list --state open --json number,title,body,labels,assignees`.
-- Resolve an ambiguous `#42`: try `gh pr view 42`; if absent, use `gh issue view 42 --comments`.
-- Inspect repository labels before applying one: `gh label list --limit 100`.
+`gh issue view <编号> --comments`查看上下文，`gh issue list --state open --json number,title,body,labels,assignees`列出需求。编号含义不明时先尝试gh pr view，再检查issue。添加标签前读取gh label list --limit 100。
 
-## Write operations
+## 写入
 
-- Create: `gh issue create --title "..." --body-file <markdown-file>`.
-- Comment: `gh issue comment <number> --body-file <markdown-file>`.
-- Label: `gh issue edit <number> --add-label "<label>"`.
-- Close with rationale: `gh issue close <number> --comment "..."`.
+只有用户任务授权相关写操作时才执行。多行正文写入本次产物目录中的文件，通过--body-file传给gh issue create/comment，避免shell转义改变内容。编辑标签使用gh issue edit --add-label，关闭须记录理由。此约定不授权主动发送消息或自动新建issue。
 
-Repository pull requests are code-review surfaces, not the default feature-request intake. Use `gh pr view` and `gh pr diff` for review; create an issue when a new request needs specification or tracking.
-
-When a workflow asks for a canonical triage state, read `docs/agents/triage-labels.md` first. Completion means the selected label exists on GitHub and the issue comment records any nuance lost by the compatibility mapping.
+工作流状态标签先读 [兼容映射](triage-labels.md)；以实际远端标签为准，精细状态由issue评论补充。当前文档重写未执行GitHub操作。

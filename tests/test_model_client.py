@@ -391,7 +391,7 @@ def test_api_gateway_uses_json_object_for_non_schema_role(tmp_path):
     assert "json_schema" not in request["response_format"]
 
 
-def test_non_schema_role_retries_with_low_temp_and_json_schema(tmp_path):
+def test_non_schema_role_retries_with_original_temp_and_json_schema(tmp_path):
     invalid = "这不是 JSON"
     gateway, completions = _gateway(tmp_path, [invalid, '{"value": 5}'])
     gateway.json_schema_roles = set()
@@ -413,7 +413,7 @@ def test_non_schema_role_retries_with_low_temp_and_json_schema(tmp_path):
     assert first_request["response_format"] == {"type": "json_object"}
     assert first_request["temperature"] == 0.8
     assert second_request["response_format"]["type"] == "json_schema"
-    assert second_request["temperature"] == 0.1
+    assert second_request["temperature"] == 0.8
     retry_payload = json.loads(second_request["messages"][1]["content"])
     assert retry_payload["invalid_previous_output"] == invalid
 
@@ -628,8 +628,13 @@ def test_parallel_api_diagnostics_keep_candidate_scope_and_request_metadata(tmp_
     first_started, second_started = asyncio.Event(), asyncio.Event()
 
     class InterleavedCompletions:
+        def __init__(self):
+            self.counts = {}
+
         async def create(self, **request):
-            if request["temperature"] == 0.1:
+            model = request["model"]
+            self.counts[model] = self.counts.get(model, 0) + 1
+            if self.counts[model] > 1:
                 text = '{"value": 2}'
             else:
                 if request["model"] == "A":

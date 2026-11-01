@@ -1017,6 +1017,7 @@ async def convert_psycheval_extractive(
     gateway,
     revision: str = PSYCHEVAL_REVISION,
     cache_dir: Path | None = None,
+    temperature: float = 0.0,
 ) -> dict[str, Any]:
     """Atomize growth, language features and core demands before conversion."""
 
@@ -1024,7 +1025,7 @@ async def convert_psycheval_extractive(
 
     source = source_dir / "data" / therapy
     files = sorted(source.glob("*.json"), key=lambda path: int(path.stem))
-    atomizer = ExtractiveAtomizer(gateway, cache_dir or output_dir / ".profile-cache")
+    atomizer = ExtractiveAtomizer(gateway, cache_dir or output_dir / ".profile-cache", temperature)
     raw_by_path = {
         path: json.loads(path.read_text(encoding="utf-8")) for path in files
     }

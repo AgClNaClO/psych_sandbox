@@ -43,11 +43,11 @@ rem (no trailing wave with fewer candidates than slots); a number caps the load.
 set ROLLOUT_CONCURRENCY=
 set JUDGE_CONCURRENCY=
 rem 1 = probability-weighted (logprob) scoring ON (default); 0 = item average
-set LOGPROB_SCORING=0
+set LOGPROB_SCORING=1
 rem 1 = probe the endpoint and keep the record before simulating (default);
 rem     0 = skip the probe
-set PROBE_LOGPROB=0
-rem Instrument used by the probe: any non-composite key, e.g. wai/ctrs/bdi_ii
+set PROBE_LOGPROB=1
+rem Instrument used by the probe: any registered key, e.g. wai/ctrs/bdi_ii
 set PROBE_INSTRUMENT=wai
 rem Transient retry attempts per model call (3 = the previous fixed budget).
 rem Raise it to survive a 5xx storm; the OpenAI SDK adds its own retries.
@@ -62,7 +62,7 @@ if defined PROBE_ONLY (
 )
 
 rem Step 1: verify the endpoint returns logprobs (record kept under runs\runtime)
-if "%PROBE_LOGPROB%"=="1" (
+if "%PROBE_LOGPROB%"=="1" if "%LOGPROB_SCORING%"=="1" (
     psych-sandbox probe logprob-scoring --case %CASE_ID% --instrument %PROBE_INSTRUMENT%
     if errorlevel 1 (
         echo.
@@ -74,7 +74,7 @@ if "%PROBE_LOGPROB%"=="1" (
 )
 
 rem Step 2: assemble the logprob scoring switch
-set LOGPROB_ARG=
+set LOGPROB_ARG=--no-logprob-scoring
 if "%LOGPROB_SCORING%"=="1" set LOGPROB_ARG=--logprob-scoring
 
 rem Step 2b: pass concurrency overrides only when they were set above

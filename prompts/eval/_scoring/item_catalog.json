@@ -1,0 +1,847 @@
+{
+  "BDI_II/BDI_II.txt": {
+    "ids": [
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "6",
+      "7",
+      "8",
+      "9",
+      "10",
+      "11",
+      "12",
+      "13",
+      "14",
+      "15",
+      "16",
+      "17",
+      "18",
+      "19",
+      "20",
+      "21"
+    ],
+    "band": [
+      0,
+      3
+    ],
+    "source": "prompts/eval/BDI_II/BDI_II.txt",
+    "sha256": "9017089d7e0ec32024a025fa55482f4f8e1b729f0b18460e1bf21f9f78687ada"
+  },
+  "cct/current focus.txt": {
+    "ids": [
+      "1",
+      "2",
+      "3"
+    ],
+    "band": [
+      0,
+      2
+    ],
+    "source": "prompts/eval/cct/current focus.txt",
+    "sha256": "a77dde443276c731b3eb1deec4d73437e8180c744da87d41c8d3731ac357da7f"
+  },
+  "cct/non critical.txt": {
+    "ids": [
+      "1",
+      "2",
+      "3"
+    ],
+    "band": [
+      0,
+      2
+    ],
+    "source": "prompts/eval/cct/non critical.txt",
+    "sha256": "b13ff09c8842de62d1a56a47c52eb03380e4c79f31f02a6fce7f4c05d34c4d8e"
+  },
+  "cct/real connection.txt": {
+    "ids": [
+      "1",
+      "2",
+      "3"
+    ],
+    "band": [
+      0,
+      2
+    ],
+    "source": "prompts/eval/cct/real connection.txt",
+    "sha256": "45eef4022b7555ec11e753354061e5a61711cded69440756406685f415a6b078"
+  },
+  "cct/self awareness.txt": {
+    "ids": [
+      "1",
+      "2",
+      "3"
+    ],
+    "band": [
+      0,
+      2
+    ],
+    "source": "prompts/eval/cct/self awareness.txt",
+    "sha256": "80bc0134067c0acd4159582ac51afc3c27bf4864e35fb886b0f08e3a3a9243fd"
+  },
+  "cct/self exploration.txt": {
+    "ids": [
+      "1",
+      "2",
+      "3"
+    ],
+    "band": [
+      0,
+      2
+    ],
+    "source": "prompts/eval/cct/self exploration.txt",
+    "sha256": "22a4f2039c979afad219d537cec20bd377144d75037a846a5d0f1bd900d320af"
+  },
+  "ctrs/collaboration.txt": {
+    "ids": [
+      "collaboration"
+    ],
+    "band": [
+      0,
+      6
+    ],
+    "source": "prompts/eval/ctrs/collaboration.txt",
+    "sha256": "e6ba96aa388fba2b44a3c9e042aca2127d50764d121edf52593d68ad517dcfd1"
+  },
+  "ctrs/focus.txt": {
+    "ids": [
+      "focus"
+    ],
+    "band": [
+      0,
+      6
+    ],
+    "source": "prompts/eval/ctrs/focus.txt",
+    "sha256": "ce5f09e8645ccd2201c61b5177c42d6d8688474f921e18bd5f59e4bc79955274"
+  },
+  "ctrs/guided_discovery.txt": {
+    "ids": [
+      "guided_discovery"
+    ],
+    "band": [
+      0,
+      6
+    ],
+    "source": "prompts/eval/ctrs/guided_discovery.txt",
+    "sha256": "2168c33a54e95749a4d75c7fb8e4197eb1b1f63d456a29c44001b0f45552e5d4"
+  },
+  "ctrs/interpersonal_effectiveness.txt": {
+    "ids": [
+      "interpersonal_effectiveness"
+    ],
+    "band": [
+      0,
+      6
+    ],
+    "source": "prompts/eval/ctrs/interpersonal_effectiveness.txt",
+    "sha256": "695d7aa8a920855eaeca46cf534318e6e9b0403da496ed446eed3b0ec5adf6ee"
+  },
+  "ctrs/strategy.txt": {
+    "ids": [
+      "strategy"
+    ],
+    "band": [
+      0,
+      6
+    ],
+    "source": "prompts/eval/ctrs/strategy.txt",
+    "sha256": "260dbdad2470bfad932bfb0ae225f09a5952f2a05ca69e71c87e1a8c80085706"
+  },
+  "ctrs/understanding.txt": {
+    "ids": [
+      "understanding"
+    ],
+    "band": [
+      0,
+      6
+    ],
+    "source": "prompts/eval/ctrs/understanding.txt",
+    "sha256": "ebbe49019ae45784b3b8d3b4a93b8f18f1c8fca4ba855c17dbb9efb60895de7d"
+  },
+  "custom_dim/Ethics.txt": {
+    "ids": [
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "6",
+      "7",
+      "8",
+      "9",
+      "10",
+      "11",
+      "12",
+      "13",
+      "14",
+      "15"
+    ],
+    "band": [
+      1,
+      5
+    ],
+    "source": "prompts/eval/custom_dim/Ethics.txt",
+    "sha256": "6c495e8f2429a230f192b950e0055031a798db996a466e3e9b67b5a48e0302b7"
+  },
+  "custom_dim/Interaction.txt": {
+    "ids": [
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "6",
+      "7",
+      "8",
+      "9",
+      "10",
+      "11",
+      "12",
+      "13",
+      "14"
+    ],
+    "band": [
+      1,
+      5
+    ],
+    "source": "prompts/eval/custom_dim/Interaction.txt",
+    "sha256": "487c35fa1023f98b8703c25e930fbac877fe9b6a41beb2b16ca617c46573edbc"
+  },
+  "custom_dim/Intervention.txt": {
+    "ids": [
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "6",
+      "7",
+      "8",
+      "9",
+      "10",
+      "11",
+      "12",
+      "13",
+      "14",
+      "15"
+    ],
+    "band": [
+      1,
+      5
+    ],
+    "source": "prompts/eval/custom_dim/Intervention.txt",
+    "sha256": "7f539bb002b0217fc0a1b74f314ea62f772bb52d8ab2daf3407c1ef57e97be1c"
+  },
+  "custom_dim/Perception.txt": {
+    "ids": [
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "6",
+      "7",
+      "8",
+      "9",
+      "10",
+      "11",
+      "12",
+      "13",
+      "14",
+      "15",
+      "16",
+      "17",
+      "18",
+      "19",
+      "20",
+      "21"
+    ],
+    "band": [
+      1,
+      5
+    ],
+    "source": "prompts/eval/custom_dim/Perception.txt",
+    "sha256": "e74ae7c33cfabda6326b42b270255032dab14e1adc85d8aa513b0707ae9075ed"
+  },
+  "eft_tfs/EFT_TFS.txt": {
+    "ids": [
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "6",
+      "7",
+      "8",
+      "9",
+      "10",
+      "11",
+      "12",
+      "13"
+    ],
+    "band": [
+      1,
+      5
+    ],
+    "source": "prompts/eval/eft_tfs/EFT_TFS.txt",
+    "sha256": "9960fa32b96e897f4d097c222471e9da9c7bbee5b2ac3b3167e8a76de7418a69"
+  },
+  "HTAIS/HTAIS.txt": {
+    "ids": [
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "6",
+      "7",
+      "8",
+      "9",
+      "10",
+      "11",
+      "12",
+      "13",
+      "14",
+      "15",
+      "16",
+      "17",
+      "18",
+      "19",
+      "20",
+      "21",
+      "22",
+      "23",
+      "24",
+      "25",
+      "26"
+    ],
+    "band": [
+      1,
+      5
+    ],
+    "source": "prompts/eval/HTAIS/HTAIS.txt",
+    "sha256": "2a955e410cacc0d93eb0d14582c0c294eb2a2788850f92df6e9d6160a1ccd817"
+  },
+  "IPO/IPO.txt": {
+    "ids": [
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "6",
+      "7",
+      "8",
+      "9",
+      "10",
+      "11",
+      "12",
+      "13",
+      "14",
+      "15",
+      "16",
+      "17",
+      "18",
+      "19",
+      "20",
+      "21",
+      "22",
+      "23",
+      "24",
+      "25",
+      "26",
+      "27",
+      "28",
+      "29",
+      "30",
+      "31",
+      "32",
+      "33",
+      "34",
+      "35",
+      "36",
+      "37",
+      "38",
+      "39",
+      "40",
+      "41"
+    ],
+    "band": [
+      1,
+      5
+    ],
+    "source": "prompts/eval/IPO/IPO.txt",
+    "sha256": "6be2747fb8814109755e8d1547e9b6424477c45de0918f4359b87400184d263b"
+  },
+  "miti/cultivating change talk.txt": {
+    "ids": [
+      "cultivating change talk"
+    ],
+    "band": [
+      1,
+      5
+    ],
+    "source": "prompts/eval/miti/cultivating change talk.txt",
+    "sha256": "7f3e66254ade085266627e25a3325563b30bae71fbe32aea7a8f76a5b5a834c3"
+  },
+  "miti/empathy.txt": {
+    "ids": [
+      "empathy"
+    ],
+    "band": [
+      1,
+      5
+    ],
+    "source": "prompts/eval/miti/empathy.txt",
+    "sha256": "2411b609df05d6478b68b697f42da8c4cc7153ae0ba94d750858902411e692f1"
+  },
+  "miti/partnership.txt": {
+    "ids": [
+      "partnership"
+    ],
+    "band": [
+      1,
+      5
+    ],
+    "source": "prompts/eval/miti/partnership.txt",
+    "sha256": "cad05284fcdf2edf7fadb84cdff34232e8b45de2944afb5d1307ff5977ed379c"
+  },
+  "miti/softening sustain talk.txt": {
+    "ids": [
+      "softening sustain talk"
+    ],
+    "band": [
+      1,
+      5
+    ],
+    "source": "prompts/eval/miti/softening sustain talk.txt",
+    "sha256": "4da06e539bacb76227d45951559894ab828c033daaec55cfb10be0b7dacccceb"
+  },
+  "panas/panas.txt": {
+    "ids": [
+      "Interested",
+      "Excited",
+      "Strong",
+      "Enthusiastic",
+      "Proud",
+      "Alert",
+      "Inspired",
+      "Determined",
+      "Attentive",
+      "Active",
+      "Distressed",
+      "Upset",
+      "Guilty",
+      "Scared",
+      "Hostile",
+      "Irritable",
+      "Ashamed",
+      "Nervous",
+      "Jittery",
+      "Afraid"
+    ],
+    "band": [
+      1,
+      5
+    ],
+    "source": "prompts/eval/panas/panas.txt",
+    "sha256": "fd7613f88ea78f493b0864e6c260cba14381afbe22e40dfb1120d5b2d0a75567"
+  },
+  "psc/deepening and regulating emotions.txt": {
+    "ids": [
+      "deepening and regulating emotions"
+    ],
+    "band": [
+      0,
+      6
+    ],
+    "source": "prompts/eval/psc/deepening and regulating emotions.txt",
+    "sha256": "ad16b8aa5ad80f5017c0f773f8347fc109feada334c67d03d4b983fc02c661b7"
+  },
+  "psc/empathy.txt": {
+    "ids": [
+      "empathy"
+    ],
+    "band": [
+      0,
+      6
+    ],
+    "source": "prompts/eval/psc/empathy.txt",
+    "sha256": "17ad3c856907e11a83602b29e80d4ace804bc10109b01a9327a2f388707c119a"
+  },
+  "psc/facilitating patient engagement.txt": {
+    "ids": [
+      "facilitating patient engagement"
+    ],
+    "band": [
+      0,
+      6
+    ],
+    "source": "prompts/eval/psc/facilitating patient engagement.txt",
+    "sha256": "84fb54fef628c1048ce07d9de64aa282972e125faa2281c24a90f408d415ce16"
+  },
+  "psc/flexibility and rigidity.txt": {
+    "ids": [
+      "flexibility and rigidity"
+    ],
+    "band": [
+      0,
+      6
+    ],
+    "source": "prompts/eval/psc/flexibility and rigidity.txt",
+    "sha256": "8d21b806072f671a964cb99a06902ff3d1ccaba4ee67200f8a2c747b9344bf73"
+  },
+  "psc/patterns in relationships.txt": {
+    "ids": [
+      "patterns in relationships"
+    ],
+    "band": [
+      0,
+      6
+    ],
+    "source": "prompts/eval/psc/patterns in relationships.txt",
+    "sha256": "2877c2cbfa1f624b755c4259540a1b9c9678b1732e0e603e66718008db13d3df"
+  },
+  "psc/transference.txt": {
+    "ids": [
+      "transference"
+    ],
+    "band": [
+      0,
+      6
+    ],
+    "source": "prompts/eval/psc/transference.txt",
+    "sha256": "11621fb4a29c6204f9840efeae56e8cd8da1c73fbdc4ac1cf37680c5d1e7bf92"
+  },
+  "psc/understanding and tracking.txt": {
+    "ids": [
+      "understanding and tracking"
+    ],
+    "band": [
+      0,
+      6
+    ],
+    "source": "prompts/eval/psc/understanding and tracking.txt",
+    "sha256": "afa8133a373037f74ae8550e54a78330119e945fc9de0bc3398ece25189a8b11"
+  },
+  "RRO/RRO.txt": {
+    "ids": [
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "6",
+      "7",
+      "8",
+      "9",
+      "10",
+      "11",
+      "12",
+      "13",
+      "14",
+      "15",
+      "16",
+      "17",
+      "18",
+      "19",
+      "20",
+      "21",
+      "22",
+      "23",
+      "24"
+    ],
+    "band": [
+      1,
+      5
+    ],
+    "source": "prompts/eval/RRO/RRO.txt",
+    "sha256": "746041adb7794ead50b631897b8f1fe285e281617231c6a41e4f2bb6d29640ee"
+  },
+  "SCL_90/SCL_90.txt": {
+    "ids": [
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "6",
+      "7",
+      "8",
+      "9",
+      "10",
+      "11",
+      "12",
+      "13",
+      "14",
+      "15",
+      "16",
+      "17",
+      "18",
+      "19",
+      "20",
+      "21",
+      "22",
+      "23",
+      "24",
+      "25",
+      "26",
+      "27",
+      "28",
+      "29",
+      "30",
+      "31",
+      "32",
+      "33",
+      "34",
+      "35",
+      "36",
+      "37",
+      "38",
+      "39",
+      "40",
+      "41",
+      "42",
+      "43",
+      "44",
+      "45",
+      "46",
+      "47",
+      "48",
+      "49",
+      "50",
+      "51",
+      "52",
+      "53",
+      "54",
+      "55",
+      "56",
+      "57",
+      "58",
+      "59",
+      "60",
+      "61",
+      "62",
+      "63",
+      "64",
+      "65",
+      "66",
+      "67",
+      "68",
+      "69",
+      "70",
+      "71",
+      "72",
+      "73",
+      "74",
+      "75",
+      "76",
+      "77",
+      "78",
+      "79",
+      "80",
+      "81",
+      "82",
+      "83",
+      "84",
+      "85",
+      "86",
+      "87",
+      "88",
+      "89",
+      "90"
+    ],
+    "band": [
+      0,
+      4
+    ],
+    "source": "prompts/eval/SCL_90/SCL_90.txt",
+    "sha256": "3a25a20eafe444e00a7a47be70faf79cce84f66906e1aa3656a91b812692bbbb"
+  },
+  "sfbt/SFBT.txt": {
+    "ids": [
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "6",
+      "7",
+      "8",
+      "9",
+      "10",
+      "11",
+      "12",
+      "13",
+      "14",
+      "15",
+      "16",
+      "17",
+      "18",
+      "19",
+      "20"
+    ],
+    "band": [
+      0,
+      4
+    ],
+    "source": "prompts/eval/sfbt/SFBT.txt",
+    "sha256": "455fc1a4400da4d855f32dd54b542eb267201841e65967e3eb7d234645a424ff"
+  },
+  "srs/srs.txt": {
+    "ids": [
+      "关系维度 (Relationship)",
+      "目标与话题维度 (Goals and Topics)",
+      "方法与风格维度 (Approach or Method)",
+      "整体评价 (Overall)"
+    ],
+    "band": [
+      0,
+      4
+    ],
+    "source": "prompts/eval/srs/srs.txt",
+    "sha256": "3b57b55a270d13b70296eaf01a01b7bf944fce8b92fae334e6867033d676228c"
+  },
+  "stai/STAI.txt": {
+    "ids": [
+      "1. 阻抗 (反向:开放度)",
+      "2. 同意 (认可度)",
+      "3. 恰当请求 (求助意愿)",
+      "4. 叙述 (反向:当下聚焦)",
+      "5. 认知探索 (深度)",
+      "6. 情感探索 (深度)",
+      "7. 领悟 (觉察度)",
+      "8. 治疗改变 (行动力)"
+    ],
+    "band": [
+      0,
+      4
+    ],
+    "source": "prompts/eval/stai/STAI.txt",
+    "sha256": "6310e7b5b4bb304940f6ccb73907af8240ce61440b1ae7be1c0082b2215db1e6"
+  },
+  "tes/acceptance of feelings.txt": {
+    "ids": [
+      "acceptance of feelings"
+    ],
+    "band": [
+      1,
+      7
+    ],
+    "source": "prompts/eval/tes/acceptance of feelings.txt",
+    "sha256": "62fe5bdb792f2c7b3f6b9ce320d19c0d5a90c36ab820df0816d23583f4f1f310"
+  },
+  "tes/attuned to client‘s inner world.txt": {
+    "ids": [
+      "attuned to client‘s inner world"
+    ],
+    "band": [
+      1,
+      7
+    ],
+    "source": "prompts/eval/tes/attuned to client‘s inner world.txt",
+    "sha256": "98b0d5a26e9bb7f5551f1e0c1addde10c7ea98e91813852fe4c3d75a47686914"
+  },
+  "tes/concern.txt": {
+    "ids": [
+      "concern"
+    ],
+    "band": [
+      1,
+      7
+    ],
+    "source": "prompts/eval/tes/concern.txt",
+    "sha256": "da2db28a086186778d171fac0a4bb98371219e87390ca8b3d7f04f30b53f27fe"
+  },
+  "tes/expressiveness.txt": {
+    "ids": [
+      "expressiveness"
+    ],
+    "band": [
+      1,
+      7
+    ],
+    "source": "prompts/eval/tes/expressiveness.txt",
+    "sha256": "cd38d267cc077170ed7d33a9ac37bded9aa8ce7a2117fc57e4ef3e2c47116c3d"
+  },
+  "tes/resonate or capture client feelings.txt": {
+    "ids": [
+      "resonate or capture client feelings"
+    ],
+    "band": [
+      1,
+      7
+    ],
+    "source": "prompts/eval/tes/resonate or capture client feelings.txt",
+    "sha256": "63227f2d561e23b60a78d2b278933e96b47bdbbc9f5b7c0cb94194fdaab15485"
+  },
+  "tes/responsiveness.txt": {
+    "ids": [
+      "responsiveness"
+    ],
+    "band": [
+      1,
+      7
+    ],
+    "source": "prompts/eval/tes/responsiveness.txt",
+    "sha256": "c5319002e3dd9ade2d276214438d9550b66ab7d93eca7d81ccd20280f8ec159f"
+  },
+  "tes/understanding cognitive framework.txt": {
+    "ids": [
+      "understanding cognitive framework"
+    ],
+    "band": [
+      1,
+      7
+    ],
+    "source": "prompts/eval/tes/understanding cognitive framework.txt",
+    "sha256": "b3832732e47b6ad264b04bb5ef88f21d577154a29634932b913616df5bba75b9"
+  },
+  "tes/understanding feelings.txt": {
+    "ids": [
+      "inner experience"
+    ],
+    "band": [
+      1,
+      7
+    ],
+    "source": "prompts/eval/tes/understanding feelings.txt",
+    "sha256": "96a39957d3f5938fb3e1ad0f344ab6d4ff8dae7ec72b9d29315ac4fc3cdc60c8"
+  },
+  "tes/warmth.txt": {
+    "ids": [
+      "warmth"
+    ],
+    "band": [
+      1,
+      7
+    ],
+    "source": "prompts/eval/tes/warmth.txt",
+    "sha256": "f14d043f62db5db7b4ae4ef63a96116fe787b888ee8b361048560a3e011d8420"
+  },
+  "wai/wai.txt": {
+    "ids": [
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "6",
+      "7",
+      "8",
+      "9",
+      "10",
+      "11",
+      "12"
+    ],
+    "band": [
+      1,
+      5
+    ],
+    "source": "prompts/eval/wai/wai.txt",
+    "sha256": "bfe192bd60516232cd7fb9cea32cbffce4e776b07c4765fcdfc683902baa23c9"
+  }
+}

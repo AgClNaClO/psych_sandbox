@@ -104,7 +104,7 @@ def build_parser() -> argparse.ArgumentParser:
     simulate.add_argument("--judge-concurrency", type=int)
     simulate.add_argument(
         "--logprob-scoring",
-        action="store_true",
+        action=argparse.BooleanOptionalAction, default=None,
         help="按论文式 8 的概率加权期望评分（默认已开启；先确认端点返回 logprobs）",
     )
     simulate.add_argument("--resume-run")
@@ -150,8 +150,8 @@ def _config(args: argparse.Namespace) -> SandboxConfig:
         value = getattr(args, argument, None)
         if value is not None:
             rft[field] = value
-    if getattr(args, "logprob_scoring", False):
-        values["logprob_scoring"]["enabled"] = True
+    if getattr(args, "logprob_scoring", None) is not None:
+        values["logprob_scoring"]["enabled"] = args.logprob_scoring
     return SandboxConfig.model_validate(values)
 
 
@@ -463,6 +463,7 @@ async def _convert_data(args: argparse.Namespace, root: Path) -> dict:
                 output,
                 therapy=therapy,
                 gateway=gateway,
+                temperature=default_config(root).temperature_control,
                 cache_dir=(
                     root / "data" / "processed" / ".psycheval-profile-cache" / therapy
                 ),
@@ -549,8 +550,8 @@ async def _probe(args: argparse.Namespace, root: Path) -> int:
         print(json.dumps(record, ensure_ascii=False, indent=2))
     if record["accepted"]:
         print(
-            f"端点返回 logprobs：{instrument.key} 概率加权期望 "
-            f"{record['rating']['value']:.3f}（质量 {record['mass']:.3f}）"
+            f"端点返回 logprobs：{instrument.key} 条目聚合分（0–10） "
+            f"{record['rating']['value']:.3f}（最低条目质量 {record['mass']:.3f}）"
         )
         return 0
     if record["supported"]:

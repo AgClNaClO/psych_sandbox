@@ -39,9 +39,9 @@ class ClientAgent:
     def __init__(
         self,
         gateway: ModelGateway,
-        temperature: float = 0.8,
+        temperature: float = 0.7,
         *,
-        planning_temperature: float = 0.1,
+        planning_temperature: float = 0.0,
         pullback_after: int = 2,
         leak_retry_limit: int = 1,
         leakage_guard: PrematureDisclosureGuard | None = None,

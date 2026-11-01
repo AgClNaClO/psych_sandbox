@@ -1,7 +1,9 @@
-# Third-party licenses
+# 第三方许可与使用边界
 
-- PsychEval data, skills, prompts and repository materials: CC BY-NC 4.0. See <https://creativecommons.org/licenses/by-nc/4.0/> and the upstream `LICENSE` obtained by `psych-sandbox data fetch psycheval`.
-- AutoSkill/SkillEvo: MIT. No upstream source code is currently vendored here.
-- Zhang et al., *Mechanistic control of large language models as simulated participants via linear representation* (npj Artificial Intelligence, DOI 10.1038/s44387-026-00160-9): methodology only (Eq. 8 probability-weighted rating aggregation and its refusal quality gate). No upstream code, weights or data are vendored; see `notes/logprob_scoring_borrowing.md`.
+| 来源 | 许可或借鉴范围 | 本仓库处理 |
+|---|---|---|
+| PsychEval病例、技能、提示与仓库材料 | [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) | 保留归属，仅非商业教学研究；data fetch取得上游LICENSE |
+| AutoSkill / SkillEvo | MIT | 当前没有vendored上游代码，后续复制须保留MIT声明 |
+| Zhang等线性表征论文 | 仅方法学借鉴：式8及概率质量门 | 未复制代码、权重或数据，见 [评分说明](../notes/logprob_scoring_borrowing.md) |
 
-Bundled runnable cases live in `data/<therapy>/`; retained source-reference profiles live in `assets/profiles/`. When the optional converter runs, generated files retain their source revision and SHA-256 digest in `data/processed/psycheval/manifest.json`, an ignored and rebuildable directory.
+原始可运行病例在data下，来源画像在assets/profiles。可选转换生成的忽略目录manifest记录来源版本和SHA-256；生成适配不取消上游限制。完整归属见 [NOTICE](../NOTICE.md)。

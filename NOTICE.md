@@ -1,9 +1,9 @@
-# Third-party notice
+# 第三方材料与方法归属
 
-This research sandbox adapts data structures, benchmark cases, hierarchical skills and evaluation prompts from [PsychEval](https://github.com/ECNU-ICALK/PsychEval), pinned for reproducible conversion at revision `e04df535749e5bca76fcc45d9a85f3f46a082d91`. Additional bundled profile assets were copied from the local Psych-new research tree; their presence does not imply that the current runtime loads them.
+本仓库改编 [PsychEval](https://github.com/ECNU-ICALK/PsychEval) 的病例、分层技能和量表提示，转换固定版本为e04df535749e5bca76fcc45d9a85f3f46a082d91。来源材料采用CC BY-NC 4.0，仅用于非商业教学研究。归一化字段、病例切分、证据披露层、流派前缀ID与来源清单属于本项目适配，原始技能ID保留。
 
-PsychEval materials are licensed under CC BY-NC 4.0. Local code adds normalized Pydantic fields, deterministic case-level splits, source-grounded disclosure layers, stable therapy-prefixed skill identifiers and provenance manifests. Original atomic `skill_id` values are preserved. Use is restricted to non-commercial teaching and research.
+assets/profiles保存本机Psych-new研究树中的来源副本；资产存在不代表生产加载。PsychAgent论文启发记忆、候选选优与技能演化研究设计；这里不宣称复现未公开训练或模型权重。AutoSkill/SkillEvo未被复制进仓库，未来复制MIT代码必须保留原声明并通过适配器接入。
 
-The experience and skill-evolution design is informed by the PsychAgent paper and AutoSkill/SkillEvo. This repository does not claim to reproduce an unpublished PsychAgent training repository. No AutoSkill source code is currently vendored; future copied or adapted MIT code must retain its notice and stay behind an adapter.
+逐条目logprob评分借鉴Zhang et al., *Mechanistic control of large language models as simulated participants via linear representation*，DOI [10.1038/s44387-026-00160-9](https://doi.org/10.1038/s44387-026-00160-9)的式8和质量门；实现、请求与审计由本项目编写，未包含该项目代码、权重或数据。它不迁移激活控制。具体差异见 [方法记录](notes/logprob_scoring_borrowing.md)。
 
-The optional probability-weighted (logprob) scale scoring adapts the methodology of Eq. 8 in Zhang et al., *Mechanistic control of large language models as simulated participants via linear representation* (npj Artificial Intelligence, DOI 10.1038/s44387-026-00160-9): a judge's numeric token distribution is aggregated into a continuous rating behind a refusal quality gate. No upstream code, weights or data are vendored; the scoring request, prompt asset and diagnostics are this repository's own implementation over the existing PsychEval instruments. See `notes/logprob_scoring_borrowing.md`.
+许可汇总见 [THIRD_PARTY_LICENSES](THIRD_PARTY_LICENSES/README.md)。

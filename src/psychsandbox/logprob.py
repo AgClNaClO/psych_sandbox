@@ -12,23 +12,23 @@ Only the pure math, the two explicit failures and the prompt rendering live
 here. Whether an endpoint returns logprobs at all is a gateway concern; this
 module assumes the payload already exists and reports what it contains.
 
-The rating bands used by this repository's PsychEval instruments are all
-single-digit (1-5, 1-7, 0-6, 0-4, 0-3, 0-2), so the first generated token
-distribution is the whole distribution over ratings. :func:`logprob_band`
-rejects wider bands instead of silently aggregating a partial distribution.
+Production batch scoring locates each JSON score's token distribution in
+``evaluation.item_logprob``. The first-token helpers remain for callers using
+standalone numeric responses. Top-k mass is observed mass, not the complete
+vocabulary distribution; both paths fail explicitly when it is insufficient.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import exp
+from math import exp, fsum, isfinite
 from typing import Any, Iterable, Mapping
 
 
 DEFAULT_MASS_FLOOR = 0.25
 DEFAULT_TOP_LOGPROBS = 20
-DEFAULT_MAX_TOKENS = 16
-DEFAULT_TEMPERATURE = 0.7
+DEFAULT_MAX_TOKENS = 8192
+DEFAULT_TEMPERATURE = 0.0
 
 RatingBand = tuple[int, int]
 
@@ -101,7 +101,7 @@ def logprob_band(scale: tuple[float, float]) -> RatingBand:
         band = (int(low), int(high))
     else:
         raise ValueError(f"logprob scoring requires an integer rating band, got {scale!r}")
-    if band[1] - band[0] + 1 > 10:
+    if not 0 <= band[0] < band[1] <= 9:
         raise ValueError(
             f"logprob scoring requires single-digit ratings, got band {band}; "
             "a wider band cannot be read from one token distribution"
@@ -128,8 +128,9 @@ def numeric_distribution(
     Out-of-band tokens keep their probability in the response but contribute no
     mass here, exactly like the paper's ``sum p_i`` gate over rating values.
     """
-    low, high = band
+    low, high = logprob_band(band)
     distribution: dict[int, float] = {}
+    seen: dict[str, float] = {}
     for entry in top_logprobs:
         token = _field(entry, "token")
         logprob = _field(entry, "logprob")
@@ -139,15 +140,26 @@ def numeric_distribution(
                 "cannot aggregate a numeric distribution"
             )
         try:
-            probability = exp(min(0.0, float(logprob)))
+            number = float(logprob)
+            if number != number or number > 0:
+                raise ValueError("logprob must be non-positive and not NaN")
+            probability = exp(number)
         except (TypeError, ValueError) as exc:
             raise LogprobScoringUnsupported(
                 f"logprob entry carries a non-numeric logprob: {logprob!r}"
             ) from exc
-        value = parse_integer_token(str(token))
+        token = str(token)
+        if token in seen:
+            if seen[token] != probability:
+                raise LogprobScoringUnsupported("conflicting duplicate token probabilities")
+            continue
+        seen[token] = probability
+        value = parse_integer_token(token)
         if value is None or value < low or value > high:
             continue
         distribution[value] = distribution.get(value, 0.0) + probability
+    if fsum(seen.values()) > 1.0 + 1e-6:
+        raise LogprobScoringUnsupported("token probability mass exceeds one")
     return distribution
 
 
@@ -158,8 +170,10 @@ def rating_from_top_logprobs(
     mass_floor: float = DEFAULT_MASS_FLOOR,
 ) -> NumericRating:
     """Aggregate one position's token distribution into a numeric rating."""
+    if not isfinite(mass_floor) or not 0 < mass_floor <= 1:
+        raise ValueError("mass_floor must be finite and in (0, 1]")
     distribution = numeric_distribution(top_logprobs, band=band)
-    mass = sum(distribution.values())
+    mass = fsum(distribution.values())
     if mass < mass_floor:
         raise LogprobRefusalError(
             mass=mass,
@@ -167,7 +181,7 @@ def rating_from_top_logprobs(
             distribution=distribution,
             mass_floor=mass_floor,
         )
-    value = sum(token * probability for token, probability in distribution.items()) / mass
+    value = fsum(token * probability for token, probability in distribution.items()) / mass
     return NumericRating(value=value, mass=mass, band=band, distribution=distribution)
 
 

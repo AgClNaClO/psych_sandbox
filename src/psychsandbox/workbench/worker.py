@@ -270,6 +270,7 @@ class WorkbenchWorker:
                 temperature=config.temperature_counselor,
                 skill_selection=config.skill_selection,
                 memory_view=config.memory_view,
+                control_temperature=config.temperature_control,
             )
             runner = InteractiveRunner(counselor=counselor, gateway=gateway, db_path=self.db_path)
 

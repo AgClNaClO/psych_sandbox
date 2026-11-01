@@ -44,14 +44,16 @@ class CounselorAgent:
         self,
         gateway: ModelGateway,
         skill_catalog: SkillCatalog | None = None,
-        temperature: float = 0.4,
+        temperature: float = 0.9,
         dialogue_guard: DialogueLoopGuard | None = None,
         skill_selection: SkillSelectionConfig | None = None,
         memory_view: MemoryViewConfig | None = None,
+        control_temperature: float = 0.0,
     ) -> None:
         self.gateway = gateway
         self.skill_catalog = skill_catalog or SkillCatalog(SkillRegistry())
         self.temperature = temperature
+        self.control_temperature = control_temperature
         self.dialogue_guard = dialogue_guard or DialogueLoopGuard()
         self.candidate_filter = SkillCandidateFilter(
             gateway, skill_selection or SkillSelectionConfig()
@@ -240,7 +242,7 @@ class CounselorAgent:
             ),
             input_payload=planning_payload,
             output_schema=CounselorPlanning,
-            temperature=self.temperature,
+            temperature=self.control_temperature,
         )
         planning = CounselorPlanning.model_validate(planning_result)
         allowed_meta_ids = {item.meta_skill_id for item in meta_catalog}
@@ -430,7 +432,7 @@ class CounselorAgent:
             ),
             input_payload=review_payload,
             output_schema=CounselorSessionReview,
-            temperature=self.temperature,
+            temperature=self.control_temperature,
         )
         review = validated_review(CounselorSessionReview.model_validate(result), session)
         allowed_meta_ids = {item.meta_skill_id for item in next_meta}

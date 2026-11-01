@@ -1,3 +1,7 @@
-# Separate PsychEval case truth from PatientAct client policy
+# ADR 0001：分离病例真相与来访者策略
 
-PsychEval is the sole source of case evidence, native therapy formulation, and longitudinal session structure, while PatientAct-style mechanisms govern activation, trust-gated disclosure, reaction, behavior, resistance, and utterance generation. This avoids turning synthetic attachment or personality seeds into case facts and keeps the five therapy formulations intact behind the existing `ClientSimulator.respond` interface.
+状态：保留。PsychEval独占病例证据、原生流派概念化和纵向会谈结构的来源；PatientAct风格策略负责激活、信任门控、反应、行为、阻抗和受限发言。
+
+该决定通过既有ClientSimulator.respond边界落实。合成人格和依恋条件属于私有实验先验，不能升级成病例事实或咨询师已知信息。跨流派投影不覆盖BT、CBT、HET、PDT、PMT各自原生理论。
+
+后续新增策略可以改行为规划，但必须维持事实授权、台词核验、已说证据记忆和候选隔离。详细当前路径见 [来访者模拟](../CLIENT_SIMULATION.md)。
