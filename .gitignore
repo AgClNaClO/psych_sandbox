@@ -2,12 +2,26 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
-.pytest_cache/
-.pytest_tmp-*/
+
+# Coverage reports (keep coverage configuration files)
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# JavaScript dependencies and local build caches
+node_modules/
+npm-debug.log*
+# workbench/frontend_dist is intentionally versioned for the bundled Web UI.
 
 # Operating-system metadata
 .DS_Store
 Thumbs.db
+Desktop.ini
+
+# Editor-local settings and temporary files
+.vscode/*
+!.vscode/extensions.json
 
 # Machine-local Python environment and credentials
 .venv/
@@ -24,9 +38,9 @@ runs/tests/*
 !runs/tests/README.md
 runs/runtime/*
 !runs/runtime/README.md
-data/external/
 data/processed/
-outputs/
-checkpoints/
 *.sqlite3
-struct.txt
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
+*.log
