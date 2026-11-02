@@ -33,6 +33,7 @@ def sandbox(root, tmp_path, repository):
     config = SandboxConfig(
         project_root=root,
         max_turns_per_session=2,
+        rft={"enabled": False},
         logprob_scoring=DISABLED_LOGPROB_SCORING,
         database_path=tmp_path / "test.sqlite3",
         trace_dir=tmp_path / "traces",
@@ -98,6 +99,7 @@ def test_e7_e8_e9_feed_counselor_review_before_next_session(root, tmp_path, repo
     config = SandboxConfig(
         project_root=root,
         max_turns_per_session=1,
+        rft={"enabled": False},
         logprob_scoring=DISABLED_LOGPROB_SCORING,
         database_path=tmp_path / "memory-closure.sqlite3",
         trace_dir=tmp_path / "memory-closure-traces",
@@ -183,6 +185,7 @@ def test_session_checklist_is_local_then_archived_into_complete_memory(
     config = SandboxConfig(
         project_root=root,
         max_turns_per_session=2,
+        rft={"enabled": False},
         logprob_scoring=DISABLED_LOGPROB_SCORING,
         database_path=tmp_path / "checklist.sqlite3",
         trace_dir=tmp_path / "checklist-traces",
@@ -332,6 +335,7 @@ def test_patientact_pipeline_can_be_disabled(root, tmp_path, repository):
     config = SandboxConfig(
         project_root=root,
         max_turns_per_session=1,
+        rft={"enabled": False},
         logprob_scoring=DISABLED_LOGPROB_SCORING,
         patientact_enabled=False,
         database_path=tmp_path / "disabled.sqlite3",
@@ -357,6 +361,7 @@ def test_failed_run_is_persisted(root, tmp_path, repository):
     config = SandboxConfig(
         project_root=root,
         max_turns_per_session=1,
+        rft={"enabled": False},
         logprob_scoring=DISABLED_LOGPROB_SCORING,
         database_path=tmp_path / "failed.sqlite3",
         trace_dir=tmp_path / "failed-traces",
@@ -475,7 +480,7 @@ def test_cli_simulate_report_and_visualize_share_artifacts(
     )
     args = cli.build_parser().parse_args([
         "--root", str(root), "simulate", "--case", "psycheval-cbt-001",
-        "--sessions", "1", "--max-turns", "1", "--json",
+        "--sessions", "1", "--max-turns", "1", "--no-rft", "--json",
     ])
     assert asyncio.run(cli._simulate(args)) == 0
     result = json.loads(capsys.readouterr().out)

@@ -137,6 +137,7 @@ def test_original_case_does_not_enter_refusal_loop(root, tmp_path, repository):
         SandboxConfig(
             project_root=root,
             max_turns_per_session=4,
+            rft={"enabled": False},
             logprob_scoring=DISABLED_LOGPROB_SCORING,
             database_path=tmp_path / "dialogue-loop.sqlite3",
             trace_dir=tmp_path / "dialogue-loop-traces",
@@ -348,6 +349,7 @@ def test_sandbox_builds_the_configured_topic_matcher(root, tmp_path, repository)
         SandboxConfig(
             project_root=root,
             max_turns_per_session=4,
+            rft={"enabled": False},
             logprob_scoring=DISABLED_LOGPROB_SCORING,
             client_topic_matcher="semantic",
             database_path=tmp_path / "topic-matcher.sqlite3",

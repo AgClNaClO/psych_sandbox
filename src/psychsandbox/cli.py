@@ -98,14 +98,14 @@ def build_parser() -> argparse.ArgumentParser:
     simulate.add_argument("--seed", type=int, default=None)
     simulate.add_argument("--max-turns", type=int, default=None)
     rft = simulate.add_mutually_exclusive_group()
-    rft.add_argument("--rollouts", type=int, help="候选数：至少 2 启用 RFT，1 关闭")
+    rft.add_argument("--rollouts", type=int, help="候选数：默认启用 RFT（3 个），至少 2 启用，1 关闭")
     rft.add_argument("--no-rft", action="store_true", help="关闭 RFT")
     simulate.add_argument("--rollout-concurrency", type=int)
     simulate.add_argument("--judge-concurrency", type=int)
     simulate.add_argument(
         "--logprob-scoring",
         action=argparse.BooleanOptionalAction, default=None,
-        help="按论文式 8 的概率加权期望评分（默认已开启；先确认端点返回 logprobs）",
+        help="按论文式 8 的概率加权期望评分（默认关闭；开启前先确认端点返回 logprobs）",
     )
     simulate.add_argument("--resume-run")
     simulate.add_argument("--json", action="store_true")

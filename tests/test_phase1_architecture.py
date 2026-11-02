@@ -26,6 +26,7 @@ def _sandbox(root, tmp_path, repository, *, max_turns: int = 2) -> CounselingSan
         SandboxConfig(
             project_root=root,
             max_turns_per_session=max_turns,
+            rft={"enabled": False},
             logprob_scoring=DISABLED_LOGPROB_SCORING,
             database_path=tmp_path / "phase1.sqlite3",
             trace_dir=tmp_path / "traces",

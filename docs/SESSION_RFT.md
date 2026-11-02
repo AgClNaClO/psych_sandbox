@@ -1,6 +1,6 @@
 # 会谈候选生成与 RFT 选优
 
-这里的 RFT 是会谈级采样与贪心选优研究模式，不包含权重训练。默认关闭；使用 `simulate --case psycheval-cbt-001 --sessions 3 --rollouts 3` 开启。候选数默认 3，生成与评分并发为 null 时跟随候选数，显式 CLI 并发参数用于限流。
+这里的 RFT 是会谈级采样与贪心选优研究模式，不包含权重训练。默认开启；使用 `--no-rft` 或 `--rollouts 1` 关闭。候选数默认 3，生成与评分并发为 null 时跟随候选数，显式 CLI 并发参数用于限流。
 
 ## 分支与提交
 
@@ -15,9 +15,9 @@
 | 咨询师 | WAI、HTAIS、RRO、custom_dim | BT MITI；CBT CTRS；HET TES；PDT PSC；PMT EFT-TFS |
 | 来访者 | SCL-90、PANAS、RRO、SRS | BT STAI；CBT BDI-II；HET CCT；PDT IPO；PMT SFBT |
 
-默认 `item_logprob_v2`：每个原提示文件一次无约束 JSON 请求，逐 `score` Token 计算概率期望后使用原聚合公式，不另加总体判分。RRO 24 项共用一次请求，反向项为 {2,7,16,17,18,19,24}，再按双方各两个因子汇总；PANAS 先将正负情绪各自映射为0–10均值，再算 `(positive-negative+10)/2`。custom_dim 合并四文件，条目审计键带来源文件，避免重复编号覆盖。
+默认使用离散条目评分；显式开启 logprob 后使用 `item_logprob_v2`：每个原提示文件一次无约束 JSON 请求，逐 `score` Token 计算概率期望后使用原聚合公式，不另加总体判分。RRO 24 项共用一次请求，反向项为 {2,7,16,17,18,19,24}，再按双方各两个因子汇总；PANAS 先将正负情绪各自映射为0–10均值，再算 `(positive-negative+10)/2`。custom_dim 合并四文件，条目审计键带来源文件，避免重复编号覆盖。
 
-其他量表按自身原始范围映射0–10：1–5、1–7、0–6、0–4、0–3或0–2。症状分保持越高越重，方向在奖励中处理。`item_scores` 保存原范围连续分，`item_logprobs` 保存各项质量、分布、采样分与位置。关闭 logprob 才使用离散条目路径。详见 [评分方法](../notes/logprob_scoring_borrowing.md)。
+其他量表按自身原始范围映射0–10：1–5、1–7、0–6、0–4、0–3或0–2。症状分保持越高越重，方向在奖励中处理。开启 logprob 时，`item_scores` 保存原范围连续分，`item_logprobs` 保存各项质量、分布、采样分与位置。详见 [评分方法](../notes/logprob_scoring_borrowing.md)。
 
 ## 奖励与失败
 

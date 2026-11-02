@@ -27,7 +27,8 @@ def launcher(root: Path) -> str:
 def test_launcher_wires_the_user_adjustable_logprob_switch(launcher):
     settings = [line.strip() for line in launcher.splitlines() if line.startswith("set LOGPROB_SCORING=")]
     assert len(settings) == 1
-    assert settings[0] in {"set LOGPROB_SCORING=0", "set LOGPROB_SCORING=1"}
+    assert settings[0] == "set LOGPROB_SCORING=0"
+    assert "set ROLLOUTS=3" in launcher
     assert "set LOGPROB_ARG=--logprob-scoring" in launcher
     assert "%LOGPROB_ARG%" in launcher
     # The switch must stay a real switch, not a hard-coded flag.

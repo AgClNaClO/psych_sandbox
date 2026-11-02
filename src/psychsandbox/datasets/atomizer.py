@@ -103,7 +103,9 @@ class ExtractiveAtomizer:
         try:
             validation_error = ""
             previous_output: dict | None = None
-            repair_temperatures = (self.temperature,) * 3
+            repair_temperatures = tuple(
+                min(2.0, round(self.temperature + 0.1 * step, 4)) for step in range(3)
+            )
             allowed_kinds = {
                 "growth": "event/emotion/belief/meaning/coping/consequence/resource",
                 "language": (

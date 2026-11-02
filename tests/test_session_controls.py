@@ -45,6 +45,7 @@ def test_high_progress_does_not_automatically_stop_session(root, tmp_path, repos
 
     sandbox = CounselingSandbox(SandboxConfig(
         project_root=root, max_turns_per_session=2,
+        rft={"enabled": False},
         logprob_scoring=DISABLED_LOGPROB_SCORING,
         database_path=tmp_path / "control.sqlite3", trace_dir=tmp_path / "traces",
     ), gateway=HighProgressGateway(), repository=repository)
@@ -138,7 +139,8 @@ def test_self_review_controls_committed_stage_after_memory_merge(root, tmp_path,
             return result
 
     sandbox = CounselingSandbox(SandboxConfig(
-        project_root=root, max_turns_per_session=2, logprob_scoring=DISABLED_LOGPROB_SCORING,
+        project_root=root, max_turns_per_session=2,
+        rft={"enabled": False}, logprob_scoring=DISABLED_LOGPROB_SCORING,
         database_path=tmp_path / "review.sqlite3", trace_dir=tmp_path / "review-traces",
     ), gateway=IncompleteReviewGateway(), repository=repository)
     try:

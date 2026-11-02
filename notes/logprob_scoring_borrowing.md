@@ -37,7 +37,7 @@ Top-20不是全词表；缺席候选不能当作已知零概率。期望与质�
 
 ## 参数与恢复
 
-logprob默认开启，可用YAML enabled:false或CLI --no-logprob-scoring显式关闭。启动器默认打开评分和预探针，仍允许用户修改开关；批处理保持ASCII且不调用chcp。`temperature.control=0`控制规划/记忆，生成温度分别为来访者0.7和咨询师0.9，评分0是项目的稳定性默认，区别于论文0.7。
+logprob默认关闭，可用YAML enabled:true或CLI --logprob-scoring显式开启；开启前先执行端点探针。启动器默认关闭评分和预探针，可分别设置LOGPROB_SCORING=1与PROBE_LOGPROB=1启用；批处理保持ASCII且不调用chcp。RFT默认开启，候选数为3。`temperature.control=0`控制规划/记忆，生成温度分别为来访者0.7和咨询师0.9，评分0是项目的稳定性默认，区别于论文0.7。
 
 评分快照记录item_logprob_v2。旧instrument_logprob_v1历史奖励不能作为新RFT运行的比较基线；恢复时不匹配要求新建运行。已有文件和共享数据库不自动迁移。
 

@@ -32,7 +32,7 @@ python -B -m psychsandbox probe logprob-scoring --case psycheval-cbt-001 --instr
 python -B -m psychsandbox simulate --case psycheval-cbt-001 --sessions 3 --logprob-scoring
 ```
 
-不使用 logprob 时，可明确传入 `--no-logprob-scoring`。当前检出的 `configs/runtime.yaml` 将该功能设为关闭；直接构造配置对象的代码默认值为开启，而 `run_simulate.bat` 会显式开启并执行预探针，三种入口的区别见第 7 节。
+RFT 默认开启（每场 3 个候选），logprob 默认关闭；配置对象、项目 YAML 和启动脚本保持一致。使用 `--no-rft` 关闭选优，使用 `--logprob-scoring` 开启逐条目概率评分，详见第 7 节。
 
 成功运行后，终端输出 `run-xxxxxxxxxxxx` 编号及 `report.html` 路径。测试与正式运行分别写入 `runs/tests`、`runs/runtime`。完整操作说明按下列章节展开，专题文档统一从 [文档索引](docs/README.md) 进入。
 
@@ -269,11 +269,11 @@ psych-sandbox simulate --case psycheval-cbt-001 --sessions 3
 psych-sandbox simulate --case psycheval-cbt-001 --sessions 3 --max-turns 4 --seed 42
 ```
 
-当前项目 YAML 为 3 场会谈、每场最多 20 个咨询师轮、seed 42、RFT 关闭、logprob 关闭。纯 `SandboxConfig` 的轮数默认是 8，启动脚本也显式传 8；CLI 显式参数覆盖 YAML。轮数上限是工程预算，会谈仍可能提前因结束条件或安全状态停止。
+当前项目 YAML 为 3 场会谈、每场最多 20 个咨询师轮、seed 42、RFT 开启（3 个候选）、logprob 关闭。纯 `SandboxConfig` 的轮数默认是 8，启动脚本也显式传 8；CLI 显式参数覆盖 YAML。轮数上限是工程预算，会谈仍可能提前因结束条件或安全状态停止。
 
 `--json` 输出规范结果并关闭交互进度绘制；`--no-visualization` 跳过 HTML 自动生成，不跳过结果持久化。
 
-### 7.2 可选：整场会谈多候选与 RFT 选优
+### 7.2 默认开启：整场会谈多候选与 RFT 选优
 
 ```bat
 psych-sandbox simulate --case psycheval-cbt-001 --sessions 3 --rollouts 3
@@ -305,10 +305,10 @@ RRO 对连续条目执行原反向计分/因子公式；PANAS 执行原正负情
 
 | 入口 | 当前开关行为 |
 |---|---|
-| `SandboxConfig` / `LogprobScoringConfig` 代码默认 | 开启 |
+| `SandboxConfig` / `LogprobScoringConfig` 代码默认 | 关闭 |
 | 当前 `configs/runtime.yaml` | `enabled: false`，普通 CLI 随之关闭 |
 | CLI `--logprob-scoring` / `--no-logprob-scoring` | 显式覆盖 YAML |
-| 当前 `run_simulate.bat` | 评分和预探针均为 1，显式开启 |
+| 当前 `run_simulate.bat` | 评分和预探针均为 0，默认关闭 |
 | `probe logprob-scoring` | 即使 YAML 关闭也执行能力探测 |
 
 探针使用标记为 fixture 的合成对话，输出 probe.json，不测量实际病例效果。换端点/模型后重新探测。2026-11-02的六类实测记录覆盖 WAI、CTRS、BDI-II、SCL-90、RRO、PANAS，仅证明当时部署能返回可用位置分布；详见 [方法及记录](notes/logprob_scoring_borrowing.md)。
@@ -400,7 +400,7 @@ temperature:
 
 生成温度 0.7/0.9 对齐 PsychAgent 示例配置。评估、规划及记忆的 0 是本项目低随机性选择，不能宣称所有上游首次评估请求都显式设了 0。
 
-`control` 控制咨询师规划、自评、记忆流水线与画像抽取；来访者规划保留独立 client_planner 覆盖。RFT 咨询师使用 `rft.counselor_temperature`（0.9），离散评估使用 judge_temperature（0），logprob 评估使用 `logprob_scoring.temperature`（0）。重试保持所选温度，既有显式覆盖仍有效。
+`control` 控制咨询师规划、自评、记忆流水线与画像抽取；来访者规划保留独立 client_planner 覆盖。RFT 咨询师使用 `rft.counselor_temperature`（0.9），离散评估使用 judge_temperature（0），logprob 评估使用 `logprob_scoring.temperature`（0）。画像语义修复按 `+0.1/+0.2` 微幅升温退避，其余重试保持所选温度，既有显式覆盖仍有效。
 
 Python seed 主要控制本地流程；温度0也不保证远端模型逐次逐字复现。实验应保存模型、配置、评分方法及实际结果。
 

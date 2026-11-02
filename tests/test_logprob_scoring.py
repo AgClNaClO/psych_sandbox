@@ -629,7 +629,7 @@ def test_runtime_config_exposes_the_scoring_block(root, tmp_path, enabled):
     block = default_config(tmp_path).logprob_scoring
 
     assert block.enabled is enabled
-    assert SandboxConfig(project_root=Path(root)).logprob_scoring.enabled is True
+    assert SandboxConfig(project_root=Path(root)).logprob_scoring.enabled is False
     assert block.mass_floor == pytest.approx(0.25)
     assert (block.top_logprobs, block.max_tokens, block.temperature) == (20, 8192, 0.0)
 
@@ -666,7 +666,7 @@ class ItemAverageOnlyGateway(DeterministicGateway):
     complete_numeric_rating = ModelGateway.complete_numeric_rating
 
 
-def test_default_config_fails_loudly_without_substituting_item_averages(
+def test_enabled_logprob_fails_loudly_without_substituting_item_averages(
     root, tmp_path, repository
 ):
     config = SandboxConfig(
@@ -674,6 +674,8 @@ def test_default_config_fails_loudly_without_substituting_item_averages(
         max_turns_per_session=1,
         database_path=tmp_path / "default-logprob.sqlite3",
         trace_dir=tmp_path / "default-logprob-traces",
+        rft={"enabled": False},
+        logprob_scoring=_enabled(),
     )
     sandbox = CounselingSandbox(
         config, gateway=ItemAverageOnlyGateway(), repository=repository

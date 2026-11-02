@@ -169,7 +169,7 @@ def test_batch_gateway_contract(tmp_path):
 @pytest.mark.parametrize("therapy", ["cbt", "behavioral", "humanistic_existential", "psychodynamic", "postmodern"])
 def test_full_therapy_batches_cover_every_item_and_preserve_formula(root, therapy):
     gateway = ScriptedSupervisorGateway(probabilities={2: .4, 4: .6})
-    supervisor = PsychEvalSupervisor(gateway, root / 'prompts/eval', logprob_scoring=LogprobScoringConfig())
+    supervisor = PsychEvalSupervisor(gateway, root / 'prompts/eval', logprob_scoring=LogprobScoringConfig(enabled=True))
     groups = asyncio.run(supervisor._score_instruments(therapy, "背景", "对话"))
     scores = [item for group in groups for item in group]
     assert all(item.item_logprobs for item in scores)
@@ -186,7 +186,7 @@ def test_stale_catalog_rejected_before_judgement(root, tmp_path):
     path = tmp_path / 'eval/wai/wai.txt'
     path.write_text('changed prompt', encoding='utf-8')
     gateway = ScriptedSupervisorGateway()
-    supervisor = PsychEvalSupervisor(gateway, tmp_path / 'eval', logprob_scoring=LogprobScoringConfig())
+    supervisor = PsychEvalSupervisor(gateway, tmp_path / 'eval', logprob_scoring=LogprobScoringConfig(enabled=True))
     with pytest.raises(ValueError, match='stale'):
         asyncio.run(supervisor._score(instrument_registry('cbt')['wai'], 'i', 'd'))
     assert gateway.rating_calls == []
@@ -253,7 +253,7 @@ def test_rft_resume_rejects_historical_scoring_method(root, tmp_path, repository
         sandbox.store.connection.execute('UPDATE experiment_runs SET config_json=? WHERE run_id=?',
                                          (json.dumps(saved), first.run_id))
         sandbox.store.connection.commit()
-        sandbox.config.logprob_scoring = LogprobScoringConfig()
+        sandbox.config.logprob_scoring = LogprobScoringConfig(enabled=True)
         before = (sandbox.run_dir / 'trajectory.jsonl').read_bytes()
         with pytest.raises(ValueError, match='scoring method'):
             asyncio.run(sandbox.run_case(first.case_id, session_count=2, resume_run_id=first.run_id))
@@ -270,7 +270,7 @@ def test_shared_supervisor_keeps_concurrent_candidate_audits_separate(root):
             return await super().complete_item_ratings(**kwargs)
 
     supervisor = PsychEvalSupervisor(InterleavedGateway(), root / 'prompts/eval',
-                                    logprob_scoring=LogprobScoringConfig())
+                                    logprob_scoring=LogprobScoringConfig(enabled=True))
 
     async def scenario():
         registry = instrument_registry('cbt')

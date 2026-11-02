@@ -46,6 +46,7 @@ def client(wb, tmp_path):
 async def test_worker_executes_real_simulation_contract(wb, tmp_path, root, monkeypatch):
     config = SandboxConfig(
         project_root=root, max_turns_per_session=1,
+        rft={"enabled": False},
         logprob_scoring=DISABLED_LOGPROB_SCORING,
         database_path=tmp_path / "sim.sqlite3", trace_dir=tmp_path / "traces",
     )
@@ -78,7 +79,8 @@ async def test_worker_executes_real_simulation_contract(wb, tmp_path, root, monk
 @pytest.mark.asyncio
 async def test_worker_retries_the_same_run_after_transient_failure(wb, tmp_path, root, monkeypatch):
     config = SandboxConfig(
-        project_root=root, max_turns_per_session=1, logprob_scoring=DISABLED_LOGPROB_SCORING,
+        project_root=root, max_turns_per_session=1,
+        rft={"enabled": False}, logprob_scoring=DISABLED_LOGPROB_SCORING,
         database_path=tmp_path / "sim.sqlite3", trace_dir=tmp_path / "traces",
     )
     monkeypatch.setattr("psychsandbox.workbench.worker.default_config", lambda: config)

@@ -1399,7 +1399,7 @@ class SessionSafetyVerdict(StrictModel):
 
 
 class RFTConfig(StrictModel):
-    enabled: bool = False
+    enabled: bool = True
     candidates: int = Field(default=3, ge=2, le=32)
     # ``None`` follows ``candidates`` so a batch never wastes a trailing wave
     # (three candidates at a fixed budget of two would run as 2 + 1). An
@@ -1581,15 +1581,14 @@ class LogprobScoringConfig(StrictModel):
     as a refusal instead of being replaced by a zero or an item average.
 
     Batch item scoring uses temperature 0, max 8192 tokens, top 20
-    candidates and mass floor 0.25. Expectations are conditional on the JSON prefix. The path is on by default: it
+    candidates and mass floor 0.25. Expectations are conditional on the JSON prefix. The path is off by default: it
     needs an endpoint that actually returns ``logprobs``/``top_logprobs``, so
     probe it with ``psych-sandbox probe logprob-scoring`` before a run. An
     endpoint without the payload (or a judgement below the floor) fails loudly
-    instead of falling back to an item average, and ``enabled: false`` switches
-    the path off again.
+    instead of falling back to an item average. Set ``enabled: true`` to opt in.
     """
 
-    enabled: bool = True
+    enabled: bool = False
     mass_floor: float = Field(default=0.25, gt=0, le=1)
     top_logprobs: int = Field(default=20, ge=1, le=20)
     max_tokens: int = Field(default=8192, ge=1, le=32768)

@@ -57,10 +57,13 @@ def test_default_artifact_paths_are_under_runtime(tmp_path, monkeypatch):
     assert config.database_path == config.trace_dir / "psychsandbox.sqlite3"
 
 
-def test_default_candidate_count_is_three_in_domain_and_project_yaml(root):
+def test_default_rft_is_enabled_with_three_candidates(root):
+    assert RFTConfig().enabled is True
     assert RFTConfig().candidates == 3
     assert default_config(root).rft.candidates == 3
-    assert default_config(root).rft.enabled is False
+    assert default_config(root).rft.enabled is True
+    assert SandboxConfig(project_root=root).logprob_scoring.enabled is False
+    assert default_config(root).logprob_scoring.enabled is False
 
 
 def test_rft_concurrency_defaults_follow_the_candidate_count(root):
@@ -126,6 +129,8 @@ def test_missing_or_legacy_runtime_uses_domain_defaults(tmp_path, settings):
     )
     assert config.session_count == 3
     assert config.rft == RFTConfig()
+    assert config.rft.enabled is True
+    assert config.logprob_scoring.enabled is False
 
 
 def test_skill_selection_rejects_top_k_larger_than_threshold(tmp_path):
@@ -157,6 +162,8 @@ def test_cli_builds_api_only_config(tmp_path):
     assert args.seed is None
     assert args.sessions is None
     assert args.max_turns is None
+    assert config.rft.enabled is True
+    assert config.logprob_scoring.enabled is False
 
 
 @pytest.mark.parametrize(
@@ -209,6 +216,7 @@ def test_cli_rollouts_enable_rft_from_defaults(tmp_path, rollouts):
 
 
 def test_cli_concurrency_alone_does_not_enable_rft(tmp_path):
+    _write_runtime(tmp_path, {"rft": {"enabled": False}})
     args = build_parser().parse_args([
         "--root", str(tmp_path), "simulate", "--case", "psycheval-cbt-001",
         "--rollout-concurrency", "3", "--judge-concurrency", "4",

@@ -19,8 +19,8 @@ skill_selection:
   vector_threshold: 24
   vector_top_k: 12
 rft:
-  # Enable candidate selection with simulate --rollouts 3.
-  enabled: false
+  # Candidate selection is on by default; simulate --no-rft disables it.
+  enabled: true
   candidates: 3
   # null 表示与 candidates 相同：3 个候选就同时生成 3 条，不留「2 + 1」的尾轮。
   # 需要限流时再显式填数字（或 simulate --rollout-concurrency / --judge-concurrency）。
@@ -34,9 +34,9 @@ rft:
   judge_retries: 3  # 评分校验失败时的重试次数
   resample_limit: 2
 logprob_scoring:
-  # 按论文式 8 的概率加权期望给 PsychEval 量表打分；默认开启。
+  # 按论文式 8 的概率加权期望给 PsychEval 量表打分；默认关闭。
   # 开启前先用 psych-sandbox probe logprob-scoring 确认端点返回 logprobs；
-  # 端点不支持时显式改为 enabled: true；CLI 开关只用于开启。
+  # 确认可用后设为 enabled: true 或传入 --logprob-scoring 开启。
   enabled: false
   mass_floor: 0.25  # 数值 token 总概率质量低于此值判为拒答并明确失败
   top_logprobs: 20
