@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from ..domain import utc_now
+from ..domain import RFTConfig, utc_now
 from ..therapies import normalize_therapy_id
 
 
@@ -23,6 +23,22 @@ class SimulationJobPayload(BaseModel):
     session_count: int = Field(default=1, ge=1, le=100, strict=True)
     seed: int | None = None
     resume_run_id: str | None = None
+    max_turns_per_session: int | None = Field(default=None, ge=1, le=50, strict=True)
+    session_turn_limits: list[int] | None = Field(default=None, max_length=100)
+    rft: RFTConfig | None = None
+
+    @field_validator("session_turn_limits", mode="before")
+    @classmethod
+    def validate_turn_limits(cls, values):
+        if values is not None and (not isinstance(values, list) or any(type(value) is not int or not 1 <= value <= 50 for value in values)):
+            raise ValueError("Each session turn limit must be an integer between 1 and 50")
+        return values
+
+    @model_validator(mode="after")
+    def validate_session_limits(self):
+        if self.session_turn_limits is not None and len(self.session_turn_limits) != self.session_count:
+            raise ValueError("Provide exactly one turn limit per requested session")
+        return self
 
 
 # ==========================================
@@ -238,6 +254,19 @@ class ExpertReviewCreateRequest(BaseModel):
     verdict: Literal["approve", "reject", "revise"]
     rationale: str
     checklist: dict[str, bool] = Field(default_factory=dict)
+
+
+class ExpertReviewerRegisterRequest(BaseModel):
+    reviewer_id: str
+    reviewer_name: str
+    registered_by: str
+
+
+class ReplayValidationCreateRequest(BaseModel):
+    replay_type: Literal["fixed_context", "simulation"]
+    candidate_outputs: dict[str, Any]
+    baseline_outputs: dict[str, Any]
+    diff_summary: str
 
 
 class ExpertReviewResponse(BaseModel):

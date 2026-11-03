@@ -232,3 +232,12 @@ def _merge_known_tree(history: Any, current: Any) -> Any:
     if isinstance(history, list) and isinstance(current, list):
         return history + [value for value in current if value not in history]
     return current if current is not None else history
+
+
+def memory_item_ledger(memory) -> dict:
+    """ID-addressed obligations available for evidence-bound session retirement."""
+    return {
+        "open_homework": [item.model_dump(mode="json") for item in memory.last_homework if item.status == "open"],
+        "open_topics": [item.model_dump(mode="json") for item in memory.checklist.open_items if item.status == "open"],
+        "pending_verification": [item.model_dump(mode="json") for item in memory.checklist.pending_verification if item.status == "open"],
+    }

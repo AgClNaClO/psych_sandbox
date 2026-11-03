@@ -45,6 +45,8 @@ from .models import (
     CourseResponse,
     CourseSessionDetailResponse,
     ExpertReviewCreateRequest,
+    ExpertReviewerRegisterRequest,
+    ReplayValidationCreateRequest,
     ExportAuditResponse,
     ExportDPORequest,
     ExportSFTRequest,
@@ -133,6 +135,13 @@ def create_app(
     @app.get("/api/runs")
     def get_runs():
         return list_experiment_runs(sim_store, trace_directory)
+
+    @app.get("/api/simulation-defaults")
+    def get_simulation_defaults():
+        return {
+            "max_turns_per_session": config.max_turns_per_session,
+            "rft": {"enabled": config.rft.enabled, "candidates": config.rft.candidates},
+        }
 
     @app.get("/api/runs/{run_id}")
     def get_run(run_id: str):
@@ -344,6 +353,22 @@ def create_app(
         if not p:
             raise HTTPException(status_code=404, detail="Proposal not found")
         return p
+
+    @app.post("/api/skills/reviewers")
+    def register_reviewer(req: ExpertReviewerRegisterRequest):
+        try:
+            evolution_lab.register_reviewer(req.reviewer_id, req.reviewer_name, req.registered_by)
+            return {"registered": True}
+        except EvolutionValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @app.post("/api/skills/proposals/{proposal_id}/validations")
+    def record_validation(proposal_id: str, req: ReplayValidationCreateRequest):
+        try:
+            return evolution_lab.record_replay_validation(proposal_id, req.replay_type,
+                req.candidate_outputs, req.baseline_outputs, req.diff_summary)
+        except EvolutionValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
 
     @app.post("/api/skills/proposals/{proposal_id}/reviews")
     def review_proposal(proposal_id: str, req: ExpertReviewCreateRequest):

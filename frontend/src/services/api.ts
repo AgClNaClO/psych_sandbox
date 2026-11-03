@@ -64,6 +64,9 @@ export const api = {
     session_count?: number;
     seed?: number;
     resume_run_id?: string;
+    max_turns_per_session?: number;
+    session_turn_limits?: number[];
+    rft?: { enabled: boolean; candidates: number };
   }) =>
     request<JobItem>('/jobs', {
       method: 'POST',
@@ -73,8 +76,10 @@ export const api = {
         payload,
       }),
     }),
+  getSimulationDefaults: () => request<{ max_turns_per_session: number; rft: { enabled: boolean; candidates: number } }>('/simulation-defaults'),
   getJobs: (lane?: 'long' | 'short') =>
     request<JobItem[]>(lane ? `/jobs?lane=${lane}` : '/jobs'),
+  getJob: (jobId: string) => request<JobItem>(`/jobs/${encodeURIComponent(jobId)}`),
   stopJob: (jobId: string) =>
     request<{ status: string; job_id: string }>(`/jobs/${jobId}/stop`, { method: 'POST' }),
   cancelJob: (jobId: string) =>

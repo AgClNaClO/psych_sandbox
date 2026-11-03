@@ -51,8 +51,10 @@ from ..domain import (
 )
 from ..therapies import get_therapy_profile, normalize_therapy_id
 from ..runtime.planning import PlanBuilder
-from ..runtime.memory import MemoryConsolidator
+from ..runtime.memory import MemoryConsolidator, merge_session_checklist
+from ..evaluation.longitudinal import LongitudinalEvaluator
 from ..runtime.memory_pipeline import (
+    memory_item_ledger,
     ClientMergeAgent,
     DialogueSummaryAgent,
     MemoryExtractionAgent,
@@ -786,8 +788,9 @@ class InteractiveRunner:
         self.summarizer = DialogueSummaryAgent(gateway, getattr(counselor, "control_temperature", 0.0))
         self.consolidator = MemoryConsolidator()
         self.plan_builder = PlanBuilder()
+        self._job_fence = None
 
-    async def execute_operation(self, course_id: str, operation_id: str) -> None:
+    async def execute_operation(self, course_id: str, operation_id: str, *, job_fence=None) -> None:
         conn = get_connection(self.db_path)
         try:
             with db_transaction(conn) as t_cur:
@@ -800,7 +803,13 @@ class InteractiveRunner:
                     return
                 session_index = op["session_index"]
                 kind = op["kind"]
+                t_cur.execute("SELECT job_id, attempt, lease_owner, status FROM jobs WHERE job_id = ?",
+                              (f"job-operation-{operation_id}",))
+                job = t_cur.fetchone()
+                self._job_fence = job_fence or ((job["job_id"], job["attempt"], job["lease_owner"]) if job and job["status"] == "running" else None)
                 execution_token = utc_now()
+                if self._job_fence:
+                    self._check_job_lease(t_cur)
                 t_cur.execute(
                     "UPDATE course_operations SET status = 'running', updated_at = ? WHERE operation_id = ?",
                     (execution_token, operation_id),
@@ -818,6 +827,7 @@ class InteractiveRunner:
             conn = get_connection(self.db_path)
             try:
                 with db_transaction(conn) as t_cur:
+                    self._check_execution(t_cur, operation_id, execution_token)
                     t_cur.execute(
                         """UPDATE course_operations
                         SET status = 'failed', error = ?, updated_at = ?
@@ -872,12 +882,18 @@ class InteractiveRunner:
             counselor_turns_count = sum(1 for m in dialogue if m["role"] == "counselor")
             risk = self.safety.assess_input(last_user_msg)
 
+            checklist = SessionChecklist()
+            for row in msg_rows:
+                if row["role"] == "counselor":
+                    checklist = SessionChecklist.model_validate(json.loads(row["metadata_json"]).get("session_checklist", checklist.model_dump()))
+            counselor_dialogue = [{**m, "role": "client" if m["role"] == "participant" else m["role"]} for m in dialogue]
             # 调用 CounselorAgent
             turn: CounselorTurn = await self.counselor.respond(
                 memory=memory,
                 plan=plan,
                 client_message=last_user_msg,
-                recent_messages=dialogue[-8:],
+                recent_messages=counselor_dialogue[-8:],
+                session_checklist=checklist,
                 risk=risk,
                 counselor_turn_count=counselor_turns_count,
             )
@@ -886,7 +902,10 @@ class InteractiveRunner:
             assessment = self.safety.assess_output(turn.response, risk)
             if assessment.categories:
                 raise ValueError("Counselor output failed safety checks: " + ", ".join(assessment.categories))
+            checklist = merge_session_checklist(checklist, turn.planning.checklist_update)
             metadata = {
+                "session_checklist": checklist.model_dump(mode="json"),
+                "planning": turn.planning.model_dump(mode="json"),
                 "decision": turn.decision.model_dump() if turn.decision else {},
                 "input_risk": risk.model_dump(mode="json"),
                 "safety_assessment": assessment.model_dump() if assessment else {},
@@ -930,8 +949,7 @@ class InteractiveRunner:
         finally:
             conn.close()
 
-    @staticmethod
-    def _check_execution(cur, operation_id: str, execution_token: str) -> None:
+    def _check_execution(self, cur, operation_id: str, execution_token: str) -> None:
         cur.execute(
             "SELECT status, updated_at FROM course_operations WHERE operation_id = ?",
             (operation_id,),
@@ -939,6 +957,15 @@ class InteractiveRunner:
         row = cur.fetchone()
         if not row or row["status"] != "running" or row["updated_at"] != execution_token:
             raise SessionClosedError("Operation was cancelled or replaced")
+        self._check_job_lease(cur)
+
+    def _check_job_lease(self, cur):
+        if self._job_fence:
+            cur.execute("""SELECT 1 FROM jobs WHERE job_id = ? AND attempt = ? AND lease_owner = ?
+                        AND status = 'running' AND cancel_requested = 0 AND lease_expires_at > ?""",
+                        (*self._job_fence, utc_now()))
+            if cur.fetchone() is None:
+                raise SessionClosedError("Operation job lease was cancelled or replaced")
 
     async def _process_close(self, course_id: str, session_index: int, operation_id: str, execution_token: str) -> None:
         """执行会后整理闭环工作流"""
@@ -957,9 +984,10 @@ class InteractiveRunner:
             memory = SessionMemory.model_validate_json(s_row["memory_before_json"])
 
             cur.execute(
-                "SELECT role, content FROM course_messages WHERE course_id = ? AND session_index = ? ORDER BY created_at ASC",
+                "SELECT role, content, metadata_json FROM course_messages WHERE course_id = ? AND session_index = ? ORDER BY created_at ASC",
                 (course_id, session_index),
             )
+            message_rows = cur.fetchall()
             dialogue_msgs = [
                 Message(
                     session_index=session_index,
@@ -967,9 +995,17 @@ class InteractiveRunner:
                     role="counselor" if r["role"] == "counselor" else "client",
                     content=r["content"],
                 )
-                for idx, r in enumerate(cur.fetchall())
+                for idx, r in enumerate(message_rows)
             ]
 
+            checklist = SessionChecklist()
+            risks = []
+            for row in message_rows:
+                metadata = json.loads(row["metadata_json"])
+                if row["role"] == "counselor":
+                    checklist = SessionChecklist.model_validate(metadata.get("session_checklist", checklist.model_dump()))
+                    if metadata.get("input_risk"):
+                        risks.append(RiskAssessment.model_validate(metadata["input_risk"]))
             # 步骤 1: E.7 提取 (Extract)
             step1_out = await run_step(
                 course_id, session_index, "extract",
@@ -994,7 +1030,8 @@ class InteractiveRunner:
             # 步骤 3: E.9 临床摘要 (Summary)
             step3_out = await run_step(
                 course_id, session_index, "summary",
-                lambda: self.summarizer.summarize(session_index, dialogue_msgs, plan, [plan.therapy], SessionChecklist()),
+                lambda: self.summarizer.summarize(session_index, dialogue_msgs, plan, [plan.therapy], checklist,
+                    memory_items=memory_item_ledger(memory)),
             )
             clinical_summary: ClinicalSummary = (
                 ClinicalSummary.model_validate(step3_out)
@@ -1010,6 +1047,8 @@ class InteractiveRunner:
                 messages=dialogue_msgs,
                 end_reason="participant_ended",
             )
+
+            dummy_session.risk_events = risks
 
             # 步骤 4: 记忆整合 (Consolidate)
             def do_consolidate():
@@ -1041,11 +1080,12 @@ class InteractiveRunner:
 
             # 步骤 6: 下一计划 (Plan)
             def do_plan():
+                dummy_session.counselor_review = CounselorSessionReview.model_validate(review_obj)
                 report = LongitudinalReport(
                     session_index=session_index,
                     trend="baseline" if session_index == 1 else "stable",
-                    stage_action="continue",
-                    evidence=["人工疗程默认推进"],
+                    stage_action=LongitudinalEvaluator.stage_action(dummy_session, "baseline"),
+                    evidence=["基于公开对话自评和安全事件；人工模式无模拟状态趋势"],
                 )
                 rev = (
                     CounselorSessionReview.model_validate(review_obj)

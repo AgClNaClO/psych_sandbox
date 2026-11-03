@@ -337,6 +337,14 @@ def test_skill_evolution_lifecycle_and_expert_review_gate(wb_env):
     )
     assert prop.status == "draft"
 
+    def approve(checklist=None):
+        return lab.submit_expert_review(prop.proposal_id, "expert_bob", "Dr. Bob", "approve",
+            "Independent expert review with substantive rationale",
+            checklist or {"clinical_safety": True, "evidence_grounding": True})
+
+    with pytest.raises(EvolutionValidationError, match="replay and independent simulation"):
+        approve()
+
     # 3. 记录固定上下文回放验证结果
     val = lab.record_replay_validation(
         proposal_id=prop.proposal_id,
@@ -358,6 +366,14 @@ def test_skill_evolution_lifecycle_and_expert_review_gate(wb_env):
             checklist={"clinical_safety": True},
         )
 
+    with pytest.raises(EvolutionValidationError, match="replay and independent simulation"):
+        approve()
+    lab.record_replay_validation(prop.proposal_id, "simulation", {"run_id": "candidate"}, {"run_id": "baseline"}, "Independent simulation comparison")
+    with pytest.raises(EvolutionValidationError, match="registered"):
+        approve()
+    lab.register_reviewer("expert_bob", "Dr. Bob", "admin")
+    with pytest.raises(EvolutionValidationError, match="checklist"):
+        approve({"clinical_safety": True})
     # 5. 专家审核 - 合格的独立第三方专家审核
     review = lab.submit_expert_review(
         proposal_id=prop.proposal_id,
@@ -365,7 +381,7 @@ def test_skill_evolution_lifecycle_and_expert_review_gate(wb_env):
         reviewer_name="Dr. Bob",
         verdict="approve",
         rationale="该技能符合认知行为疗法规范，且触发时机准确，准予批准。",
-        checklist={"clinical_safety": True, "rationale_sound": True},
+        checklist={"clinical_safety": True, "evidence_grounding": True},
     )
     assert review.verdict == "approve"
     assert lab.get_proposal(prop.proposal_id).status == "approved"

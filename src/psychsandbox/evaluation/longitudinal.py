@@ -38,7 +38,7 @@ class LongitudinalEvaluator:
             for field in self.STATE_FIELDS
         }
         trend = self._trend(deltas, has_previous=bool(previous_sessions))
-        stage_action = self._stage_action(session, trend)
+        stage_action = self.stage_action(session, trend)
         evidence = [
             f"distress_delta={deltas['distress']:+.3f}",
             f"trust_delta={deltas['trust']:+.3f}",
@@ -74,7 +74,7 @@ class LongitudinalEvaluator:
         return "stable"
 
     @staticmethod
-    def _stage_action(
+    def stage_action(
         session: SessionRecord,
         trend: Literal["baseline", "improving", "stable", "worsening"],
     ) -> Literal["continue", "advance", "regress", "hold", "close"]:

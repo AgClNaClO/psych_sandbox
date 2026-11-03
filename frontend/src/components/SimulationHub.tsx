@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { api, subscribeSSE } from '../services/api';
-import type { CaseSummary, RunDetail, RunSummary } from '../types';
+import type { CaseSummary, JobItem, RunDetail, RunSummary } from '../types';
 import { Play, Square, XCircle, RotateCcw, FileText } from 'lucide-react';
 
 interface SimulationHubProps {
@@ -31,10 +31,20 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
   const [therapyFilter, setTherapyFilter] = useState<string>('all');
   const [sessionCount, setSessionCount] = useState<number>(3);
   const [seed, setSeed] = useState<number>(42);
+  const [maxTurns, setMaxTurns] = useState(20);
+  const [individualLimits, setIndividualLimits] = useState(false);
+  const [turnLimits, setTurnLimits] = useState<number[]>([]);
+  const [rftEnabled, setRftEnabled] = useState(false);
+  const [candidates, setCandidates] = useState(3);
+  const [defaultsReady, setDefaultsReady] = useState(false);
+  const [jobs, setJobs] = useState<JobItem[]>([]);
+  const [connected, setConnected] = useState(false);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [liveLogs, setLiveLogs] = useState<string[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const trackedJob = jobs.find((job) => job.job_id === activeJobId);
+  const jobRunning = trackedJob?.status === 'queued' || trackedJob?.status === 'running';
 
   const fetchRuns = useCallback(() => {
     return api.getRuns().then((data) => {
@@ -45,12 +55,71 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
 
   // 加载初始数据
   useEffect(() => {
+    let cancelled = false;
+    api.getSimulationDefaults().then((data) => {
+      if (cancelled) return;
+      setMaxTurns(data.max_turns_per_session);
+      setRftEnabled(data.rft.enabled);
+      setCandidates(data.rft.candidates);
+      setDefaultsReady(true);
+    }).catch((error: Error) => { if (!cancelled) setErrorMsg(error.message); });
     api.getCases().then((data) => {
       setCases(data);
       if (data.length > 0) setSelectedCaseId(data[0].case_id);
     }).catch(console.error);
     fetchRuns();
+    return () => { cancelled = true; };
   }, [fetchRuns]);
+
+  // Restore from the durable job list, including a job that completed while away.
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const data = (await api.getJobs('long')).filter((job) => job.kind === 'simulation');
+        let saved: string | null = null;
+        try { saved = localStorage.getItem('simulationJobId'); } catch { /* storage unavailable */ }
+        if (saved && !data.some((job) => job.job_id === saved)) {
+          // The restored job can be older than the list endpoint's latest page.
+          try {
+            const job = await api.getJob(saved);
+            if (job.kind === 'simulation') data.push(job);
+          } catch { /* deleted or inaccessible job; fall back to the live list */ }
+        }
+        if (cancelled) return;
+        setJobs(data);
+        setActiveJobId((current) => {
+          if (current) return current;
+          return data.find((job) => job.job_id === saved)?.job_id
+            ?? data.find((job) => ['queued', 'running'].includes(job.status))?.job_id ?? null;
+        });
+      } catch (error) {
+        if (!cancelled) setErrorMsg((error as Error).message);
+      }
+    };
+    void refresh();
+    const timer = window.setInterval(refresh, 3000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, []);
+
+  useEffect(() => {
+    if (!activeJobId) return;
+    try { localStorage.setItem('simulationJobId', activeJobId); } catch { /* storage unavailable */ }
+  }, [activeJobId]);
+
+  const trackedRunId = trackedJob?.run_id ?? trackedJob?.result?.run_id;
+  useEffect(() => {
+    if (!trackedRunId) return;
+    let cancelled = false;
+    api.getRunDetail(trackedRunId).then((data) => {
+      if (!cancelled) {
+        setSelectedRunId(trackedRunId);
+        setSelectedRunDetail(data);
+      }
+    }).catch(console.error);
+    void fetchRuns();
+    return () => { cancelled = true; };
+  }, [trackedRunId, trackedJob?.updated_at, fetchRuns]);
 
   // 加载选中运行详情
   useEffect(() => {
@@ -71,13 +140,19 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
 
   // SSE 实时进度监听
   useEffect(() => {
+    // Reset the view when attaching to a different external event stream.
+    // oxlint-disable-next-line react/set-state-in-effect
+    setLiveLogs([]);
     if (!activeJobId) return;
+    setConnected(false);
     const unsub = subscribeSSE(`job:${activeJobId}`, (event) => {
       if (event.type === 'simulation_progress') {
         setLiveLogs((prev) => [...prev.slice(-100), event.payload.message]);
       }
       if (['job_succeeded', 'job_stopped', 'job_failed', 'job_cancelled'].includes(event.type)) {
-        setActiveJobId(null);
+        setJobs((prev) => prev.map((job) => job.job_id === activeJobId
+          ? { ...job, status: event.type === 'job_succeeded' ? 'succeeded' : event.type === 'job_stopped' ? 'stopped' : event.type === 'job_failed' ? 'failed' : 'cancelled' }
+          : job));
         if (event.type === 'job_failed') setErrorMsg(event.payload.error || '任务失败');
         fetchRuns();
         if (event.payload.run_id) {
@@ -85,7 +160,7 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
           api.getRunDetail(event.payload.run_id).then(setSelectedRunDetail).catch(console.error);
         }
       }
-    });
+    }, () => setConnected(false), () => setConnected(true));
     return unsub;
   }, [activeJobId, fetchRuns]);
 
@@ -101,7 +176,15 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
         session_count: sessionCount,
         seed: resumeRun?.seed ?? seed,
         resume_run_id: resumeId,
+        ...(!resumeId ? {
+          max_turns_per_session: maxTurns,
+          session_turn_limits: individualLimits ? Array.from({ length: sessionCount }, (_, i) => turnLimits[i] ?? maxTurns) : undefined,
+          rft: { enabled: rftEnabled, candidates },
+        } : {}),
       });
+      setJobs((prev) => [job, ...prev]);
+      setSelectedRunId(job.run_id ?? null);
+      setSelectedRunDetail(null);
       setActiveJobId(job.job_id);
       setLiveLogs([`任务已提交至后台 Long Lane (ID: ${job.job_id})...`]);
     } catch (err: any) {
@@ -203,9 +286,9 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
               <input
                 type="number"
                 min={1}
-                max={10}
+                max={100}
                 value={sessionCount}
-                onChange={(e) => setSessionCount(parseInt(e.target.value) || 1)}
+                onChange={(e) => setSessionCount(Math.min(100, Math.max(1, parseInt(e.target.value) || 1)))}
                 style={{ width: '100%', padding: '6px 8px', marginTop: 4, borderRadius: 4, border: '1px solid var(--border-color)' }}
               />
             </div>
@@ -220,11 +303,42 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
             </div>
           </div>
 
+          <div style={{ fontSize: 12, marginBottom: 12 }}>
+            <label>每场轮数上限（1–50）:
+                <input aria-label="每场轮数上限" type="number" min={1} max={50} value={maxTurns}
+                onChange={(e) => setMaxTurns(Math.min(50, Math.max(1, parseInt(e.target.value) || 1)))} style={{ width: 64, marginLeft: 8 }} />
+            </label>
+            <div style={{ color: 'var(--text-muted)', marginTop: 4 }}>咨询师仍可提前结束会谈。</div>
+            <label style={{ display: 'block', marginTop: 8 }}>
+              <input type="checkbox" checked={individualLimits} onChange={(e) => setIndividualLimits(e.target.checked)} /> 逐场设置轮数上限
+            </label>
+            {individualLimits && <div style={{ maxHeight: 150, overflowY: 'auto' }}>
+              {Array.from({ length: sessionCount }, (_, i) => <label key={i} style={{ display: 'block', marginTop: 4 }}>
+                第 {i + 1} 场:
+                <input aria-label={`第${i + 1}场轮数上限`} type="number" min={1} max={50} value={turnLimits[i] ?? maxTurns}
+                  onChange={(e) => setTurnLimits((prev) => {
+                    const next = [...prev];
+                    next[i] = Math.min(50, Math.max(1, parseInt(e.target.value) || 1));
+                    return next;
+                  })} style={{ width: 64, marginLeft: 8 }} />
+              </label>)}
+            </div>}
+            <label style={{ display: 'block', marginTop: 10 }}>
+              <input type="checkbox" checked={rftEnabled} onChange={(e) => setRftEnabled(e.target.checked)} /> 启用 RFT 会谈候选选优
+            </label>
+            {rftEnabled && <>
+              <label>每场候选数（2–32）:
+                <input aria-label="RFT候选数" type="number" min={2} max={32} value={candidates}
+                  onChange={(e) => setCandidates(Math.min(32, Math.max(2, parseInt(e.target.value) || 2)))} style={{ width: 64, marginLeft: 8 }} />
+              </label>
+              <div style={{ color: 'var(--text-muted)', marginTop: 4 }}>生成多场候选并评分选优，会增加 API 费用和耗时。</div>
+            </>}
+          </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <button
               className="btn btn-primary"
               style={{ flex: 1 }}
-              disabled={loading || observerMode}
+              disabled={loading || observerMode || jobRunning || !defaultsReady}
               onClick={() => handleStartSimulation()}
             >
               <Play size={14} /> {observerMode ? '观察者模式不可启动' : '启动后台实验'}
@@ -244,7 +358,10 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
             <div
               key={r.run_id}
               className={`item-card ${selectedRunId === r.run_id ? 'selected' : ''}`}
-              onClick={() => setSelectedRunId(r.run_id)}
+              onClick={() => {
+                setSelectedRunId(r.run_id);
+                setActiveJobId(jobs.find((job) => job.run_id === r.run_id || job.result?.run_id === r.run_id)?.job_id ?? null);
+              }}
             >
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
                 <span style={{ fontWeight: 600, fontSize: 13 }}>{r.run_id}</span>
@@ -304,6 +421,8 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
                 className="btn btn-secondary"
                 style={{ fontSize: 12 }}
                 onClick={() => handleStartSimulation(selectedRunId!)}
+                disabled={loading || observerMode || jobRunning}
+                title="沿用原实验的轮数上限与 RFT 配置"
               >
                 <RotateCcw size={13} /> 边界续跑
               </button>
@@ -312,14 +431,15 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
               className="btn btn-secondary"
               style={{ fontSize: 12 }}
               onClick={handleStopAtBoundary}
+              disabled={!jobRunning || observerMode}
               title="在下一会谈开始前干净停止"
             >
               <Square size={13} /> 边界停止
             </button>
-            <button className="btn btn-danger" style={{ fontSize: 12 }} onClick={handleCancelJob}>
+            <button className="btn btn-danger" style={{ fontSize: 12 }} onClick={handleCancelJob} disabled={!jobRunning || observerMode}>
               <XCircle size={13} /> 取消任务
             </button>
-            {selectedRunDetail && (
+            {selectedRunDetail && runs.find((run) => run.run_id === selectedRunId)?.has_html_report && (
               <a
                 href={`/api/runs/${selectedRunDetail.run_id}/report`}
                 target="_blank"
@@ -334,6 +454,18 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
         </div>
 
         <div className="column-body">
+          {jobs.length > 0 && <div style={{ marginBottom: 12, fontSize: 12 }}>
+            <label>后台任务:
+              <select aria-label="后台任务" value={activeJobId ?? ''} onChange={(e) => setActiveJobId(e.target.value || null)} style={{ marginLeft: 8, maxWidth: '100%' }}>
+                <option value="">选择任务查看进度</option>
+                {jobs.map((job) => <option key={job.job_id} value={job.job_id}>{job.job_id} · {job.payload.case_id} · {job.status}</option>)}
+              </select>
+            </label>
+            {activeJobId && <div style={{ marginTop: 4, color: 'var(--text-muted)' }}>
+              {trackedJob?.status} · {connected ? '进度监听已连接' : '进度监听连接中，自动重连'} · 刷新或切换页面后自动恢复
+              {trackedJob?.error && <div style={{ color: 'var(--danger)' }}>{trackedJob.error}</div>}
+            </div>}
+          </div>}
           {/* 实时进度控制台 */}
           {liveLogs.length > 0 && (
             <div

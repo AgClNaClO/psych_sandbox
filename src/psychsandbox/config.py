@@ -63,6 +63,7 @@ def default_config(root: Path = PROJECT_ROOT) -> SandboxConfig:
         seed=raw.get("seed", 42),
         session_count=raw.get("session_count", 3),
         max_turns_per_session=raw.get("max_turns_per_session", 8),
+        session_turn_limits=raw.get("session_turn_limits", []),
         database_path=_project_path(root, raw.get("database_path")),
         trace_dir=_project_path(root, raw.get("trace_dir")),
         temperature_client=temperatures.get("client", 0.7),

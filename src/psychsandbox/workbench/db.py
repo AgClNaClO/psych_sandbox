@@ -17,6 +17,16 @@ from ..domain import utc_now
 DEFAULT_WORKBENCH_DB = Path("runs/runtime/workbench.sqlite3")
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS job_skill_snapshots (
+  job_id TEXT PRIMARY KEY REFERENCES jobs(job_id),
+  release_ids_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS expert_reviewers (
+  reviewer_id TEXT PRIMARY KEY,
+  reviewer_name TEXT NOT NULL,
+  registered_by TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1
+);
 -- 任务表：支持短/长 lane 隔离、认领、租约、心跳和 attempt 栅栏
 CREATE TABLE IF NOT EXISTS jobs (
   job_id TEXT PRIMARY KEY,

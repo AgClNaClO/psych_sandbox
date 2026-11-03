@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from contextlib import closing
 import json
 import os
 from pathlib import Path
@@ -27,10 +28,14 @@ if env_path.exists():
 
 from .db import db_transaction, get_connection, init_db, utc_now
 from .job_manager import JobManager
-from .models import JobLane, JobResponse
+from .evolution import SkillEvolutionLab
+from .models import JobLane, JobResponse, SimulationJobPayload
 from .events import get_event_hub
 from .interactive import CourseManager, InteractiveRunner
 from ..runtime import CounselingSandbox
+from ..runtime.storage import SQLiteStore
+from ..runtime.run_management import available_run_dir
+from ..visualization import generate_run_report
 from ..domain import SandboxConfig
 from ..model_client import create_gateway
 from ..agents.counselor import CounselorAgent
@@ -148,7 +153,7 @@ class WorkbenchWorker:
         except asyncio.CancelledError:
             if self.job_manager.mark_cancelled_job(job.job_id, job.attempt, self.worker_id):
                 if job.course_id and job.payload.get("operation_id"):
-                    self._fail_course_operation(job.course_id, job.payload["operation_id"], "Job cancelled")
+                    self._fail_course_operation(job.course_id, job.payload["operation_id"], "Job cancelled", job)
                 self.event_hub.emit(f"job:{job.job_id}", "job_cancelled", {"job_id": job.job_id})
             raise
         except Exception as exc:
@@ -163,8 +168,27 @@ class WorkbenchWorker:
                     {"job_id": job.job_id, "error": str(exc)},
                 )
 
+    def _release_ids(self, job, lab):
+        conn = get_connection(self.db_path)
+        try:
+            with db_transaction(conn) as cur:
+                cur.execute("SELECT payload_json FROM jobs WHERE job_id = ? AND attempt = ? AND lease_owner = ? AND status = 'running' AND lease_expires_at > ?", (job.job_id, job.attempt, self.worker_id, utc_now()))
+                row = cur.fetchone()
+                if not row:
+                    raise RuntimeError("Job lease lost before skill resolution")
+                cur.execute("SELECT release_ids_json FROM job_skill_snapshots WHERE job_id = ?", (job.job_id,))
+                snapshot = cur.fetchone()
+                if snapshot:
+                    return json.loads(snapshot["release_ids_json"])
+                release_ids = [r.release_id for r in lab.list_releases() if r.is_active]
+                cur.execute("INSERT INTO job_skill_snapshots VALUES (?, ?)", (job.job_id, json.dumps(release_ids)))
+                return release_ids
+        finally:
+            conn.close()
+
     async def _run_simulation_job(self, job: JobResponse) -> None:
         payload = job.payload
+        requested = SimulationJobPayload.model_validate(payload)
         case_id = payload["case_id"]
         therapy = payload.get("therapy")
         session_count = payload.get("session_count", 1)
@@ -174,8 +198,38 @@ class WorkbenchWorker:
         if run_id and not self.job_manager.bind_run(job.job_id, job.attempt, self.worker_id, run_id):
             return
 
+        config = default_config()
+        values = config.model_dump()
+        overrides = requested.model_dump(exclude_none=True, exclude_unset=True)
+        for key in ("max_turns_per_session", "session_turn_limits"):
+            if key in overrides:
+                values[key] = overrides[key]
+        if "rft" in overrides:
+            values["rft"] = {**values["rft"], **overrides["rft"]}
+        # Resume/retry uses the original experiment settings even if YAML changed.
+        if run_id:
+            with closing(SQLiteStore(config.database_path)) as store:
+                try:
+                    saved = store.load_run_metadata(run_id)["config"]
+                except KeyError:
+                    saved = None
+            if saved:
+                for key, fallback in (("max_turns_per_session", 8), ("session_turn_limits", []), ("rft", {})):
+                    original = saved.get(key, fallback)
+                    changed = (any(original.get(field) != value for field, value in overrides[key].items())
+                               if key == "rft" and key in overrides else values[key] != original)
+                    if key in overrides and changed:
+                        raise ValueError(f"Resume must preserve the original {key}")
+                    values[key] = original
+        config = SandboxConfig.model_validate(values)
         gateway = self.gateway_factory()
-        sandbox = CounselingSandbox(default_config(), gateway=gateway)
+        sandbox = CounselingSandbox(config, gateway=gateway)
+
+        lab = SkillEvolutionLab(self.db_path, sandbox.config.project_root / "assets/skills/sect")
+        registry = lab.runtime_registry(sandbox.config.project_root, self._release_ids(job, lab))
+        sandbox.registry = registry
+        sandbox.skill_catalog = SkillCatalog(registry)
+        sandbox.counselor.skill_catalog = sandbox.skill_catalog
 
         def progress_cb(msg: str):
             nonlocal run_id
@@ -203,8 +257,7 @@ class WorkbenchWorker:
                              or (therapy and existing["therapy"] != normalize_therapy_id(therapy))
                              or (seed is not None and seed != existing["seed"])):
                 raise ValueError("Retry/resume must preserve the original case, therapy and seed")
-            if (existing and job.attempt > 1 and existing["status"] == "completed"
-                    and len(sandbox.store.load_sessions(run_id)) >= session_count):
+            if (existing and job.attempt > 1 and existing["status"] == "completed"):
                 result = sandbox.store.load_run(run_id)
             else:
                 result = await sandbox.run_case(
@@ -214,6 +267,10 @@ class WorkbenchWorker:
                 )
         finally:
             sandbox.store.close()
+
+        # Match CLI reporting; reacquire the run lock and honor deletion journals.
+        with available_run_dir(config.trace_dir, result.run_id) as report_dir:
+            generate_run_report(result, report_dir / "report.html")
 
         res_dict = {
             "run_id": result.run_id,
@@ -229,10 +286,13 @@ class WorkbenchWorker:
             if self.job_manager.complete_job(job.job_id, job.attempt, self.worker_id, res_dict):
                 self.event_hub.emit(f"job:{job.job_id}", "job_succeeded", res_dict)
 
-    def _fail_course_operation(self, course_id: str, operation_id: str, error: str) -> None:
+    def _fail_course_operation(self, course_id: str, operation_id: str, error: str, job: JobResponse) -> None:
         conn = get_connection(self.db_path)
         try:
             with db_transaction(conn) as cur:
+                cur.execute("SELECT 1 FROM jobs WHERE job_id = ? AND attempt = ? AND lease_owner = ? AND status IN ('running', 'cancelled')", (job.job_id, job.attempt, self.worker_id))
+                if cur.fetchone() is None:
+                    return
                 cur.execute(
                     """UPDATE course_operations
                     SET status = 'failed', error = ?, updated_at = ?
@@ -264,9 +324,17 @@ class WorkbenchWorker:
         try:
             gateway = self.gateway_factory()
             config = default_config()
+            lab = SkillEvolutionLab(self.db_path, config.project_root / "assets/skills/sect")
+            release_ids = self._release_ids(job, lab)
+            course = CourseManager(self.db_path).get_course(course_id)
+            if course.skill_release_id:
+                release = lab.get_release(course.skill_release_id)
+                if not release or release.therapy != course.therapy:
+                    raise ValueError("Course skill release must match its therapy")
+                release_ids = [course.skill_release_id]
             counselor = CounselorAgent(
                 gateway=gateway,
-                skill_catalog=SkillCatalog(SkillRegistry.from_project(config.project_root)),
+                skill_catalog=SkillCatalog(lab.runtime_registry(config.project_root, release_ids)),
                 temperature=config.temperature_counselor,
                 skill_selection=config.skill_selection,
                 memory_view=config.memory_view,
@@ -276,10 +344,11 @@ class WorkbenchWorker:
 
         except Exception as exc:
             if course_id and operation_id:
-                self._fail_course_operation(course_id, operation_id, str(exc))
+                self._fail_course_operation(course_id, operation_id, str(exc), job)
             raise
 
-        await runner.execute_operation(course_id=course_id, operation_id=operation_id)
+        await runner.execute_operation(course_id=course_id, operation_id=operation_id,
+                                       job_fence=(job.job_id, job.attempt, self.worker_id))
         if self.job_manager.complete_job(
             job.job_id, job.attempt, self.worker_id, {"course_id": course_id, "operation_id": operation_id}
         ):

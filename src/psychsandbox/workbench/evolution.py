@@ -23,7 +23,7 @@ from .models import (
     ReplayValidationResponse,
 )
 from .events import get_event_hub
-from ..domain import utc_now
+from ..domain import utc_now, AtomicSkill, SessionStage
 from ..skills import SkillCatalog, SkillRegistry
 from ..therapies import normalize_therapy_id
 
@@ -51,6 +51,52 @@ class SkillEvolutionLab:
         self.db_path = db_path
         self.assets_dir = assets_dir or Path("assets/skills/sect")
         self.events = get_event_hub(db_path)
+
+    def register_reviewer(self, reviewer_id: str, reviewer_name: str, registered_by: str) -> None:
+        if not all(value.strip() for value in (reviewer_id, reviewer_name, registered_by)):
+            raise EvolutionValidationError("Reviewer identity and registrar are required")
+        conn = get_connection(self.db_path)
+        try:
+            with db_transaction(conn) as cur:
+                cur.execute("INSERT INTO expert_reviewers VALUES (?, ?, ?, 1)",
+                            (reviewer_id.strip(), reviewer_name.strip(), registered_by.strip()))
+        finally:
+            conn.close()
+
+    def runtime_registry(self, project_root: Path, release_ids: list[str] | None = None) -> SkillRegistry:
+        """Resolve active immutable overlays without modifying the source tree."""
+        registry = SkillRegistry.from_project(project_root)
+        releases = [self.get_release(rid) for rid in release_ids] if release_ids is not None else [r for r in self.list_releases() if r.is_active]
+        for release in releases:
+            if release is None:
+                raise EvolutionValidationError("Pinned release not found")
+            if release.tree_hash != self.compute_tree_hash(release.therapy, release.overlay_skills):
+                raise EvolutionValidationError("Release source hash mismatch")
+            for skill_id, overlay in release.overlay_skills.items():
+                stage = SessionStage({"early": "case_conceptualization", "conceptualization": "case_conceptualization", "middle": "core_intervention", "intervention": "core_intervention", "late": "consolidation"}.get(overlay["stage"], overlay["stage"]))
+                asset = THERAPY_ASSET_DIR_MAP[release.therapy]
+                parent = registry.meta_skills.get(overlay["meta_id"]) or registry.meta_skills.get(f"psychagent:{asset}:meta:{overlay['meta_id']}")
+                if not parent or parent.therapy != release.therapy or stage not in parent.stages:
+                    raise EvolutionValidationError("Overlay parent must belong to the release therapy and stage")
+                previous = registry.atomic_skills.get(skill_id)
+                if previous and (previous.therapy != release.therapy or previous.meta_skill_id != parent.meta_skill_id):
+                    raise EvolutionValidationError("Overlay cannot move skills across therapy or parent")
+                data = overlay["data"]
+                replacement = AtomicSkill(
+                    skill_id=skill_id, name=data["name"], description=data["description"],
+                    therapy=release.therapy, stages=[stage], meta_skill_id=parent.meta_skill_id,
+                    when_to_use=data["timing"], triggers=data["triggers"],
+                    source=f"release:{release.release_id}",
+                    paths={stage.value: f"{release.therapy} / {stage.value} / {parent.name} / {data['name']}"},
+                )
+                if previous:
+                    replacement = previous.model_copy(update={
+                        "name": replacement.name, "description": replacement.description,
+                        "when_to_use": replacement.when_to_use, "triggers": replacement.triggers,
+                        "source": replacement.source,
+                    })
+                registry.atomic_skills[skill_id] = replacement
+        return registry
 
     def load_raw_skill_tree(self, therapy: str) -> dict[str, Any] | None:
         """加载流派原始只读技能树资产（支持单文件与分阶段目录）"""
@@ -374,6 +420,13 @@ class SkillEvolutionLab:
         diff_summary: str,
     ) -> ReplayValidationResponse:
         """记录固定上下文回放或独立仿真验证结果"""
+        proposal = self.get_proposal(proposal_id)
+        if not proposal or proposal.status not in {"draft", "replayed", "simulated"}:
+            raise EvolutionValidationError("Proposal is not open for validation")
+        if replay_type not in {"fixed_context", "simulation"} or not candidate_outputs or not baseline_outputs or not diff_summary.strip():
+            raise EvolutionValidationError("Validation requires candidate, baseline and comparison evidence")
+        if replay_type == "simulation" and proposal.status not in {"replayed", "simulated"}:
+            raise EvolutionValidationError("Fixed-context replay must precede simulation")
         val_id = f"val-{uuid.uuid4().hex[:12]}"
         now = utc_now()
         conn = get_connection(self.db_path)
@@ -443,6 +496,18 @@ class SkillEvolutionLab:
         conn = get_connection(self.db_path)
         try:
             with db_transaction(conn) as cur:
+                if verdict == "approve":
+                    if proposal.status != "simulated":
+                        raise EvolutionValidationError("Approval requires replay and independent simulation")
+                    cur.execute("SELECT reviewer_name FROM expert_reviewers WHERE reviewer_id = ? AND active = 1", (reviewer_id,))
+                    registered = cur.fetchone()
+                    if not registered or registered["reviewer_name"] != reviewer_name:
+                        raise EvolutionValidationError("Reviewer must be registered and active")
+                    if not all(checklist.get(key) is True for key in ("clinical_safety", "evidence_grounding")):
+                        raise EvolutionValidationError("Required review checklist must pass")
+                    cur.execute("SELECT replay_type FROM replay_validations WHERE proposal_id = ? AND status = 'completed' AND candidate_outputs_json != '{}' AND baseline_outputs_json != '{}'", (proposal_id,))
+                    if {row["replay_type"] for row in cur.fetchall()} != {"fixed_context", "simulation"}:
+                        raise EvolutionValidationError("Approval requires replay and independent simulation")
                 cur.execute(
                     """INSERT INTO expert_reviews
                     (review_id, proposal_id, reviewer_id, reviewer_name, verdict, rationale, checklist_json, created_at)

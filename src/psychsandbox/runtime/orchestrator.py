@@ -47,6 +47,7 @@ from .progress import ScoringProgress, TurnProgress, format_duration as _format_
 from .run_management import available_run_dir
 from .memory import MemoryConsolidator, merge_session_checklist
 from .memory_pipeline import (
+    memory_item_ledger,
     ClientMergeAgent,
     DialogueSummaryAgent,
     MemoryExtractionAgent,
@@ -475,7 +476,10 @@ class CounselingSandbox:
         turn_progress: Callable[[TurnProgress | None], None] | None = None,
         progress_label: str = "",
     ) -> SessionRecord:
-        counselor = counselor or self.counselor
+        max_turns = (self.config.session_turn_limits[plan.session_index - 1]
+                     if plan.session_index <= len(self.config.session_turn_limits)
+                     else self.config.max_turns_per_session)
+        counselor = counselor or self.counselor
         client_simulator = client_simulator or self.client_simulator
         initial = state.model_copy(deep=True)
         session_started_at = time.monotonic()
@@ -500,12 +504,12 @@ class CounselingSandbox:
             turn_progress(TurnProgress(
                 session_index=plan.session_index,
                 turn_index=0,
-                total_turns=self.config.max_turns_per_session,
+                total_turns=max_turns,
                 elapsed=0.0,
                 eta=0.0,
                 label=progress_label,
             ))
-        for turn_index in range(1, self.config.max_turns_per_session + 1):
+        for turn_index in range(1, max_turns + 1):
             client_text = messages[-1].content if messages else ""
             risk = self.safety.assess_input(client_text)
             risks.append(risk)
@@ -612,12 +616,12 @@ class CounselingSandbox:
             save_progress()
             if turn_progress:
                 elapsed = time.monotonic() - session_started_at
-                remaining = self.config.max_turns_per_session - turn_index
+                remaining = max_turns - turn_index
                 eta = (elapsed / turn_index) * remaining if remaining > 0 else 0.0
                 turn_progress(TurnProgress(
                     session_index=plan.session_index,
                     turn_index=turn_index,
-                    total_turns=self.config.max_turns_per_session,
+                    total_turns=max_turns,
                     elapsed=elapsed,
                     eta=eta,
                     label=progress_label,
@@ -779,24 +783,8 @@ class CounselingSandbox:
     def _memory_items(memory: SessionMemory) -> dict:
         """The id-addressed ledger E.9 may retire, so rewording cannot orphan it."""
 
-        return {
-            "open_homework": [
-                item.model_dump(mode="json")
-                for item in memory.last_homework
-                if item.status == "open"
-            ],
-            "open_topics": [
-                item.model_dump(mode="json")
-                for item in memory.checklist.open_items
-                if item.status == "open"
-            ],
-            "pending_verification": [
-                item.model_dump(mode="json")
-                for item in memory.checklist.pending_verification
-                if item.status == "open"
-            ],
-        }
-
+        return memory_item_ledger(memory)
+
     def _sync_jsonl(self, run_id: str) -> None:
         """SQLite is authoritative if interruption happened between commit and export."""
         path = self.run_dir / "trajectory.jsonl"

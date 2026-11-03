@@ -25,7 +25,7 @@ from .models import (
     MetricStats,
 )
 from ..domain import utc_now
-from ..domain import SessionMemory
+from ..domain import SessionMemory, MemoryViewConfig
 from ..runtime.memory_view import MemoryViewBuilder
 from ..runtime.storage import SQLiteStore
 
@@ -42,8 +42,8 @@ def _stable_case_split(case_id: str, train_ratio: float = 0.7, val_ratio: float 
         return "test"
 
 
-def _public_memory(value: dict[str, Any]) -> dict[str, Any]:
-    return MemoryViewBuilder().build(SessionMemory.model_validate(value)) if value else {}
+def _public_memory(value: dict[str, Any], snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
+    return MemoryViewBuilder(MemoryViewConfig.model_validate((snapshot or {}).get("memory_view", {}))).build(SessionMemory.model_validate(value)) if value else {}
 
 
 def _dialogue(session: dict[str, Any]) -> list[dict[str, str]]:
@@ -120,7 +120,7 @@ class DataExporter:
             sess_data = json.loads(r["session_json"])
             trajectory = json.loads(r["trajectory_json"]) if r["trajectory_json"] else {}
             # The memories table is post-session; it leaks future evidence into earlier turns.
-            mem_data = _public_memory(trajectory.get("memory_before") or {})
+            mem_data = _public_memory(trajectory.get("memory_before") or {}, trajectory.get("model_config_snapshot"))
 
             turn_records = sess_data.get("turn_records", [])
             dialogue_history = []
@@ -364,7 +364,7 @@ class DataExporter:
                         "therapy": therapy,
                         "session_index": s_idx,
                         "plan": trajectory.get("plan"),
-                        "memory_before": _public_memory(trajectory["memory_before"]),
+                        "memory_before": _public_memory(trajectory["memory_before"], trajectory.get("model_config_snapshot")),
                         "dialogue_context": prefix,
                     }
 

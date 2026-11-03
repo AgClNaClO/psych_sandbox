@@ -31,6 +31,161 @@ def wb(tmp_path):
     return path
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize('crisis', [False, True])
+async def test_interactive_stage_progress_and_safety_hold(wb, monkeypatch, crisis):
+    from psychsandbox.domain import CounselorSessionReview
+    manager = CourseManager(wb)
+    course = manager.create_course('cbt', 'Stage')
+    gateway = DeterministicGateway()
+    counselor = CounselorAgent(gateway)
+    runner = InteractiveRunner(counselor, gateway, wb)
+    _, op = manager.submit_user_message(course.course_id, 1, 'message', 'reply', 1,
+        '我现在拿着刀想自杀' if crisis else '我愿意尝试改变睡眠习惯')
+    await runner.execute_operation(course.course_id, op.operation_id)
+
+    async def ready_review(**kwargs):
+        session = kwargs['session']
+        message = session.messages[0]
+        return CounselorSessionReview(goals_achieved=True, goal_progress=1, replanning_required=False,
+            stage_ready=True, objective_assessments=[{'objective': goal, 'status': 'completed',
+                'evidence': [{'turn_index': message.turn_index, 'role': message.role, 'quote': message.content}]}
+                for goal in session.plan.objectives])
+
+    monkeypatch.setattr(counselor, 'review_session', ready_review)
+    op = manager.submit_close_session(course.course_id, 1, 'close', manager.get_course(course.course_id).version)
+    await runner.execute_operation(course.course_id, op.operation_id)
+    session = manager.get_session_detail(course.course_id, 1)
+    assert session.next_plan['stage'] == ('case_conceptualization' if crisis else 'core_intervention')
+    if crisis:
+        assert '安全复核' in session.next_plan['objectives'][0]
+
+
+@pytest.mark.asyncio
+async def test_completed_early_run_is_reused_after_job_commit_crash(wb, tmp_path, root, monkeypatch):
+    config = SandboxConfig(project_root=root, max_turns_per_session=1,
+        rft={"enabled": False},
+        memory_view={"mode": "recap_window", "max_chars": 500},
+        logprob_scoring=DISABLED_LOGPROB_SCORING,
+        database_path=tmp_path / 'sim.sqlite3', trace_dir=tmp_path / 'traces')
+    monkeypatch.setattr('psychsandbox.workbench.worker.default_config', lambda: config)
+    worker = WorkbenchWorker('long', wb, gateway_factory=DeterministicGateway)
+    from psychsandbox.runtime import CounselingSandbox
+    run_case = CounselingSandbox.run_case
+
+    async def early_completion(self, **kwargs):
+        kwargs['session_count'] = 1
+        return await run_case(self, **kwargs)
+
+    monkeypatch.setattr(CounselingSandbox, 'run_case', early_completion)
+    worker.job_manager.enqueue_job('simulation', 'long', {'case_id': 'psycheval-cbt-001', 'session_count': 9})
+    job = worker.job_manager.claim_job('long', worker.worker_id)
+    monkeypatch.setattr(worker.job_manager, 'complete_job', lambda *args: False)
+    await worker._run_simulation_job(job)
+    conn = get_connection(wb)
+    conn.execute("UPDATE jobs SET status = 'queued' WHERE job_id = ?", (job.job_id,))
+    conn.close()
+    retry = worker.job_manager.claim_job('long', worker.worker_id)
+
+    async def must_not_run(*args, **kwargs):
+        raise AssertionError('Completed trajectory must not generate or score again')
+
+    monkeypatch.setattr('psychsandbox.workbench.worker.CounselingSandbox.run_case', must_not_run)
+    await worker._run_simulation_job(retry)
+
+
+def test_export_uses_original_memory_view():
+    from psychsandbox.domain import SessionMemory, MemoryViewConfig
+    from psychsandbox.runtime.memory_view import MemoryViewBuilder
+    from psychsandbox.workbench.export import _public_memory
+    memory = SessionMemory(case_id='test', known_background={'client_id': 'test'})
+    config = MemoryViewConfig(mode='recap_window', max_chars=500)
+    assert _public_memory(memory.model_dump(mode='json'), {'memory_view': config.model_dump()}) == MemoryViewBuilder(config).build(memory)
+    assert 'view_budget' in _public_memory(memory.model_dump(mode='json'), {'memory_view': config.model_dump()})
+
+
+def test_release_overlay_changes_catalog_and_rollback_restores_it(wb, root):
+    from psychsandbox.workbench.evolution import SkillEvolutionLab
+    from psychsandbox.skills import SkillRegistry
+    lab = SkillEvolutionLab(wb, root / 'assets/skills/sect')
+    registry = SkillRegistry.from_project(root)
+    skill = next(s for s in registry.atomic_skills.values() if s.therapy == 'cbt')
+    base = lab.create_release('cbt', 'base', '', 'admin', set_active=True)
+    overlay = {skill.skill_id: {'meta_id': skill.meta_skill_id, 'stage': skill.stages[0].value,
+        'data': {'name': 'Published replacement', 'description': 'Reviewed description', 'timing': 'When supported', 'triggers': ['test']}}}
+    release = lab.create_release('cbt', 'updated', '', 'admin', overlay, base.release_id, True)
+    assert lab.runtime_registry(root).atomic_skills[skill.skill_id].name == 'Published replacement'
+    lab.rollback_release('cbt', base.release_id)
+    assert lab.runtime_registry(root).atomic_skills[skill.skill_id].name == skill.name
+    assert lab.runtime_registry(root, [release.release_id]).atomic_skills[skill.skill_id].name == 'Published replacement'
+    overlay[skill.skill_id]['meta_id'] = skill.meta_skill_id.rsplit(':', 1)[-1]
+    overlay[skill.skill_id]['stage'] = {'case_conceptualization': 'conceptualization', 'core_intervention': 'intervention', 'consolidation': 'consolidation'}[skill.stages[0].value]
+    lab.create_release('cbt', 'UI aliases', '', 'admin', overlay, set_active=True)
+    assert lab.runtime_registry(root).atomic_skills[skill.skill_id].meta_skill_id == skill.meta_skill_id
+
+
+@pytest.mark.asyncio
+async def test_interactive_passes_client_history_checklist_and_ledger(wb, monkeypatch):
+    from psychsandbox.domain import SessionChecklistUpdate
+    manager = CourseManager(wb)
+    course = manager.create_course('cbt', 'Checklist')
+    gateway = DeterministicGateway()
+    counselor = CounselorAgent(gateway)
+    runner = InteractiveRunner(counselor, gateway, wb)
+    respond = counselor.respond
+    calls = []
+
+    async def record_reply(**kwargs):
+        calls.append(kwargs)
+        turn = await respond(**kwargs)
+        turn.planning.checklist_update = SessionChecklistUpdate(important_information=['Disclosed information'])
+        return turn
+
+    monkeypatch.setattr(counselor, 'respond', record_reply)
+    for index in range(2):
+        _, op = manager.submit_user_message(course.course_id, 1, f'm{index}', f'o{index}',
+            manager.get_course(course.course_id).version, 'I need help sleeping')
+        await runner.execute_operation(course.course_id, op.operation_id)
+    assert calls[-1]['recent_messages'][0]['role'] == 'client'
+    assert calls[-1]['session_checklist'].important_information == ['Disclosed information']
+    summarize = runner.summarizer.summarize
+
+    async def record_summary(*args, **kwargs):
+        assert args[4].important_information == ['Disclosed information']
+        assert set(kwargs['memory_items']) == {'open_homework', 'open_topics', 'pending_verification'}
+        return await summarize(*args, **kwargs)
+
+    monkeypatch.setattr(runner.summarizer, 'summarize', record_summary)
+    op = manager.submit_close_session(course.course_id, 1, 'close', manager.get_course(course.course_id).version)
+    await runner.execute_operation(course.course_id, op.operation_id)
+
+
+@pytest.mark.asyncio
+async def test_reaped_job_fences_reply_before_next_worker_starts(wb, monkeypatch):
+    manager = CourseManager(wb)
+    course = manager.create_course('cbt', 'Lease fencing')
+    op = manager.submit_opening(course.course_id, 1, 'lease-opening', 1)
+    jobs = JobManager(wb)
+    claimed = jobs.claim_job('short', 'old-worker')
+    gateway = DeterministicGateway()
+    counselor = CounselorAgent(gateway)
+    respond = counselor.respond
+
+    async def reaped_reply(**kwargs):
+        turn = await respond(**kwargs)
+        conn = get_connection(wb)
+        conn.execute("UPDATE jobs SET lease_expires_at = '2000-01-01T00:00:00+00:00' WHERE job_id = ?", (claimed.job_id,))
+        conn.close()
+        jobs.reap_stale_jobs()
+        return turn
+
+    monkeypatch.setattr(counselor, 'respond', reaped_reply)
+    runner = InteractiveRunner(counselor, gateway, wb)
+    with pytest.raises(SessionClosedError):
+        await runner.execute_operation(course.course_id, op.operation_id)
+    assert manager.get_session_detail(course.course_id, 1).messages == []
+
+
 @pytest.fixture
 def client(wb, tmp_path):
     app = create_app(
@@ -47,6 +202,7 @@ async def test_worker_executes_real_simulation_contract(wb, tmp_path, root, monk
     config = SandboxConfig(
         project_root=root, max_turns_per_session=1,
         rft={"enabled": False},
+        memory_view={"mode": "recap_window", "max_chars": 500},
         logprob_scoring=DISABLED_LOGPROB_SCORING,
         database_path=tmp_path / "sim.sqlite3", trace_dir=tmp_path / "traces",
     )
@@ -70,6 +226,7 @@ async def test_worker_executes_real_simulation_contract(wb, tmp_path, root, monk
         assert rows and all(row["counselor_response"] for row in rows)
         assert all(row["memory_context"]["completed_sessions"] == 0 for row in rows)
         assert all(row["anonymized"] is False for row in rows)
+        assert all("view_budget" in row["memory_context"] for row in rows)
         empty = DataExporter(store, wb).export_sft(tmp_path / "empty.jsonl", run_ids=[])
         assert empty.row_count == 0
     finally:

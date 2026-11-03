@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -1620,6 +1620,7 @@ class SandboxConfig(StrictModel):
     seed: int = 42
     session_count: int = Field(default=3, ge=1, le=100)
     max_turns_per_session: int = Field(default=8, ge=1, le=50)
+    session_turn_limits: list[Annotated[int, Field(ge=1, le=50, strict=True)]] = Field(default_factory=list, max_length=100)
     database_path: Path | None = None
     trace_dir: Path | None = None
     processed_dataset_dir: Path | None = None

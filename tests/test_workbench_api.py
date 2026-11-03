@@ -236,14 +236,21 @@ def test_api_skill_evolution_lifecycle(workbench_client):
     assert "回避" in self_review_resp.json()["detail"] or "Author cannot review" in self_review_resp.json()["detail"]
 
     # 3. 独立专家 Bob 审核批准
+    for replay_type in ("fixed_context", "simulation"):
+        response = client.post(f"/api/skills/proposals/{proposal_id}/validations", json={
+            "replay_type": replay_type, "candidate_outputs": {"response": "candidate"},
+            "baseline_outputs": {"response": "baseline"}, "diff_summary": "Offline test comparison"})
+        assert response.status_code == 200
+    assert client.post("/api/skills/reviewers", json={"reviewer_id": "Supervisor_Bob",
+        "reviewer_name": "Supervisor_Bob", "registered_by": "admin"}).status_code == 200
     valid_review_resp = client.post(
         f"/api/skills/proposals/{proposal_id}/reviews",
         json={
             "reviewer_id": "Supervisor_Bob",
-            "reviewer_name": "鲍勃督导 (独立临床专家)",
+            "reviewer_name": "Supervisor_Bob",
             "verdict": "approve",
             "rationale": "符合 CBT 循证规范，适用时机明确，准予批准发布。",
-            "checklist": {"scientific_validity": True, "safety_aligned": True},
+            "checklist": {"clinical_safety": True, "evidence_grounding": True},
         },
     )
     assert valid_review_resp.status_code == 200
