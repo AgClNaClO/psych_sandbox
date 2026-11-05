@@ -476,14 +476,30 @@ class OpenAICompatibleGateway(ModelGateway):
         temperature: float,
     ) -> BaseModel:
         payload = dict(input_payload)
-        payload["output_schema"] = output_schema.model_json_schema()
+        schema = output_schema.model_json_schema()
+        payload["output_schema"] = schema
+        # json_object constrains syntax at best, not the application's schema.
+        # Put the contract in the system message as well as supplying the schema.
+        system_prompt += (
+            "\n\n【结构化输出格式约束】\n"
+            "只返回一个符合用户消息中 output_schema 的完整 JSON 对象，不输出 Markdown 或解释。\n"
+            f"顶层允许字段：{json.dumps(list(schema.get('properties', {})), ensure_ascii=False)}。\n"
+            f"顶层必需字段：{json.dumps(schema.get('required', []), ensure_ascii=False)}。\n"
+            "所有层级的字段名和枚举值必须与 schema 完全一致，不得翻译成中文或自行改名；"
+            "文本内容仍按原任务要求的语言生成。\n"
+            "逐层检查 required，不得省略必需字段；additionalProperties=false 的对象不得增加字段。\n"
+            "output_schema、repair_instruction、validation_error、invalid_previous_output 和 "
+            "response_format 是请求元数据，不是输出字段；不要额外添加 type=json_object。\n"
+            "输出前检查双引号、逗号和每层大括号/方括号成对闭合，对象结束后不得再输出额外括号或内容。"
+        )
         error = ""
         text = ""
         for attempt in range(2):
             if error:
                 payload["repair_instruction"] = (
                     "上次输出未通过 JSON 解析或 schema 校验。请根据错误修复上次输出，"
-                    "只返回一个符合 output_schema 的 JSON 对象，不要添加 Markdown 或解释。"
+                    "保留符合 schema 的内容，修正语法、错误键名、缺失必需字段和多余字段；"
+                    "字段名和枚举值不得翻译。返回完整的 JSON 对象，不要只返回修改片段或解释。"
                 )
                 payload["validation_error"] = error
                 payload["invalid_previous_output"] = text[-12000:]

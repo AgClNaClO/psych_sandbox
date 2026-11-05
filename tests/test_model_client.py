@@ -442,6 +442,89 @@ def test_api_gateway_retries_with_invalid_output_and_writes_diagnostic(tmp_path)
     assert diagnostic["raw_response"] == invalid
 
 
+def _structured_output_regressions():
+    """Synthetic versions of the seven observed failures; no private dialogue."""
+    from psychsandbox.domain import CounselorActorOutput, CounselorPlanning
+    from psychsandbox.runtime.memory_pipeline import _SessionSummaryWrapper
+
+    planning = CounselorPlanning(
+        reasoning_summary="依据公开对话规划", current_goal="澄清当前感受",
+        plan_steps=["开放询问"], action="lookup_skills",
+        selected_meta_skill_ids=["psychagent:cbt:meta:17"],
+        selection_evidence=[{
+            "skill_id": "psychagent:cbt:meta:17", "evidence_quote": "我想聊聊",
+            "reason": "来访者愿意探索",
+        }],
+    ).model_dump(mode="json")
+    actor = CounselorActorOutput.model_validate({
+        "decision": {"assessment": "有探索意愿", "state_observation": "愿意交流", "strategy": "开放询问"},
+        "response": "你想先从哪里聊起？",
+    }).model_dump(mode="json")
+    summary = _SessionSummaryWrapper.model_validate({
+        "session_summary": {"session_index": 2, "goal_assessment": {"completion_status": "部分完成"}},
+    }).model_dump(mode="json")
+
+    for field in ["completion_status_note", "objective_notes"]:
+        invalid = json.loads(json.dumps(summary))
+        invalid["session_summary"]["goal_assessment"][field] = ""
+        yield pytest.param("summarizer", _SessionSummaryWrapper, json.dumps(invalid), summary,
+                           field, id=f"summary-extra-{field}")
+    yield pytest.param("summarizer", _SessionSummaryWrapper, json.dumps(summary) + "}", summary,
+                       "Extra data", id="summary-extra-brace")
+    missing_response = {key: value for key, value in actor.items() if key != "response"}
+    yield pytest.param("counselor", CounselorActorOutput, json.dumps(missing_response), actor,
+                       "response", id="actor-missing-response")
+    malformed = json.dumps(planning, ensure_ascii=False).replace('"reason": "来访者愿意探索"}', '"reason": "来访者愿意探索"')
+    yield pytest.param("counselor", CounselorPlanning, malformed, planning,
+                       "delimiter", id="planner-unclosed-evidence")
+    yield pytest.param("counselor", CounselorPlanning, json.dumps({"type": "json_object", **planning}), planning,
+                       "extra_forbidden", id="planner-extra-type")
+    translated = {"决策": {"评估": "有探索意愿", "状态观察": "愿意交流", "策略": "开放询问"},
+                  "回应": actor["response"], "查询评估": "不需要", "查询拒绝原因": ""}
+    yield pytest.param("counselor", CounselorActorOutput, json.dumps(translated), actor,
+                       "Field required", id="actor-translated-keys")
+
+
+@pytest.mark.parametrize("role,schema,invalid,valid,error_fragment", list(_structured_output_regressions()))
+@pytest.mark.parametrize("repaired", [True, False], ids=["repair-succeeds", "repair-fails"])
+def test_structured_output_repair_keeps_strict_contract(
+    tmp_path, role, schema, invalid, valid, error_fragment, repaired,
+):
+    gateway, completions = _gateway(tmp_path, [invalid, json.dumps(valid) if repaired else invalid])
+    gateway.json_schema_roles = set()
+    gateway.json_object_roles = {role}
+    payload = {"subject": "公开测试话语"}
+    call = gateway.complete_structured(
+        role=role, system_prompt="按公开证据完成任务。", input_payload=payload,
+        output_schema=schema, temperature=0.9 if role == "counselor" else 0,
+    )
+    if repaired:
+        assert asyncio.run(call).model_dump(mode="json") == valid
+    else:
+        with pytest.raises(ValueError, match=f"failed {schema.__name__}"):
+            asyncio.run(call)
+
+    assert payload == {"subject": "公开测试话语"}
+    assert len(completions.calls) == 2
+    first, second = completions.calls
+    assert first["response_format"] == {"type": "json_object"}
+    assert second["response_format"]["type"] == "json_schema"
+    assert second["temperature"] == first["temperature"]
+    system_prompt = first["messages"][0]["content"]
+    assert system_prompt.startswith("按公开证据完成任务。")
+    assert "不得翻译成中文" in system_prompt
+    assert json.dumps(schema.model_json_schema()["required"], ensure_ascii=False) in system_prompt
+    assert "additionalProperties=false" in system_prompt
+    retry = json.loads(second["messages"][1]["content"])
+    assert retry["invalid_previous_output"] == invalid
+    assert error_fragment in retry["validation_error"]
+    assert "返回完整的 JSON 对象" in retry["repair_instruction"]
+    diagnostics = [json.loads(p.read_text(encoding="utf-8")) for p in gateway.diagnostic_dir.glob("*.json")]
+    assert len(diagnostics) == (1 if repaired else 2)
+    assert {record["attempt"] for record in diagnostics} == ({1} if repaired else {1, 2})
+    assert all(record["raw_response"] == invalid for record in diagnostics)
+
+
 class FailingTransport:
     """Always-failing ``client.chat.completions`` double."""
 

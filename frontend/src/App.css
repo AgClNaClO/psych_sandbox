@@ -1,184 +1,83 @@
-.counter {
-  font-size: 16px;
-  padding: 5px 10px;
-  border-radius: 5px;
-  color: var(--accent);
-  background: var(--accent-bg);
-  border: 2px solid transparent;
-  transition: border-color 0.3s;
-  margin-bottom: 24px;
-
-  &:hover {
-    border-color: var(--accent-border);
-  }
-  &:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
-  }
-}
-
-.hero {
-  position: relative;
-
-  .base,
-  .framework,
-  .vite {
-    inset-inline: 0;
-    margin: 0 auto;
-  }
-
-  .base {
-    width: 170px;
-    position: relative;
-    z-index: 0;
-  }
-
-  .framework,
-  .vite {
-    position: absolute;
-  }
-
-  .framework {
-    z-index: 1;
-    top: 34px;
-    height: 28px;
-    transform: perspective(2000px) rotateZ(300deg) rotateX(44deg) rotateY(39deg)
-      scale(1.4);
-  }
-
-  .vite {
-    z-index: 0;
-    top: 107px;
-    height: 26px;
-    width: auto;
-    transform: perspective(2000px) rotateZ(300deg) rotateX(40deg) rotateY(39deg)
-      scale(0.8);
-  }
-}
-
-#center {
+.app-shell {
   display: flex;
   flex-direction: column;
-  gap: 25px;
-  place-content: center;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+}
+.workbench-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  gap: 24px;
+  min-height: 76px;
+  padding: 12px 24px;
+  background: #101a2c;
+  border-bottom: 1px solid #243149;
+  color: #f8fafc;
+}
+.workbench-brand { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+.workbench-mark {
+  width: 40px;
+  height: 40px;
+  display: grid;
   place-items: center;
-  flex-grow: 1;
-
-  @media (max-width: 1024px) {
-    padding: 32px 20px 24px;
-    gap: 18px;
-  }
+  border-radius: 12px;
+  background: #3272e6;
+  box-shadow: inset 0 0 0 1px #ffffff20;
 }
-
-#next-steps {
-  display: flex;
-  border-top: 1px solid var(--border);
-  text-align: left;
-
-  & > div {
-    flex: 1 1 0;
-    padding: 32px;
-    @media (max-width: 1024px) {
-      padding: 24px 20px;
-    }
-  }
-
-  .icon {
-    margin-bottom: 16px;
-    width: 22px;
-    height: 22px;
-  }
-
-  @media (max-width: 1024px) {
-    flex-direction: column;
-    text-align: center;
-  }
-}
-
-#docs {
-  border-right: 1px solid var(--border);
-
-  @media (max-width: 1024px) {
-    border-right: none;
-    border-bottom: 1px solid var(--border);
-  }
-}
-
-#next-steps ul {
-  list-style: none;
-  padding: 0;
-  display: flex;
+.workbench-brand-name { display: flex; align-items: center; gap: 10px; font-size: 19px; font-weight: 700; letter-spacing: -.4px; }
+.workbench-brand-name > span { font-size: 10px; font-weight: 400; letter-spacing: .4px; padding: 3px 7px; border: 1px solid #35425a; border-radius: 5px; color: #aebbd0; }
+.workbench-brand-description { color: #8d9bb2; font-size: 10px; margin-top: 3px; letter-spacing: .4px; }
+.workbench-nav { display: flex; gap: 4px; padding: 5px; background: #0a1323; border: 1px solid #29354b; border-radius: 11px; }
+.workbench-nav-item {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   gap: 8px;
-  margin: 32px 0 0;
-
-  .logo {
-    height: 18px;
-  }
-
-  a {
-    color: var(--text-h);
-    font-size: 16px;
-    border-radius: 6px;
-    background: var(--social-bg);
-    display: flex;
-    padding: 6px 12px;
-    align-items: center;
-    gap: 8px;
-    text-decoration: none;
-    transition: box-shadow 0.3s;
-
-    &:hover {
-      box-shadow: var(--shadow);
-    }
-    .button-icon {
-      height: 18px;
-      width: 18px;
-    }
-  }
-
-  @media (max-width: 1024px) {
-    margin-top: 20px;
-    flex-wrap: wrap;
-    justify-content: center;
-
-    li {
-      flex: 1 1 calc(50% - 8px);
-    }
-
-    a {
-      width: 100%;
-      justify-content: center;
-      box-sizing: border-box;
-    }
-  }
+  min-height: 37px;
+  padding: 8px 15px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #a0aec3;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .15s, color .15s;
 }
-
-#spacer {
-  height: 88px;
-  border-top: 1px solid var(--border);
-  @media (max-width: 1024px) {
-    height: 48px;
-  }
+.workbench-nav-item:hover { background: #1c2c46; color: #fff; }
+.workbench-nav-item.active { background: #2d65d9; color: #fff; box-shadow: 0 2px 5px #0002; }
+.workbench-header-tools { display: flex; align-items: center; gap: 18px; flex-shrink: 0; }
+.view-switch { display: flex; gap: 3px; padding: 4px; border: 1px solid #2c3950; border-radius: 8px; }
+.view-switch button { display: flex; align-items: center; gap: 5px; padding: 5px 8px; font-size: 11px; white-space: nowrap; border: 0; border-radius: 5px; color: #a0aec3; background: transparent; cursor: pointer; }
+.view-switch button.active { color: #d9e8ff; background: #2a3a54; }
+.connection-status { display: flex; align-items: center; gap: 7px; font-size: 11px; color: #a0aec3; white-space: nowrap; }
+.connection-status > span:first-child { width: 6px; height: 6px; border-radius: 50%; background: #8997ab; }
+.connection-status.connected { color: #8fdbb2; }
+.connection-status.connected > span:first-child { background: #53cf8e; box-shadow: 0 0 0 4px #53cf8e15; }
+.workbench-main { flex: 1; min-height: 0; overflow: hidden; }
+@media (max-width: 1350px) {
+  .workbench-header { gap: 16px; padding-inline: 18px; }
+  .workbench-brand-name > span, .connection-status > span:last-child { display: none; }
+  .workbench-nav-item { padding-inline: 12px; }
+  .workbench-header-tools { gap: 12px; }
 }
-
-.ticks {
-  position: relative;
-  width: 100%;
-
-  &::before,
-  &::after {
-    content: '';
-    position: absolute;
-    top: -4.5px;
-    border: 5px solid transparent;
-  }
-
-  &::before {
-    left: 0;
-    border-left-color: var(--border);
-  }
-  &::after {
-    right: 0;
-    border-right-color: var(--border);
-  }
+@media (max-width: 1050px) {
+  .workbench-header { flex-wrap: wrap; gap: 12px; }
+  .workbench-nav { order: 3; flex: 1 0 100%; }
+  .workbench-nav-item { flex: 1; }
+  .connection-status > span:last-child { display: inline; }
+}
+@media (max-width: 540px) {
+  .workbench-header { padding: 12px; gap: 10px; }
+  .workbench-mark { width: 34px; height: 34px; border-radius: 9px; }
+  .workbench-brand { gap: 8px; }
+  .workbench-brand-name { font-size: 16px; }
+  .workbench-brand-description, .connection-status { display: none; }
+  .view-switch button { font-size: 10px; padding: 5px; }
+  .workbench-nav { padding: 3px; gap: 2px; }
+  .workbench-nav-item { font-size: 11px; gap: 5px; padding: 7px 4px; }
+  .workbench-nav-item svg { width: 14px; }
 }

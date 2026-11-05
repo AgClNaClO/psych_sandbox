@@ -488,6 +488,8 @@ logprob 额外借鉴线性表征论文式8及质量门，仅采用评分方法�
 
 普通结构化请求有受限修复与诊断；先检查MODEL_STRUCTURED_OUTPUT、模型能力和本次diagnostics。logprob路径不做文本修复，非法JSON或不完整条目会明确失败，不能靠删除条目后取平均继续评分。
 
+普通请求会在系统提示中列明顶层允许/必需字段，要求嵌套键名和枚举值保持 schema 原样、补全必需字段并正确闭合 JSON。首轮校验失败后，携带原输出与错误做一次完整对象修复，保留原温度和失败诊断；咨询师规划、执行与会后摘要仍须通过严格 schema 校验，不自动删除未知字段或翻译键名。
+
 ### 端点有普通聊天能力，却不能进行 logprob 评分
 
 普通结构化输出与位置logprobs是不同能力。运行probe检查完整条目分布；不支持时用--no-logprob-scoring或YAML enabled:false明确选离散路径，不会自动回退。开启前读取 [方法限制](notes/logprob_scoring_borrowing.md)。

@@ -8,13 +8,18 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Generator
+from typing import Generator, TypeVar
 from contextlib import contextmanager
 
 from ..domain import utc_now
 
 DEFAULT_WORKBENCH_DB = Path("runs/runtime/workbench.sqlite3")
+_BUSY_TIMEOUT_MS = 5000
+_INIT_ATTEMPTS = 3
+_T = TypeVar("_T")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS job_skill_snapshots (
@@ -230,19 +235,50 @@ def get_db_path(explicit_path: Path | str | None = None) -> Path:
     return DEFAULT_WORKBENCH_DB
 
 
+def _retry_busy(operation: Callable[[], _T]) -> _T:
+    """Retry idempotent initialization only; never replay application writes."""
+    for attempt in range(_INIT_ATTEMPTS):
+        try:
+            return operation()
+        except sqlite3.OperationalError as exc:
+            code = getattr(exc, "sqlite_errorcode", None)
+            busy = (
+                code & 0xFF in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+                if code is not None else str(exc).startswith((
+                    "database is locked", "database table is locked",
+                    "database schema is locked",
+                ))
+            )
+            if not busy or attempt == _INIT_ATTEMPTS - 1:
+                raise
+            # WAL promotion can fail immediately even with a busy handler.
+            time.sleep(0.1 * (attempt + 1))
+    raise RuntimeError("database initialization retry loop ended without a result")
+
+
 def get_connection(db_path: Path | str | None = None) -> sqlite3.Connection:
     target = get_db_path(db_path)
     target.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(
         target,
-        timeout=10.0,
+        timeout=_BUSY_TIMEOUT_MS / 1000,
         isolation_level=None,  # 自动事务管理配合显式 BEGIN IMMEDIATE
     )
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode = WAL;")
-    conn.execute("PRAGMA busy_timeout = 5000;")
-    conn.execute("PRAGMA synchronous = NORMAL;")
-    return conn
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS};")
+
+        def configure() -> None:
+            mode = conn.execute("PRAGMA journal_mode;").fetchone()[0]
+            if mode.lower() != "wal":
+                conn.execute("PRAGMA journal_mode = WAL;").fetchone()
+            conn.execute("PRAGMA synchronous = NORMAL;")
+
+        _retry_busy(configure)
+        return conn
+    except BaseException:
+        conn.close()
+        raise
 
 
 @contextmanager
@@ -263,6 +299,8 @@ def db_transaction(conn: sqlite3.Connection) -> Generator[sqlite3.Cursor, None, 
 def init_db(db_path: Path | str | None = None) -> None:
     conn = get_connection(db_path)
     try:
-        conn.executescript(SCHEMA)
+        # Every statement uses IF NOT EXISTS, so a partially applied schema
+        # can be retried when the API and both workers start together.
+        _retry_busy(lambda: conn.executescript(SCHEMA))
     finally:
         conn.close()
