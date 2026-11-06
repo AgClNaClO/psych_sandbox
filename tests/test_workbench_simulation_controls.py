@@ -2,11 +2,14 @@
 import pytest
 from fastapi.testclient import TestClient
 
+from psychsandbox.artifacts import find_run_dir, write_json
 from psychsandbox.domain import CounselorActorOutput, SandboxConfig
+from psychsandbox.runtime import CounselingSandbox
 from psychsandbox.runtime.storage import SQLiteStore
 from psychsandbox.workbench.api import create_app
 from psychsandbox.workbench.db import get_connection, init_db
 from psychsandbox.workbench.models import SimulationJobPayload
+from psychsandbox.workbench.projections import get_run_detail
 from psychsandbox.workbench.worker import WorkbenchWorker
 from tests.deterministic_gateway import DeterministicGateway, DISABLED_LOGPROB_SCORING
 
@@ -71,6 +74,7 @@ async def test_web_controls_change_real_sessions_and_publish_html(root, tmp_path
         assert report.status_code == 200
         assert '<html' in report.text
         assert any(run['run_id'] == job.run_id and run['has_html_report'] for run in client.get('/api/runs').json())
+        assert client.get(f'/api/runs/{job.run_id}').json()['requested_sessions'] == 2
         # A fresh page can find the completed job and replay persisted progress.
         assert client.get('/api/jobs?lane=long').json()[0]['job_id'] == job.job_id
         events = worker.event_hub.get_events(f'job:{job.job_id}')
@@ -97,3 +101,82 @@ async def test_web_controls_change_real_sessions_and_publish_html(root, tmp_path
         await worker._execute_job(claimed)
         assert worker.job_manager.get_job(job.job_id).status == 'succeeded'
         assert report_file.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('rft', [False, True])
+async def test_failed_web_run_resumes_committed_boundary_with_original_settings(root, tmp_path, monkeypatch, rft):
+    config = SandboxConfig(project_root=root, max_turns_per_session=4,
+        logprob_scoring=DISABLED_LOGPROB_SCORING,
+        database_path=tmp_path / 'sim.sqlite3', trace_dir=tmp_path / 'traces')
+    monkeypatch.setattr('psychsandbox.workbench.worker.default_config', lambda: config)
+    wb = str(tmp_path / 'workbench.sqlite3')
+    init_db(wb)
+    worker = WorkbenchWorker('long', wb, gateway_factory=DiverseGateway)
+    app = create_app(db_path=wb, sim_db_path=config.database_path, trace_dir=config.trace_dir,
+                     frontend_dir=tmp_path / 'no-frontend')
+    original_run_case = CounselingSandbox.run_case
+
+    async def fail_at_second_session(self, **kwargs):
+        callback = kwargs['progress_callback']
+
+        def progress(message):
+            callback(message)
+            if message == 'Session 2/2 开始':
+                raise RuntimeError('Interrupted before second session')
+
+        return await original_run_case(self, **{**kwargs, 'progress_callback': progress})
+
+    with TestClient(app) as client:
+        with monkeypatch.context() as patch:
+            patch.setattr(CounselingSandbox, 'run_case', fail_at_second_session)
+            response = client.post('/api/jobs', json={'kind': 'simulation', 'max_attempts': 1, 'payload': {
+                'case_id': 'psycheval-cbt-001', 'session_count': 2, 'seed': 0,
+                'max_turns_per_session': 3, 'session_turn_limits': [1, 2],
+                'rft': {'enabled': rft, 'candidates': 2},
+            }})
+            assert response.status_code == 200, response.text
+            await worker._execute_job(worker.job_manager.claim_job('long', worker.worker_id))
+        failed = worker.job_manager.get_job(response.json()['job_id'])
+        assert failed.status == 'failed', failed.error
+        detail = client.get(f'/api/runs/{failed.run_id}').json()
+        assert detail['status'] == 'failed'
+        assert detail['requested_sessions'] == 2
+        assert len(detail['sessions']) == 1
+        original_session = detail['sessions'][0]
+        # Resume must be independent of the new-experiment form and changed YAML defaults.
+        config.max_turns_per_session = 5
+        config.rft.enabled = not rft
+        resumed = client.post('/api/jobs', json={'kind': 'simulation', 'payload': {
+            'resume_run_id': detail['run_id'], 'case_id': detail['case_id'],
+            'therapy': detail['therapy'], 'seed': detail['seed'],
+            'session_count': detail['requested_sessions'],
+        }})
+        assert resumed.status_code == 200, resumed.text
+        await worker._execute_job(worker.job_manager.claim_job('long', worker.worker_id))
+        finished = worker.job_manager.get_job(resumed.json()['job_id'])
+        assert finished.status == 'succeeded', finished.error
+        assert finished.run_id == failed.run_id
+        restored = client.get(f'/api/runs/{finished.run_id}').json()
+        assert restored['sessions'][0] == original_session
+        assert [len(session['turns']) for session in restored['sessions']] == [1, 2]
+        assert restored['config']['rft']['enabled'] == rft
+        assert restored['config']['max_turns_per_session'] == 3
+        assert restored['config']['session_turn_limits'] == [1, 2]
+        assert restored['seed'] == 0
+        assert len(client.get('/api/runs').json()) == 1
+
+
+@pytest.mark.parametrize('total', [None, True, 0, 101, '7'])
+def test_run_detail_without_valid_recovery_metadata_stays_readable(tmp_path, total):
+    store = SQLiteStore(tmp_path / 'sim.sqlite3')
+    store.start_run('run-metadata', 'case', 'cbt', 'api', 42, {})
+    directory = tmp_path / 'traces' / 'saved__run-metadata'
+    directory.mkdir(parents=True)
+    write_json(directory / 'run.json', {'run_id': 'run-metadata', 'requested_sessions': total})
+    try:
+        assert get_run_detail(store, tmp_path / 'traces', 'run-metadata').requested_sessions is None
+        find_run_dir(tmp_path / 'traces', 'run-metadata').joinpath('run.json').unlink()
+        assert get_run_detail(store, tmp_path / 'traces', 'run-metadata').requested_sessions is None
+    finally:
+        store.close()

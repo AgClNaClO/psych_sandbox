@@ -9,6 +9,7 @@ import type {
   JobItem,
   RunDetail,
   RunSummary,
+  SimulationJobPayload,
   SkillProposal,
   SkillRelease,
   TherapyDefinition,
@@ -58,22 +59,14 @@ export const api = {
   getCases: () => request<CaseSummary[]>('/cases'),
   getRuns: () => request<RunSummary[]>('/runs'),
   getRunDetail: (runId: string) => request<RunDetail>(`/runs/${runId}`),
-  createSimulationJob: (payload: {
-    case_id: string;
-    therapy?: string;
-    session_count?: number;
-    seed?: number;
-    resume_run_id?: string;
-    max_turns_per_session?: number;
-    session_turn_limits?: number[];
-    rft?: { enabled: boolean; candidates: number };
-  }) =>
+  createSimulationJob: (payload: SimulationJobPayload) =>
     request<JobItem>('/jobs', {
       method: 'POST',
       body: JSON.stringify({
         kind: 'simulation',
         lane: 'long',
         payload,
+        run_id: payload.resume_run_id,
       }),
     }),
   getSimulationDefaults: () => request<{ max_turns_per_session: number; rft: { enabled: boolean; candidates: number } }>('/simulation-defaults'),

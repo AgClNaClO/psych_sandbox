@@ -22,6 +22,17 @@ test('version conflicts retain HTTP status and busy conflicts are not retried', 
   assert.equal(isVersionConflict(new ApiError(400, 'Version conflict')), false);
 });
 
+test('a queued resume job is bound to the original run before a worker claims it', async () => {
+  let body: Record<string, unknown> | undefined;
+  globalThis.fetch = async (_url, options) => {
+    body = JSON.parse(String(options?.body));
+    return new Response('{}');
+  };
+  const payload = { case_id: 'original-case', session_count: 7, seed: 0, resume_run_id: 'run-original' };
+  await api.createSimulationJob(payload);
+  assert.deepEqual(body, { kind: 'simulation', lane: 'long', run_id: 'run-original', payload });
+});
+
 test('SSE handles stopped/cancelled jobs, deduplicates replay, and reports reconnection', () => {
   class FakeEventSource {
     static current: FakeEventSource;

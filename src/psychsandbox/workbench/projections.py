@@ -316,6 +316,17 @@ def get_run_detail(
         if "api_key" in config_dict:
             config_dict["api_key"] = "***"
 
+        # The requested total belongs to this invocation, not config.session_count
+        # (which can still contain the YAML default). Missing artifacts stay readable.
+        requested_sessions = None
+        try:
+            metadata = json.loads((find_run_dir(trace_dir, run_id) / "run.json").read_text(encoding="utf-8"))
+            total = metadata.get("requested_sessions")
+            if metadata.get("run_id") == run_id and type(total) is int and 1 <= total <= 100:
+                requested_sessions = total
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+
         return RunDetailProjection(
             run_id=run_id,
             case_id=run_row["case_id"],
@@ -326,6 +337,7 @@ def get_run_detail(
             created_at=run_row["created_at"],
             completed_at=run_row["completed_at"],
             sessions=sessions_data,
+            requested_sessions=requested_sessions,
             holistic_report=holistic_report,
             rft_batches=rft_batches,
             config=config_dict,

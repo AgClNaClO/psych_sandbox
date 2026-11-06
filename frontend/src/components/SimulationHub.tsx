@@ -7,6 +7,7 @@ import {
   Terminal, ShieldCheck, BookOpen, Brain, X, Check, Circle,
 } from 'lucide-react';
 import { getReplayMessages } from '../utils/replay';
+import { getSessionResumePayload } from '../utils/simulation';
 import './SimulationHub.css';
 
 const therapyNames: Record<string, string> = {
@@ -60,13 +61,17 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
   // 运行参数
   const [selectedCaseId, setSelectedCaseId] = useState<string>('');
   const [therapyFilter, setTherapyFilter] = useState<string>('all');
-  const [sessionCount, setSessionCount] = useState<number>(3);
-  const [seed, setSeed] = useState<number>(42);
-  const [maxTurns, setMaxTurns] = useState(20);
+  // Keep drafts as text so clearing a field or typing 0 does not rewrite it.
+  // The form validates required integer ranges before creating a new job.
+  const [sessionCount, setSessionCount] = useState('3');
+  const [seed, setSeed] = useState('42');
+  const [maxTurns, setMaxTurns] = useState('20');
   const [individualLimits, setIndividualLimits] = useState(false);
-  const [turnLimits, setTurnLimits] = useState<number[]>([]);
+  const [turnLimits, setTurnLimits] = useState<string[]>([]);
   const [rftEnabled, setRftEnabled] = useState(false);
-  const [candidates, setCandidates] = useState(3);
+  const [candidates, setCandidates] = useState('3');
+  const sessionFieldCount = Number.isInteger(Number(sessionCount))
+    ? Math.min(100, Math.max(0, Number(sessionCount))) : 0;
   const [defaultsReady, setDefaultsReady] = useState(false);
   const [jobs, setJobs] = useState<JobItem[]>([]);
   const [connected, setConnected] = useState(false);
@@ -89,9 +94,9 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
     let cancelled = false;
     api.getSimulationDefaults().then((data) => {
       if (cancelled) return;
-      setMaxTurns(data.max_turns_per_session);
+      setMaxTurns(String(data.max_turns_per_session));
       setRftEnabled(data.rft.enabled);
-      setCandidates(data.rft.candidates);
+      setCandidates(String(data.rft.candidates));
       setDefaultsReady(true);
     }).catch((error: Error) => { if (!cancelled) setErrorMsg(error.message); });
     api.getCases().then((data) => {
@@ -195,28 +200,27 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
     return unsub;
   }, [activeJobId, fetchRuns]);
 
-  const handleStartSimulation = async (resumeId?: string) => {
+  const handleStartSimulation = async (resumeRun?: RunDetail) => {
+    if (loading || observerMode || jobs.some((job) => ['queued', 'running'].includes(job.status))) return;
+    const resumePayload = resumeRun ? getSessionResumePayload(resumeRun) : null;
+    if (resumeRun && !resumePayload) return;
     try {
       setLoading(true);
       setErrorMsg(null);
       setLiveLogs([]);
-      const resumeRun = resumeId ? runs.find((run) => run.run_id === resumeId) : undefined;
-      const job = await api.createSimulationJob({
-        case_id: resumeRun?.case_id ?? selectedCaseId,
-        therapy: resumeRun?.therapy,
-        session_count: sessionCount,
-        seed: resumeRun?.seed ?? seed,
-        resume_run_id: resumeId,
-        ...(!resumeId ? {
-          max_turns_per_session: maxTurns,
-          session_turn_limits: individualLimits ? Array.from({ length: sessionCount }, (_, i) => turnLimits[i] ?? maxTurns) : undefined,
-          rft: { enabled: rftEnabled, candidates },
-        } : {}),
+      const job = await api.createSimulationJob(resumePayload ?? {
+        case_id: selectedCaseId,
+        session_count: Number(sessionCount),
+        seed: Number(seed),
+        max_turns_per_session: Number(maxTurns),
+        session_turn_limits: individualLimits
+          ? Array.from({ length: Number(sessionCount) }, (_, i) => Number(turnLimits[i] ?? maxTurns)) : undefined,
+        rft: { enabled: rftEnabled, ...(rftEnabled ? { candidates: Number(candidates) } : {}) },
       });
       setConfigOpen(false);
       setJobs((prev) => [job, ...prev]);
-      setSelectedRunId(job.run_id ?? null);
-      setSelectedRunDetail(null);
+      setSelectedRunId(job.run_id ?? resumeRun?.run_id ?? null);
+      setSelectedRunDetail(resumeRun ?? null);
       setActiveJobId(job.job_id);
       setLiveLogs([`任务已提交至后台 Long Lane (ID: ${job.job_id})...`]);
     } catch (err: any) {
@@ -269,6 +273,9 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
 
   const runSummary = runs.find((run) => run.run_id === selectedRunId);
   const displayedRun = selectedRunDetail?.run_id === selectedRunId ? selectedRunDetail : null;
+  const showResume = displayedRun && ['stopped', 'failed'].includes(displayedRun.status);
+  const resumePayload = displayedRun ? getSessionResumePayload(displayedRun) : null;
+  const simulationBusy = jobs.some((job) => job.status === 'queued' || job.status === 'running');
   const runCase = cases.find((item) => item.case_id === (displayedRun?.case_id ?? runSummary?.case_id));
   const filteredCases = cases.filter((item) => therapyFilter === 'all' || normalizeTherapy(item.therapy) === therapyFilter);
   const report = displayedRun?.holistic_report;
@@ -294,7 +301,10 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
           <button className="icon-button config-close" aria-label="关闭实验配置" onClick={() => setConfigOpen(false)}><X size={17} /></button>
         </div>
         <div className="column-body sim-sidebar-body">
-          <section className="sim-config" aria-label="新建仿真实验">
+          <form className="sim-config" aria-label="新建仿真实验" onSubmit={(event) => {
+            event.preventDefault();
+            void handleStartSimulation();
+          }}>
             <div className="sim-config-fields">
               <div className="sim-field therapy-filter-field">
                 <div className="field-label-row"><label htmlFor="therapy-filter">案例库</label><span>{cases.length} 个案例</span></div>
@@ -325,29 +335,29 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
               <div className="sim-field-grid">
                 <div className="sim-field">
                   <label htmlFor="session-count">会谈次数</label>
-                  <input id="session-count" type="number" min={1} max={100} value={sessionCount}
-                    onChange={(event) => setSessionCount(Math.min(100, Math.max(1, parseInt(event.target.value) || 1)))} />
+                  <input id="session-count" type="number" required min={1} max={100} step={1} value={sessionCount}
+                    onChange={(event) => setSessionCount(event.target.value)} />
                 </div>
                 <div className="sim-field">
                   <label htmlFor="simulation-seed">随机种子</label>
-                  <input id="simulation-seed" type="number" value={seed} onChange={(event) => setSeed(parseInt(event.target.value) || 0)} />
+                  <input id="simulation-seed" type="number" required step={1} value={seed} onChange={(event) => setSeed(event.target.value)} />
                 </div>
               </div>
               <div className="sim-field">
                 <div className="field-label-row"><label htmlFor="max-turns">每场轮数上限</label><span>1–50 轮</span></div>
-                <input id="max-turns" aria-label="每场轮数上限" type="number" min={1} max={50} value={maxTurns}
-                  onChange={(event) => setMaxTurns(Math.min(50, Math.max(1, parseInt(event.target.value) || 1)))} />
+                <input id="max-turns" aria-label="每场轮数上限" type="number" required min={1} max={50} step={1} value={maxTurns}
+                  onChange={(event) => setMaxTurns(event.target.value)} />
                 <p className="field-help">咨询师可根据会谈进展提前结束。</p>
               </div>
               <label className="check-field">
                 <input type="checkbox" checked={individualLimits} onChange={(event) => setIndividualLimits(event.target.checked)} />逐场设置轮数上限
               </label>
               {individualLimits && <div className="session-limit-list">
-                {Array.from({ length: sessionCount }, (_, index) => <label key={index}>第 {index + 1} 场
-                  <input aria-label={`第${index + 1}场轮数上限`} type="number" min={1} max={50} value={turnLimits[index] ?? maxTurns}
+                {Array.from({ length: sessionFieldCount }, (_, index) => <label key={index}>第 {index + 1} 场
+                  <input aria-label={`第${index + 1}场轮数上限`} type="number" required min={1} max={50} step={1} value={turnLimits[index] ?? maxTurns}
                     onChange={(event) => setTurnLimits((previous) => {
                       const next = [...previous];
-                      next[index] = Math.min(50, Math.max(1, parseInt(event.target.value) || 1));
+                      next[index] = event.target.value;
                       return next;
                     })} />
                 </label>)}
@@ -358,20 +368,19 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
                 </label>
                 {rftEnabled && <>
                   <div className="rft-candidates"><label htmlFor="rft-candidates">每场候选数</label>
-                    <input id="rft-candidates" aria-label="RFT候选数" type="number" min={2} max={32} value={candidates}
-                      onChange={(event) => setCandidates(Math.min(32, Math.max(2, parseInt(event.target.value) || 2)))} />
+                    <input id="rft-candidates" aria-label="RFT候选数" type="number" required min={2} max={32} step={1} value={candidates}
+                      onChange={(event) => setCandidates(event.target.value)} />
                   </div>
                   <p className="field-help">候选评分选优会增加 API 费用与耗时。</p>
                 </>}
               </div>
             </div>
-            <button className="btn btn-primary start-simulation" disabled={loading || observerMode || jobRunning || !defaultsReady || !selectedCaseId}
-              onClick={() => handleStartSimulation()}>
+            <button type="submit" className="btn btn-primary start-simulation" disabled={loading || observerMode || simulationBusy || !defaultsReady || !selectedCaseId}>
               {loading ? <RotateCcw size={15} className="animate-spin" /> : <Play size={15} />}
-              {observerMode ? '观察者模式' : loading ? '正在提交…' : jobRunning ? '实验进行中' : '启动后台实验'}
+              {observerMode ? '观察者模式' : loading ? '正在提交…' : simulationBusy ? '实验进行中' : '启动后台实验'}
             </button>
             {errorMsg && <div className="sim-error" role="alert">{errorMsg}</div>}
-          </section>
+          </form>
 
           <section className="sim-history" aria-label="历史运行记录">
             <div className="section-label"><History size={15} /><h3>历史运行</h3><span className="count-badge">{runs.length}</span>
@@ -409,13 +418,20 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
           </div>
           <div className="replay-actions">
             <button className="btn btn-secondary config-toggle" aria-controls="simulation-config" aria-expanded={configOpen} onClick={() => { setConfigOpen(true); setInspectorOpen(false); }}><Settings2 size={14} />实验配置</button>
-            {displayedRun?.status === 'stopped' && <button className="btn btn-secondary" onClick={() => handleStartSimulation(selectedRunId!)}
-              disabled={loading || observerMode || jobRunning} title="沿用原实验的轮数上限与 RFT 配置"><RotateCcw size={13} />边界续跑</button>}
+            {showResume && <button className="btn btn-secondary resume-simulation" onClick={() => handleStartSimulation(displayedRun)}
+              disabled={loading || observerMode || simulationBusy || !resumePayload}
+              title="从最后已提交的会谈边界恢复，沿用原实验配置"><RotateCcw size={13} />从会谈边界续跑</button>}
             <button className="btn btn-secondary" onClick={handleStopAtBoundary} disabled={!jobRunning || observerMode} title="在下一会谈开始前停止"><Square size={13} />边界停止</button>
             <button className="btn btn-quiet-danger" onClick={handleCancelJob} disabled={!jobRunning || observerMode}><XCircle size={14} />取消任务</button>
             {displayedRun && runSummary?.has_html_report && <a href={`/api/runs/${displayedRun.run_id}/report`} target="_blank" rel="noreferrer" className="btn btn-secondary report-link"><FileText size={14} />查看报告</a>}
             <button className="btn btn-secondary inspector-toggle" aria-controls="simulation-inspector" aria-expanded={inspectorOpen} onClick={() => { setInspectorOpen(!inspectorOpen); setConfigOpen(false); }}><PanelRightOpen size={14} />分析与督导</button>
           </div>
+          {showResume && <p className="resume-caption" role="status">
+            {resumePayload
+              ? `已提交 ${displayedRun.sessions.length}/${resumePayload.session_count} 场；${displayedRun.sessions.length < resumePayload.session_count
+                ? `从第 ${displayedRun.sessions.length + 1} 场恢复` : '重试会后评估'}，沿用原实验配置。`
+              : '原运行目录或恢复信息不完整，或疗程已关闭，无法从会谈边界续跑。'}
+          </p>}
         </header>
 
         {displayedRun && displayedRun.sessions.length > 0 && <div className="session-navigation">

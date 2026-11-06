@@ -82,9 +82,21 @@ export interface RunDetail {
   created_at: string;
   completed_at: string | null;
   sessions: ProjectedSession[];
+  requested_sessions?: number | null;
   holistic_report?: any;
   rft_batches?: any[];
   config: Record<string, any>;
+}
+
+export interface SimulationJobPayload {
+  case_id: string;
+  therapy?: string;
+  session_count?: number;
+  seed?: number;
+  resume_run_id?: string;
+  max_turns_per_session?: number;
+  session_turn_limits?: number[];
+  rft?: { enabled: boolean; candidates?: number };
 }
 
 export interface JobItem {

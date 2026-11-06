@@ -401,6 +401,7 @@ class RunDetailProjection(BaseModel):
     created_at: str
     completed_at: str | None = None
     sessions: list[dict[str, Any]] = Field(default_factory=list)
+    requested_sessions: int | None = None
     holistic_report: dict[str, Any] | None = None
     rft_batches: list[dict[str, Any]] = Field(default_factory=list)
     config: dict[str, Any] = Field(default_factory=dict)

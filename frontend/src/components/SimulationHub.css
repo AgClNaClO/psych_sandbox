@@ -109,6 +109,8 @@
 .btn-quiet-danger:hover:not(:disabled) { background: #fff1f1; border-color: #e4aaaa; }
 .replay-actions a { text-decoration: none; }
 .replay-actions .report-link { color: #3568c6; background: #f5f8ff; border-color: #d6e2f8; }
+.replay-actions .resume-simulation { color: #3267d3; background: #edf3ff; border-color: #d8e5ff; }
+.resume-caption { flex-basis: 100%; font-size: 11px; color: #71819a; line-height: 1.7; }
 .session-navigation { display: flex; align-items: center; gap: 12px; padding: 10px 20px; border-bottom: 1px solid #e8edf5; background: #fff; flex-shrink: 0; }
 .session-tabs { display: flex; flex: 1; gap: 6px; min-width: 0; overflow-x: auto; padding: 3px 2px 5px; }
 .session-tab { display: inline-flex; align-items: center; gap: 7px; flex-shrink: 0; padding: 7px 11px; font-size: 12px; border: 1px solid transparent; border-radius: 7px; color: #7b899f; background: transparent; cursor: pointer; white-space: nowrap; }
