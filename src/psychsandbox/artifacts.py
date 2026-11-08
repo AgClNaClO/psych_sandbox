@@ -91,7 +91,17 @@ def write_json(path: Path, value: dict) -> None:
     # Keep atomic-write names short enough for nested Windows run directories.
     temporary = path.with_name(f".tmp-{uuid.uuid4().hex[:16]}")
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    # Windows readers/indexers may briefly deny replacement of an existing
+    # checkpoint. Preserve atomicity; never delete the destination first.
+    import time
+    for attempt in range(5):
+        try:
+            temporary.replace(path)
+            break
+        except PermissionError as exc:
+            if getattr(exc, 'winerror', None) not in {5, 32, 33} or attempt == 4:
+                raise
+            time.sleep(0.05 * (2 ** attempt))
 
 
 @contextmanager

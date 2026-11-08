@@ -76,6 +76,10 @@ class SQLiteStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(self.path)
         self.connection.row_factory = sqlite3.Row
+        # Some hosts hand the process an unwritable TEMP. SQLite then fails to
+        # spill sorts such as `ORDER BY session_index` with "unable to open
+        # database file", so keep temp tables in memory instead.
+        self.connection.execute("PRAGMA temp_store=MEMORY")
         self.connection.executescript(SCHEMA)
         self.connection.commit()
 

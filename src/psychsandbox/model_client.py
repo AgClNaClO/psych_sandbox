@@ -364,6 +364,14 @@ class OpenAICompatibleGateway(ModelGateway):
             output_schema_name=output_schema.__name__,
             call=lambda: self.client.chat.completions.create(**request),
         )
+        usage = getattr(result, "usage", None)
+        _request_meta.set({
+            **(_request_meta.get() or {}),
+            **({"finish_reason": result.choices[0].finish_reason}
+               if hasattr(result.choices[0], "finish_reason") else {}),
+            **({"usage": {name: getattr(usage, name, None) for name in
+                      ("prompt_tokens", "completion_tokens", "total_tokens")}} if usage is not None else {}),
+        })
         return result.choices[0].message.content or ""
 
     async def _create_logprob_completion(
@@ -500,6 +508,8 @@ class OpenAICompatibleGateway(ModelGateway):
                     "上次输出未通过 JSON 解析或 schema 校验。请根据错误修复上次输出，"
                     "保留符合 schema 的内容，修正语法、错误键名、缺失必需字段和多余字段；"
                     "字段名和枚举值不得翻译。返回完整的 JSON 对象，不要只返回修改片段或解释。"
+                    "保持简洁，每项信息只写一次，禁止重复扩写或复制长段对话；"
+                    "修复输出长度不得超过上次输出，必须预留空间闭合 JSON。"
                 )
                 payload["validation_error"] = error
                 payload["invalid_previous_output"] = text[-12000:]
@@ -514,6 +524,23 @@ class OpenAICompatibleGateway(ModelGateway):
             try:
                 return output_schema.model_validate(json.loads(_strip_fence(text)))
             except Exception as exc:
+                # Only this observed empty extension is semantically inert.
+                # Unknown keys with content (or at other paths) still fail.
+                if output_schema.__name__ == "_SessionSummaryWrapper":
+                    try:
+                        value = json.loads(_strip_fence(text))
+                        assessment = value["session_summary"]["goal_assessment"]
+                        if assessment.get("engagement_assessment") == "":
+                            del assessment["engagement_assessment"]
+                            repaired = output_schema.model_validate(value)
+                            self._write_invalid_output(
+                                role=role, output_schema=output_schema, attempt=attempt + 1,
+                                error="local_repair: removed empty session_summary.goal_assessment.engagement_assessment",
+                                text=text,
+                            )
+                            return repaired
+                    except (ValueError, KeyError, TypeError, AttributeError):
+                        pass
                 error = str(exc)
                 self._write_invalid_output(
                     role=role,

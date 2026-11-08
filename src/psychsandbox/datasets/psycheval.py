@@ -32,6 +32,7 @@ from .profile_compiler import (
     AtomicSpan,
     PsychEvalProfileCompiler,
 )
+from ..evidence_text import has_semantic_content
 
 
 PSYCHEVAL_REPOSITORY = "https://github.com/ECNU-ICALK/PsychEval.git"
@@ -1359,6 +1360,13 @@ class CaseRepository:
                             "Processed case is not a strict schema-v4 profile."
                         )
                     case = CounselingCase.model_validate(payload)
+                    if any(not has_semantic_content(n.source_text) for n in case.profile.evidence_nodes) or any(
+                        not has_semantic_content(d.content) for d in case.profile.disclosure_items
+                    ):
+                        raise RuntimeError(
+                            "Processed case contains punctuation-only evidence; run explicit "
+                            "scripts/clean_punctuation_evidence.py --apply or data convert."
+                        )
                     loaded[case.case_id] = case
         if len(loaded) != 341:
             raise RuntimeError(

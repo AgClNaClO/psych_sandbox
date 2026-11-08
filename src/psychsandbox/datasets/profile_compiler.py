@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from typing import Any, Iterable
+from ..evidence_text import has_semantic_content
 
 from ..domain import (
     CCRT,
@@ -206,8 +207,8 @@ class PsychEvalProfileCompiler:
                     )
                 )
 
-        nodes = _deduplicate_nodes(nodes)
-        disclosures = _deduplicate_disclosures(disclosures)
+        nodes = _deduplicate_nodes([n for n in nodes if has_semantic_content(n.source_text)])
+        disclosures = _deduplicate_disclosures([d for d in disclosures if has_semantic_content(d.content)])
         disclosures = _apply_disclosure_policy(disclosures, nodes)
         formulation = _build_five_ps(info, therapy_code, nodes)
         interaction = _build_interaction_prior(info, therapy_code, nodes)

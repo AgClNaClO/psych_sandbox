@@ -1,4 +1,5 @@
 from __future__ import annotations
+from ..evidence_text import has_semantic_content
 
 from ..domain import (
     CounselingCase,
@@ -50,7 +51,7 @@ class SessionSafetyGate:
         ]
         leaked: list[str] = []
         for fact in case.profile.disclosure_items:
-            if fact.item_id in allowed_before or not fact.content:
+            if fact.item_id in allowed_before or not has_semantic_content(fact.content):
                 continue
             disclosure_turns = [
                 item.turn_index

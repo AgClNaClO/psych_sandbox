@@ -17,6 +17,7 @@ from ..domain import (
     RolloutSelection, SessionMemory, SessionPlan, SessionRecord,
 )
 from ..evaluation.rollout import SessionRolloutEvaluator, compute_rollout_reward
+from ..evaluation.safety_gate import SessionSafetyGate
 from ..model_client import model_diagnostic_scope
 from .progress import ScoringProgress
 from .safety import SafetyStateMachine
@@ -158,6 +159,40 @@ class SessionRolloutRunner:
         generate: GenerateSession, notify: Callable[[str], None],
         judge_progress: JudgeProgress | None = None,
     ) -> tuple[SessionRecord, SessionMemory]:
+        # A selected batch is a durable boundary before winner consolidation.
+        # Reuse only a matching input; never recover a rejected/partial branch.
+        baseline = selected_reward(previous)
+        for saved in reversed(self.store.load_rollout_batches(run_id)):
+            if saved.session_index != plan.session_index or saved.status != "selected":
+                continue
+            directory = self.run_dir / "rollouts" / f"s{plan.session_index:03d}__{saved.batch_id}"
+            checkpoint = json.loads((directory / "input.json").read_text(encoding="utf-8"))
+            expected = {
+                "plan": plan.model_dump(mode="json"),
+                "memory_before": memory.model_dump(mode="json"),
+                "initial_state": state.model_dump(mode="json"),
+                "config": self.config.model_dump(mode="json"),
+                "baseline_reward": baseline.model_dump(mode="json") if baseline else None,
+            }
+            if any(checkpoint.get(k) != v for k, v in expected.items()):
+                raise ValueError("Selected checkpoint input changed; start a new run")
+            if checkpoint.get("case") is not None and checkpoint["case"] != case.model_dump(mode="json"):
+                raise ValueError("Selected checkpoint case changed; start a new run")
+            records = self.store.load_rollout_candidates(saved.batch_id)
+            payload = next((p for p in records if p['summary']['index'] == saved.winner_index), None)
+            if payload is None or payload['summary']['status'] != 'selected':
+                raise ValueError("Selected checkpoint winner is missing")
+            session = SessionRecord.model_validate(payload['session'])
+            if session.session_index != plan.session_index:
+                raise ValueError("Selected checkpoint session mismatch")
+            if has_saved_rollout_risk(self.store, self.run_dir, run_id):
+                raise ValueError("Selected checkpoint contains immediate risk")
+            session.safety_verdict = SessionSafetyGate().evaluate(session, case, memory)
+            if not session.safety_verdict.passed:
+                raise ValueError("Selected checkpoint no longer passes safety gate")
+            session.rollout_selection = saved.model_copy(deep=True)
+            notify(f"Session {plan.session_index}: 恢复已选候选 {saved.winner_index}，继续会后整合")
+            return session, SessionMemory.model_validate(payload['memory_after_dialogue'])
         batch_id = f"batch-{uuid.uuid4().hex[:12]}"
         directory = self.run_dir / "rollouts" / f"s{plan.session_index:03d}__{batch_id}"
         directory.mkdir(parents=True)
@@ -197,6 +232,7 @@ class SessionRolloutRunner:
             return candidate
 
         write_json(directory / "input.json", {
+            "case": case.model_dump(mode="json"),
             "plan": plan.model_dump(mode="json"), "memory_before": memory.model_dump(mode="json"),
             "initial_state": state.model_dump(mode="json"), "config": self.config.model_dump(mode="json"),
             "baseline_reward": baseline.model_dump(mode="json") if baseline else None,
@@ -346,12 +382,14 @@ class SessionRolloutRunner:
                     if candidate.summary.status != "generated":
                         continue
                     session = candidate.session
+                    session.safety_verdict = SessionSafetyGate().evaluate(session, case, memory)
                     if (
-                        session.end_reason == "safety_output_block"
+                        not session.safety_verdict.passed
+                        or session.end_reason == "safety_output_block"
                         or any(r.get("client_leakage", {}).get("exposed_to_counselor") for r in session.turn_records)
                     ):
                         candidate.summary.status = "rejected"
-                        candidate.summary.reason = "规则安全或披露检查未通过"
+                        candidate.summary.reason = "规则安全或披露检查未通过：" + "；".join(session.safety_verdict.reasons)
                     elif candidate.summary.dialogue_hash in seen:
                         candidate.summary.status = "duplicate"
                         candidate.summary.duplicate_of = seen[candidate.summary.dialogue_hash]

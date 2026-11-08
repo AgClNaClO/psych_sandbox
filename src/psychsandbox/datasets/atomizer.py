@@ -10,6 +10,7 @@ from pydantic import Field
 
 from ..domain.models import StrictModel, TrustTier
 from ..model_client import ModelGateway
+from ..evidence_text import has_semantic_content
 from .profile_compiler import ATOMIZER_PROMPT_VERSION, AtomicSpan
 
 
@@ -213,6 +214,8 @@ class ExtractiveAtomizer:
                 )
             uncovered.append(source[previous_end:start])
             previous_end = end
+            if not has_semantic_content(item.text):
+                continue
             result.append(
                 AtomicSpan(
                     start=start,
