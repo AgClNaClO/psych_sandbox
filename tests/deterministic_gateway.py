@@ -56,10 +56,14 @@ class DeterministicGateway(ModelGateway):
         temperature: float,
     ) -> BaseModel:
         del role, system_prompt, temperature
+        if output_schema in (CounselorPlanning, CounselorActorOutput):
+            dialogue = input_payload["dialogue"]
+            latest = dialogue[-1] if dialogue else {}
+            latest_text = latest["content"] if latest.get("role") == "client" else ""
         if output_schema is CounselorPlanning:
             meta = (
                 input_payload.get("meta_skill_catalog", [])[:1]
-                if input_payload.get("client_message", "").strip()
+                if latest_text.strip()
                 else []
             )
             meta_ids = [item["meta_skill_id"] for item in meta]
@@ -75,7 +79,7 @@ class DeterministicGateway(ModelGateway):
                 selected_meta_skill_ids=meta_ids,
                 selection_evidence=[SkillSelectionEvidence(
                     skill_id=skill_id,
-                    evidence_quote=input_payload["client_message"][:160],
+                    evidence_quote=latest_text[:160],
                     reason="离线测试：围绕来访者当前表达选择技能组。",
                 ) for skill_id in meta_ids],
                 action_input="查看所选元技能下的原子技能。",
@@ -94,7 +98,7 @@ class DeterministicGateway(ModelGateway):
                     selected_atomic_skill_ids=ids,
                     skill_evidence=[SkillSelectionEvidence(
                         skill_id=skill_id,
-                        evidence_quote=input_payload["client_message"][:160],
+                        evidence_quote=latest_text[:160],
                         reason="离线测试：将当前表达与候选技能核对。",
                     ) for skill_id in ids],
                     strategy="先共情和澄清，再用一个开放问题推进。",
@@ -366,7 +370,6 @@ def _merged_client_profile(payload: dict[str, Any]) -> dict[str, Any]:
 def _clinical_summary(payload: dict[str, Any]) -> dict[str, Any]:
     session_index = int(payload.get("session_index", 1))
     session_focus = payload.get("session_focus", {})
-    checklist = payload.get("session_checklist", {})
     objectives = "; ".join(session_focus.get("objective", []))
     return {
         "session_index": session_index,
@@ -388,11 +391,6 @@ def _clinical_summary(payload: dict[str, Any]) -> dict[str, Any]:
             "target_behavior": "",
         },
         "homework": [],
-        "important_information": checklist.get("important_information", []),
-        "important_methods": checklist.get("important_methods", []),
-        "important_results": checklist.get("important_results", []),
-        "completed_items": checklist.get("completed_items", []),
-        "pending_items": checklist.get("pending_items", []),
     }
 
 

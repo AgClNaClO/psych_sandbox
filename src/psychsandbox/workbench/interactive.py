@@ -41,7 +41,6 @@ from ..domain import (
     Message,
     RiskAssessment,
     RiskLevel,
-    SessionChecklist,
     SessionMemory,
     SessionPlan,
     SessionRecord,
@@ -51,7 +50,7 @@ from ..domain import (
 )
 from ..therapies import get_therapy_profile, normalize_therapy_id
 from ..runtime.planning import PlanBuilder
-from ..runtime.memory import MemoryConsolidator, merge_session_checklist
+from ..runtime.memory import MemoryConsolidator
 from ..evaluation.longitudinal import LongitudinalEvaluator
 from ..runtime.memory_pipeline import (
     memory_item_ledger,
@@ -819,7 +818,7 @@ class InteractiveRunner:
 
         try:
             if kind in ("message", "opening"):
-                await self._process_reply(course_id, session_index, operation_id, execution_token, is_opening=(kind == "opening"))
+                await self._process_reply(course_id, session_index, operation_id, execution_token)
             elif kind == "close_session":
                 await self._process_close(course_id, session_index, operation_id, execution_token)
         except Exception as exc:
@@ -850,7 +849,7 @@ class InteractiveRunner:
             raise
 
     async def _process_reply(
-        self, course_id: str, session_index: int, operation_id: str, execution_token: str, is_opening: bool
+        self, course_id: str, session_index: int, operation_id: str, execution_token: str
     ) -> None:
         conn = get_connection(self.db_path)
         try:
@@ -864,36 +863,25 @@ class InteractiveRunner:
             memory = SessionMemory.model_validate_json(s_row["memory_before_json"])
 
             cur.execute(
-                "SELECT * FROM course_messages WHERE course_id = ? AND session_index = ? ORDER BY created_at ASC",
+                "SELECT role, content, source FROM course_messages WHERE course_id = ? AND session_index = ? ORDER BY created_at ASC",
                 (course_id, session_index),
             )
-            msg_rows = cur.fetchall()
             dialogue = [
-                {"role": r["role"], "content": r["content"], "source": r["source"]}
-                for r in msg_rows
+                {
+                    "role": "client" if row["role"] == "participant" else row["role"],
+                    "content": row["content"],
+                    "source": row["source"],
+                }
+                for row in cur.fetchall()
             ]
-
-            last_user_msg = ""
-            if not is_opening:
-                user_msgs = [m for m in dialogue if m["role"] == "participant"]
-                if user_msgs:
-                    last_user_msg = user_msgs[-1]["content"]
-
             counselor_turns_count = sum(1 for m in dialogue if m["role"] == "counselor")
-            risk = self.safety.assess_input(last_user_msg)
-
-            checklist = SessionChecklist()
-            for row in msg_rows:
-                if row["role"] == "counselor":
-                    checklist = SessionChecklist.model_validate(json.loads(row["metadata_json"]).get("session_checklist", checklist.model_dump()))
-            counselor_dialogue = [{**m, "role": "client" if m["role"] == "participant" else m["role"]} for m in dialogue]
+            latest_text = dialogue[-1]["content"] if dialogue and dialogue[-1]["role"] == "client" else ""
+            risk = self.safety.assess_input(latest_text)
             # 调用 CounselorAgent
             turn: CounselorTurn = await self.counselor.respond(
                 memory=memory,
                 plan=plan,
-                client_message=last_user_msg,
-                recent_messages=counselor_dialogue[-8:],
-                session_checklist=checklist,
+                dialogue=dialogue,
                 risk=risk,
                 counselor_turn_count=counselor_turns_count,
             )
@@ -902,9 +890,7 @@ class InteractiveRunner:
             assessment = self.safety.assess_output(turn.response, risk)
             if assessment.categories:
                 raise ValueError("Counselor output failed safety checks: " + ", ".join(assessment.categories))
-            checklist = merge_session_checklist(checklist, turn.planning.checklist_update)
             metadata = {
-                "session_checklist": checklist.model_dump(mode="json"),
                 "planning": turn.planning.model_dump(mode="json"),
                 "decision": turn.decision.model_dump() if turn.decision else {},
                 "input_risk": risk.model_dump(mode="json"),
@@ -998,14 +984,11 @@ class InteractiveRunner:
                 for idx, r in enumerate(message_rows)
             ]
 
-            checklist = SessionChecklist()
             risks = []
             for row in message_rows:
                 metadata = json.loads(row["metadata_json"])
-                if row["role"] == "counselor":
-                    checklist = SessionChecklist.model_validate(metadata.get("session_checklist", checklist.model_dump()))
-                    if metadata.get("input_risk"):
-                        risks.append(RiskAssessment.model_validate(metadata["input_risk"]))
+                if row["role"] == "counselor" and metadata.get("input_risk"):
+                    risks.append(RiskAssessment.model_validate(metadata["input_risk"]))
             # 步骤 1: E.7 提取 (Extract)
             step1_out = await run_step(
                 course_id, session_index, "extract",
@@ -1030,7 +1013,7 @@ class InteractiveRunner:
             # 步骤 3: E.9 临床摘要 (Summary)
             step3_out = await run_step(
                 course_id, session_index, "summary",
-                lambda: self.summarizer.summarize(session_index, dialogue_msgs, plan, [plan.therapy], checklist,
+                lambda: self.summarizer.summarize(session_index, dialogue_msgs, plan, [plan.therapy],
                     memory_items=memory_item_ledger(memory)),
             )
             clinical_summary: ClinicalSummary = (

@@ -125,10 +125,9 @@ def test_release_overlay_changes_catalog_and_rollback_restores_it(wb, root):
 
 
 @pytest.mark.asyncio
-async def test_interactive_passes_client_history_checklist_and_ledger(wb, monkeypatch):
-    from psychsandbox.domain import SessionChecklistUpdate
+async def test_interactive_passes_full_dialogue_and_preserves_close_ledger(wb, monkeypatch):
     manager = CourseManager(wb)
-    course = manager.create_course('cbt', 'Checklist')
+    course = manager.create_course('cbt', 'Dialogue')
     gateway = DeterministicGateway()
     counselor = CounselorAgent(gateway)
     runner = InteractiveRunner(counselor, gateway, wb)
@@ -137,21 +136,24 @@ async def test_interactive_passes_client_history_checklist_and_ledger(wb, monkey
 
     async def record_reply(**kwargs):
         calls.append(kwargs)
-        turn = await respond(**kwargs)
-        turn.planning.checklist_update = SessionChecklistUpdate(important_information=['Disclosed information'])
-        return turn
+        return await respond(**kwargs)
 
     monkeypatch.setattr(counselor, 'respond', record_reply)
-    for index in range(2):
+    for index in range(5):
         _, op = manager.submit_user_message(course.course_id, 1, f'm{index}', f'o{index}',
-            manager.get_course(course.course_id).version, 'I need help sleeping')
+            manager.get_course(course.course_id).version, f'I need help with sleep issue {index}')
         await runner.execute_operation(course.course_id, op.operation_id)
-    assert calls[-1]['recent_messages'][0]['role'] == 'client'
-    assert calls[-1]['session_checklist'].important_information == ['Disclosed information']
+    session = manager.get_session_detail(course.course_id, 1)
+    expected = [('client' if message.role == 'participant' else 'counselor', message.content)
+                for message in session.messages]
+    assert len(calls[-1]['dialogue']) == 9
+    assert [(message['role'], message['content']) for message in calls[-1]['dialogue']] == expected[:-1]
+    assert not {'session_checklist', 'client_message', 'recent_messages'} & calls[-1].keys()
+    assert all('session_checklist' not in message.metadata for message in session.messages)
     summarize = runner.summarizer.summarize
 
     async def record_summary(*args, **kwargs):
-        assert args[4].important_information == ['Disclosed information']
+        assert [(message.role, message.content) for message in args[1]] == expected
         assert set(kwargs['memory_items']) == {'open_homework', 'open_topics', 'pending_verification'}
         return await summarize(*args, **kwargs)
 

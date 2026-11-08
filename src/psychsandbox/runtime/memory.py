@@ -11,8 +11,6 @@ from ..domain import (
     OpenItem,
     RecapRisk,
     RiskLevel,
-    SessionChecklist,
-    SessionChecklistUpdate,
     SessionMemory,
     SessionPlan,
     SessionRecap,
@@ -58,26 +56,6 @@ def _grounded(evidence: str, dialogue: str) -> bool:
 
     normalized = _normalized(evidence)
     return len(normalized) >= 2 and normalized in _normalized(dialogue)
-
-
-def merge_session_checklist(
-    current: SessionChecklist,
-    update: SessionChecklistUpdate,
-) -> SessionChecklist:
-    """Apply one model-selected delta without allowing earlier entries to vanish."""
-
-    resolved = {item.strip() for item in update.resolved_pending_items if item.strip()}
-    pending = [item for item in current.pending_items if item not in resolved]
-    pending.extend(update.pending_items)
-    return SessionChecklist(
-        completed_items=_unique(current.completed_items + update.completed_items),
-        important_information=_unique(
-            current.important_information + update.important_information
-        ),
-        important_methods=_unique(current.important_methods + update.important_methods),
-        important_results=_unique(current.important_results + update.important_results),
-        pending_items=_unique(pending),
-    )
 
 
 def _supervisor_feedback(session: SessionRecord) -> list[str]:

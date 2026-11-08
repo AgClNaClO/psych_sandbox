@@ -38,8 +38,6 @@ from psychsandbox.domain import (
     TrustChange,
     TrustTier,
     SessionMemory,
-    SessionChecklist,
-    SessionChecklistUpdate,
     SessionStage,
     SkillSelectionConfig,
     SkillSelectionEvidence,
@@ -49,7 +47,6 @@ from psychsandbox.domain import (
 from tests.deterministic_gateway import DeterministicGateway
 from psychsandbox.runtime import DisclosureGate, StateUpdater
 from psychsandbox.runtime.leakage import PrematureDisclosureGuard
-from psychsandbox.runtime.memory import merge_session_checklist
 from psychsandbox.runtime.memory_pipeline import _prevent_global_backfill
 from psychsandbox.skills import SkillCatalog, SkillRegistry
 from psychsandbox.skills.selection import SkillCandidateFilter
@@ -244,8 +241,7 @@ def test_counselor_payload_has_no_full_profile(sample_case):
     payload = CounselorAgent(DeterministicGateway()).build_context_payload(
         memory=memory,
         plan=sample_case.global_plan[0],
-        client_message="你好",
-        recent_messages=[],
+        dialogue=[{"role": "client", "content": "你好"}],
         risk=RiskAssessment(level=RiskLevel.LOW),
         counselor_turn_count=0,
     )
@@ -260,30 +256,7 @@ def test_counselor_payload_has_no_full_profile(sample_case):
         assert fact.content not in dumped
 
 
-def test_session_checklist_merges_model_updates_without_losing_prior_items():
-    current = SessionChecklist(
-        important_information=["来访者希望称呼为明山"],
-        pending_items=["确认当前压力强度", "讨论睡眠影响"],
-    )
-
-    updated = merge_session_checklist(
-        current,
-        SessionChecklistUpdate(
-            completed_items=["确认当前压力强度"],
-            important_methods=["使用0-10分量表评估压力"],
-            important_results=["压力强度为8分"],
-            resolved_pending_items=["确认当前压力强度"],
-        ),
-    )
-
-    assert updated.important_information == ["来访者希望称呼为明山"]
-    assert updated.completed_items == ["确认当前压力强度"]
-    assert updated.important_methods == ["使用0-10分量表评估压力"]
-    assert updated.important_results == ["压力强度为8分"]
-    assert updated.pending_items == ["讨论睡眠影响"]
-
-
-def test_counselor_payload_carries_checklist_and_four_field_memory(sample_case):
+def test_counselor_payload_carries_four_field_memory(sample_case):
     clinical_summaries = [
         ClinicalSummary(
             session_index=index,
@@ -307,20 +280,15 @@ def test_counselor_payload_carries_checklist_and_four_field_memory(sample_case):
         "unresolved_topics": ["复核睡眠安排"],
         "last_client_closing": "我愿意试试看",
     })
-    checklist = SessionChecklist(pending_items=["确认希望的称呼"])
-
     payload = CounselorAgent(DeterministicGateway()).build_context_payload(
         memory=memory,
         plan=sample_case.global_plan[0],
-        client_message="你好",
-        recent_messages=[],
+        dialogue=[],
         risk=RiskAssessment(level=RiskLevel.LOW),
         counselor_turn_count=0,
-        session_checklist=checklist,
     )
 
     view = payload["session_memory"]
-    assert payload["session_checklist"] == checklist.model_dump(mode="json")
     assert payload["known_background"]["client_id"] == sample_case.profile.client_id
     assert [item["summary"] for item in view["session_recaps"]] == [
         f"摘要{index}" for index in range(1, 5)
@@ -399,8 +367,7 @@ def test_counselor_uses_plan_then_react_observation(root, sample_case):
     ).respond(
         memory=memory,
         plan=sample_case.global_plan[0],
-        client_message="我很焦虑",
-        recent_messages=[],
+        dialogue=[{"role": "client", "content": "我很焦虑"}],
         risk=RiskAssessment(level=RiskLevel.LOW),
         counselor_turn_count=0,
     ))
@@ -421,8 +388,7 @@ def test_high_risk_counselor_routes_to_safety(sample_case):
     result = asyncio.run(CounselorAgent(DeterministicGateway()).respond(
         memory=memory,
         plan=sample_case.global_plan[0],
-        client_message="我想自杀",
-        recent_messages=[],
+        dialogue=[{"role": "client", "content": "我想自杀"}],
         risk=RiskAssessment(level=RiskLevel.HIGH),
         counselor_turn_count=0,
     ))
@@ -495,8 +461,9 @@ def _run_skill_query(gateway, catalog, sample_case, config=None):
                     client_id=sample_case.profile.client_id
                 ),
             ),
-        plan=sample_case.global_plan[0], client_message="我很焦虑，想谈谈具体的困扰",
-        recent_messages=[], risk=RiskAssessment(level=RiskLevel.LOW), counselor_turn_count=0,
+        plan=sample_case.global_plan[0],
+        dialogue=[{"role": "client", "content": "我很焦虑，想谈谈具体的困扰"}],
+        risk=RiskAssessment(level=RiskLevel.LOW), counselor_turn_count=0,
     ))
 
 

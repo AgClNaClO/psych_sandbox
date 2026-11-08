@@ -18,6 +18,9 @@ if not exist "%PY%" (
 
 if not exist "%~dp0runs\runtime" mkdir "%~dp0runs\runtime"
 
+"%PY%" -B -c "from psychsandbox.workbench.db import init_db; init_db()"
+if errorlevel 1 exit /b 1
+
 echo [PsychSandbox] Starting Scientific Workbench...
 echo.
 
@@ -27,11 +30,11 @@ start "PsychSandbox-Worker-Long" /b "%PY%" -m psychsandbox.workbench.worker --la
 echo [2/3] Starting background short-lane worker...
 start "PsychSandbox-Worker-Short" /b "%PY%" -m psychsandbox.workbench.worker --lane short > "%~dp0runs\runtime\worker_short.log" 2>&1
 
-echo [3/3] Starting Web server on http://127.0.0.1:8000 ...
+echo [3/3] Starting Web server on http://127.0.0.1:8001 ...
 echo ====================================================================
 echo   PsychSandbox Scientific Workbench is running!
-echo   Open in browser: http://127.0.0.1:8000
+echo   Open in browser: http://127.0.0.1:8001
 echo   To stop all workbench processes: run stop_workbench.bat
 echo ====================================================================
 
-"%PY%" -m psychsandbox.workbench.server --host 127.0.0.1 --port 8000
+"%PY%" -m psychsandbox.workbench.server --host 127.0.0.1 --port 8001

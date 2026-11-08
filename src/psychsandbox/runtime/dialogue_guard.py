@@ -82,24 +82,22 @@ class DialogueLoopGuard:
         "如果你愿意，我只做一件事——陪你把刚才那句话说得更完整一点。"
     )
 
-    def inspect(
-        self,
-        client_message: str,
-        recent_messages: list[dict],
-    ) -> BoundarySignal:
+    def inspect(self, dialogue: list[dict]) -> BoundarySignal:
+        if not dialogue or dialogue[-1].get("role") != "client":
+            return BoundarySignal(detected=False)
+        current_text = str(dialogue[-1].get("content", ""))
         evidence = tuple(
-            phrase for phrase in BOUNDARY_PHRASES if phrase in client_message
+            phrase for phrase in BOUNDARY_PHRASES if phrase in current_text
         )
         if not evidence:
             return BoundarySignal(detected=False)
-        history = _trim_current_client_message(client_message, recent_messages)
         prior_boundaries = sum(
             message.get("role") == "client"
             and any(
                 phrase in str(message.get("content", ""))
                 for phrase in BOUNDARY_PHRASES
             )
-            for message in history
+            for message in dialogue[:-1]
         )
         return BoundarySignal(
             detected=True,
@@ -123,8 +121,7 @@ class DialogueLoopGuard:
 
     def inspect_client_idling(
         self,
-        client_message: str,
-        recent_messages: list[dict],
+        dialogue: list[dict],
         recent_signals: Sequence[Any] = (),
     ) -> ClientIdleSignal:
         """Detect a client that has run out of content in the visible dialogue.
@@ -135,9 +132,11 @@ class DialogueLoopGuard:
         agree, after at least ``IDLE_MIN_CLIENT_TURNS`` observed client turns, so
         a single short answer never triggers a repair.
         """
-        window = _client_turn_contents(
-            client_message, recent_messages
-        )[-self.IDLE_WINDOW :]
+        window = [
+            str(message.get("content", ""))
+            for message in dialogue
+            if message.get("role") == "client"
+        ][-self.IDLE_WINDOW :]
         if len(window) < self.IDLE_MIN_CLIENT_TURNS:
             return ClientIdleSignal(detected=False, observed_client_turns=len(window))
 
@@ -185,19 +184,19 @@ class DialogueLoopGuard:
         return cls.IDLE_HANDOVER if repeated else cls.IDLE_REPAIR
 
     @classmethod
-    def has_idle_repair(cls, recent_messages: list[dict]) -> bool:
+    def has_idle_repair(cls, dialogue: list[dict]) -> bool:
         """Return True when an idle repair was already sent in this session."""
         known = {_normalize(cls.IDLE_REPAIR), _normalize(cls.IDLE_HANDOVER)}
         return any(
             message.get("role") == "counselor"
             and _normalize(str(message.get("content", ""))) in known
-            for message in recent_messages
+            for message in dialogue
         )
 
     @staticmethod
     def is_repeated_counselor_response(
         response: str,
-        recent_messages: list[dict],
+        dialogue: list[dict],
     ) -> bool:
         """Return True when the generated reply exactly repeats a recent reply."""
         normalized = _normalize(response)
@@ -205,7 +204,7 @@ class DialogueLoopGuard:
             return False
         recent_counselor_messages = [
             _normalize(str(message.get("content", "")))
-            for message in recent_messages
+            for message in dialogue
             if message.get("role") == "counselor"
         ][-4:]
         return normalized in recent_counselor_messages
@@ -220,31 +219,6 @@ class DialogueLoopGuard:
 
 def _normalize(value: str) -> str:
     return re.sub(r"[\W_]+", "", value.casefold(), flags=re.UNICODE)
-
-
-def _trim_current_client_message(
-    client_message: str, recent_messages: list[dict]
-) -> list[dict]:
-    """Drop the trailing copy of the current client message when it was passed in."""
-    if (
-        recent_messages
-        and recent_messages[-1].get("role") == "client"
-        and recent_messages[-1].get("content") == client_message
-    ):
-        return list(recent_messages[:-1])
-    return list(recent_messages)
-
-
-def _client_turn_contents(client_message: str, recent_messages: list[dict]) -> list[str]:
-    """Return client utterances in order, including the current one exactly once."""
-    history = _trim_current_client_message(client_message, recent_messages)
-    contents = [
-        str(message.get("content", ""))
-        for message in history
-        if message.get("role") == "client"
-    ]
-    contents.append(client_message)
-    return contents
 
 
 def _signal_behavior(signal: Any) -> str:

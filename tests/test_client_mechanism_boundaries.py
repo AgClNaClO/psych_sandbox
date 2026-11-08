@@ -243,7 +243,7 @@ def test_synthetic_traits_are_private_bounded_and_roundtrip(sample_case):
     assert all(value == 0 for value in ClientSimulationConfig(traits=simulation.traits).modifiers().values())
     context = CounselorAgent(RecordingGateway()).build_context_payload(
         memory=SessionMemory(case_id=sample_case.case_id, known_background=UnlockedClientInfo(client_id=profile.client_id)),
-        plan=sample_case.global_plan[0], client_message="Hello", recent_messages=[],
+        plan=sample_case.global_plan[0], dialogue=[{"role": "client", "content": "Hello"}],
         risk=RiskAssessment(level="low"), counselor_turn_count=1,
     )
     encoded = json.dumps(context)

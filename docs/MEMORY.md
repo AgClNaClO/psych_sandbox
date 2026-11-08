@@ -9,7 +9,7 @@
 | `known_background` | 结构化已知背景及带出处的 `facts` | 台词核验后累积事实，E.8 合并档案 |
 | `session_recaps` | 每个已完成会谈的一条回顾 | `MemoryConsolidator` 汇总 E.9、目标、状态、作业及风险记录 |
 | `last_homework` | 带 ID、状态、来源会谈和完成证据的作业 | 本场真实布置后加入，证据充分才退役 |
-| `checklist` | `per_session` 归档、开放项和待核实项 | 场内清单与 E.9 对账后归档 |
+| `checklist` | `per_session` 归档、开放项和待核实项 | 从 E.9 临床摘要归档并对账 |
 
 `case_id`、`migration_warnings` 是管理字段。历史十四键布局由模型迁移：背景并入 known_background，摘要/自评并入 recaps，作业和待办各归其位；旧 `between_session_context` 已删除。`completed_sessions`、`interventions_used`、`last_client_closing`、开放 `homework` 等是派生视图，不是新增存储抽屉。
 
@@ -18,18 +18,20 @@
 1. 用会前记忆执行规则安全/披露审计。
 2. E.7 从完整对话抽取信息，逐字段核验角色、轮次和原话；`language_features` 强制清空。
 3. E.8 将已核验提取并入历史档案，等值白名单阻止私有真相回填，程序设置事实及管理来源。
-4. E.9 根据对话、计划、末轮清单和开放事项 ID 生成临床摘要及 `item_updates`。
+4. E.9 根据本场完整对话、计划和跨会谈事项台账生成临床摘要及 `item_updates`。
 5. `MemoryConsolidator` 对账回顾、作业和事项；拒绝无证据的完成更新并留日志。
 6. 咨询师读取合并后的允许记忆，逐目标自评；纵向进度与自评形成阶段动作和下一计划。
 7. 保存会前记忆副本、轨迹及正式会谈，同步数据库与 JSONL。
 
 RFT 只有赢家执行该闭环；其他候选不会写入记忆。E.7/E.8/E.9 默认使用 `temperature.control=0`，这是采样设置调整，未改写字段或整合顺序。
 
-## 读取与场内清单
+## 读取本场对话与跨场记忆
 
-`MemoryViewBuilder` 支持 `full` 与 `recap_window`。两者都去掉管理字段、`safety_notes`、`relationship_events` 与语言特征；结构化风险摘要保留。窗口模式提供当前焦点、最近回顾及更早场次的一行摘要，并严格受字符预算约束；预算参数在 `memory_view` 配置中。
+自动仿真和人工会谈的 Planner 与 Actor 每轮通过 `dialogue` 读取按时间顺序排列的本场全部消息，开场时列表为空。已完成的询问或干预直接从对话中判断。
 
-`SessionChecklist` 包含已完成项、重要信息、方法、结果与待办。每轮仅追加或显式解除；下一场从空清单开始。作业历史留在 recaps，当前开放作业留在 last_homework。退役依赖本场对话中的完成证据，不能因模型漏提而消失。
+`MemoryViewBuilder` 为跨场记忆提供 `full` 与 `recap_window` 两种视图。两者都过滤 `migration_warnings`、`safety_notes`、`relationship_events` 和语言特征，保留结构化风险摘要。窗口模式提供当前焦点、最近回顾及较早场次的一行归档，并按字符预算裁剪历史回顾。`memory_view` 配置只影响跨场记忆。
+
+E.9 在会后从本场完整对话提取已完成项、重要信息、方法、结果和待办，再由 `MemoryConsolidator` 归档。作业历史留在 `session_recaps`，当前开放作业留在 `last_homework`。作业和待办根据本场完成证据退役。
 
 ## 维护与验证
 

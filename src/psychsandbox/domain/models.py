@@ -734,7 +734,7 @@ class HomeworkItem(StrictModel):
 
 
 class ChecklistRecord(StrictModel):
-    """The archived working-memory checklist of one finished session."""
+    """Items archived from one finished session's clinical summary."""
 
     session_index: int = Field(ge=1)
     completed_items: list[str] = Field(default_factory=list)
@@ -1156,27 +1156,6 @@ class CounselorDecision(StrictModel):
     end_session: bool = False
 
 
-class SessionChecklist(StrictModel):
-    """Model-maintained working memory that is scoped to one session."""
-
-    completed_items: list[str] = Field(default_factory=list)
-    important_information: list[str] = Field(default_factory=list)
-    important_methods: list[str] = Field(default_factory=list)
-    important_results: list[str] = Field(default_factory=list)
-    pending_items: list[str] = Field(default_factory=list)
-
-
-class SessionChecklistUpdate(StrictModel):
-    """Additive checklist changes selected by the counselor planner."""
-
-    completed_items: list[str] = Field(default_factory=list)
-    important_information: list[str] = Field(default_factory=list)
-    important_methods: list[str] = Field(default_factory=list)
-    important_results: list[str] = Field(default_factory=list)
-    pending_items: list[str] = Field(default_factory=list)
-    resolved_pending_items: list[str] = Field(default_factory=list)
-
-
 class CounselorPlanning(StrictModel):
     """Auditable planning summary; never a dump of private model reasoning."""
 
@@ -1187,9 +1166,6 @@ class CounselorPlanning(StrictModel):
     selected_meta_skill_ids: list[str] = Field(default_factory=list, max_length=3)
     action_input: str = ""
     selection_evidence: list[SkillSelectionEvidence] = Field(default_factory=list, max_length=3)
-    checklist_update: SessionChecklistUpdate = Field(
-        default_factory=SessionChecklistUpdate
-    )
 
 
 class CounselorObservation(StrictModel):

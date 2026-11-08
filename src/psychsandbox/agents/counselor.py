@@ -14,7 +14,6 @@ from ..domain import (
     MemoryViewConfig,
     RiskAssessment,
     RiskLevel,
-    SessionChecklist,
     SessionMemory,
     SessionPlan,
     SessionRecord,
@@ -68,11 +67,9 @@ class CounselorAgent:
         *,
         memory: SessionMemory,
         plan: SessionPlan,
-        client_message: str,
-        recent_messages: list[dict],
+        dialogue: list[dict],
         risk: RiskAssessment,
         counselor_turn_count: int,
-        session_checklist: SessionChecklist | None = None,
     ) -> dict:
         """Build the strict counselor view; a full ClientProfile never enters it."""
         therapy_profile = get_therapy_profile(plan.therapy)
@@ -97,14 +94,10 @@ class CounselorAgent:
                 ),
             },
             "session_memory": allowed_memory,
-            "session_checklist": (
-                session_checklist or SessionChecklist()
-            ).model_dump(mode="json"),
-            "client_message": client_message,
-            "recent_messages": recent_messages[-8:],
+            "dialogue": dialogue,
             "risk_level": risk.level.value,
             "counselor_turn_count": counselor_turn_count,
-            "session_opening": counselor_turn_count == 0 and not recent_messages,
+            "session_opening": counselor_turn_count == 0 and not dialogue,
         }
 
     async def respond(
@@ -112,16 +105,13 @@ class CounselorAgent:
         *,
         memory: SessionMemory,
         plan: SessionPlan,
-        client_message: str,
-        recent_messages: list[dict],
+        dialogue: list[dict],
         risk: RiskAssessment,
         counselor_turn_count: int,
-        session_checklist: SessionChecklist | None = None,
         recent_signals: list[ClientTurnSignal] | None = None,
     ) -> CounselorTurn:
         guarded = self._guarded_turn(
-            client_message=client_message,
-            recent_messages=recent_messages,
+            dialogue=dialogue,
             risk=risk,
             recent_signals=recent_signals or [],
         )
@@ -131,11 +121,9 @@ class CounselorAgent:
         context = self.build_context_payload(
             memory=memory,
             plan=plan,
-            client_message=client_message,
-            recent_messages=recent_messages,
+            dialogue=dialogue,
             risk=risk,
             counselor_turn_count=counselor_turn_count,
-            session_checklist=session_checklist,
         )
         planning, observation, candidates, warnings = await self._query_skills(
             context=context, plan=plan, risk=risk, excluded_meta_ids=set()
@@ -207,7 +195,7 @@ class CounselorAgent:
             turn.decision.end_session = True
         if self.dialogue_guard.is_repeated_counselor_response(
             turn.response,
-            recent_messages,
+            dialogue,
         ):
             turn.decision.strategy = (
                 f"{turn.decision.strategy} 检测到回复重复，暂停原追问并重新校准方向。"
@@ -326,11 +314,10 @@ class CounselorAgent:
 
     @classmethod
     def _evidence_sources(cls, context: dict) -> list[str]:
-        values = [context.get("client_message", "")]
-        values.extend(
-            message.get("content", "") for message in context.get("recent_messages", [])
+        values = [
+            message.get("content", "") for message in context["dialogue"]
             if message.get("role") == "client"
-        )
+        ]
         profile = context.get("known_background", {})
         for key in (
             "static_traits", "main_problem", "topic", "core_demands",
@@ -339,7 +326,6 @@ class CounselorAgent:
             values.extend(cls._strings(profile.get(key, {})))
         values.extend(fact.get("content", "") for fact in profile.get("facts", []))
         values.extend(cls._strings(context.get("session_memory", {})))
-        values.extend(cls._strings(context.get("session_checklist", {})))
         return [cls._normalize_text(item) for item in values if str(item).strip()]
 
     @classmethod
@@ -365,14 +351,18 @@ class CounselorAgent:
     def _vector_query(context: dict, planning: CounselorPlanning) -> str:
         memory = context.get("session_memory", {})
         recaps = memory.get("session_recaps", [])
+        dialogue = context["dialogue"]
+        latest = dialogue[-1] if dialogue else {}
         payload = {
-            "current_client_message": str(context.get("client_message", ""))[:2000],
+            "current_client_message": (
+                str(latest.get("content", ""))[:2000] if latest.get("role") == "client" else ""
+            ),
             "current_goal": planning.current_goal[:300],
             "selection_evidence": [item.evidence_quote for item in planning.selection_evidence],
             "session_objectives": [str(item)[:160] for item in context.get("objectives", [])[:4]],
             "recent_client_messages": [
                 str(item.get("content", ""))[:500]
-                for item in context.get("recent_messages", [])[-6:]
+                for item in dialogue[-6:]
                 if item.get("role") == "client"
             ],
             "recent_summary": [str(recaps[-1].get("summary", ""))[:500]] if recaps else [],
@@ -502,8 +492,7 @@ class CounselorAgent:
     def _guarded_turn(
         self,
         *,
-        client_message: str,
-        recent_messages: list[dict],
+        dialogue: list[dict],
         risk: RiskAssessment,
         recent_signals: list[ClientTurnSignal] | None = None,
     ) -> CounselorTurn | None:
@@ -527,7 +516,7 @@ class CounselorAgent:
                 response=_crisis_response(risk.level),
                 end_session=risk.level is RiskLevel.IMMINENT,
             )
-        boundary = self.dialogue_guard.inspect(client_message, recent_messages)
+        boundary = self.dialogue_guard.inspect(dialogue)
         if boundary.detected:
             return self._fixed_turn(
                 risk=risk,
@@ -541,12 +530,11 @@ class CounselorAgent:
                 response=self.dialogue_guard.counselor_response(boundary),
             )
         idle = self.dialogue_guard.inspect_client_idling(
-            client_message,
-            recent_messages,
+            dialogue,
             recent_signals or [],
         )
         if idle.detected:
-            repeated = self.dialogue_guard.has_idle_repair(recent_messages)
+            repeated = self.dialogue_guard.has_idle_repair(dialogue)
             return self._fixed_turn(
                 risk=risk,
                 assessment="来访者连续给出简短、重复或最小化的回应，对话内容出现空转。",

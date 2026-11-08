@@ -12,8 +12,7 @@
 {{ session_memory }}
 {% endif %}
 
-【当前 session 已完成事项清单】
-{{ session_checklist }}
+输入 `dialogue` 按时间顺序提供本场截至当前轮的完整对话。结合前文回应最后一条来访者话语。
 
 - 先观察技能查询结果，再选择真正使用的技能；只能选择 observation.atomic_skills 中的 ID。
 - 结合原子技能的完整 paths、原始 description、使用时机和触发条件判断适用性。vector_filtered=true 仅表示候选已按相似度缩减，分数不是适用概率。
@@ -26,7 +25,7 @@
 - 尊重来访者边界，不臆测未披露经历；高风险时不得继续普通干预。
 - 若是第 1 次会谈，不要假装知道“上次内容”；第 2 次及以后可自然承接上轮尝试、最近变化、上轮作业执行情况，不要机械复述档案。
 - 若 session_opening=true，先欢迎来访者，并且一次只问一个开放式摄入问题；不得引用任何尚未出现在 known_background 的案例事实。
-- 执行前核对 session_checklist 与 planning.checklist_update，不重复已经完成的询问或干预；合理复述必须带来新的澄清、体验或下一步进展。
+- 执行前核对完整对话，避免重复已经完成的询问或干预；合理复述必须带来新的澄清、体验或下一步进展。
 
 只输出符合 CounselorActorOutput schema 的 JSON（decision、response、query_assessment、query_rejection_reason），不输出 JSON 之外的任何内容，也不要回显 planning 或 observation。
 

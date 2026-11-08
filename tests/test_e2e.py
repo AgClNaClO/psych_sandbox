@@ -9,12 +9,12 @@ from pathlib import Path
 import pytest
 
 from psychsandbox.domain import (
+    ClientUtterance,
     CounselorPlanning,
     CounselorActorOutput,
     DialogueEvidence,
     HomeworkAssignment,
     SandboxConfig,
-    SessionChecklistUpdate,
     SkillStatus,
     SkillVersion,
     StaticTraits,
@@ -134,35 +134,21 @@ def test_e7_e8_e9_feed_counselor_review_before_next_session(root, tmp_path, repo
     assert len(persisted.session_recaps) == 2
 
 
-def test_session_checklist_is_local_then_archived_into_complete_memory(
-    root, tmp_path, repository
-):
-    class ChecklistGateway(DeterministicGateway):
+def test_counselor_reads_full_session_dialogue_and_e9_archives_it(root, tmp_path, repository):
+    class DialogueGateway(DeterministicGateway):
         def __init__(self):
-            self.planning_payloads: list[dict] = []
+            self.counselor_payloads: list[tuple[type, dict]] = []
             self.summary_payloads: list[dict] = []
 
         async def complete_structured(self, **kwargs):
             schema = kwargs["output_schema"]
             payload = kwargs["input_payload"]
+            if schema is ClientUtterance:
+                return ClientUtterance(utterance=f"第{payload['turn_index']}次练习时我注意到自己的反应。")
             result = await super().complete_structured(**kwargs)
-            if schema is CounselorPlanning:
-                self.planning_payloads.append(payload)
-                turn = int(payload["counselor_turn_count"])
-                update = (
-                    SessionChecklistUpdate(pending_items=["确认希望的称呼"])
-                    if turn == 0
-                    else SessionChecklistUpdate(
-                        completed_items=["确认希望的称呼"],
-                        important_information=["来访者希望称呼为明山"],
-                        important_methods=["使用开放式问题确认称呼"],
-                        important_results=["双方确认后续使用明山这一称呼"],
-                        pending_items=["讨论压力对睡眠的影响"],
-                        resolved_pending_items=["确认希望的称呼"],
-                    )
-                )
-                return result.model_copy(update={"checklist_update": update})
-            if schema is CounselorActorOutput:
+            if schema in (CounselorPlanning, CounselorActorOutput):
+                self.counselor_payloads.append((schema, payload))
+            if schema is CounselorActorOutput and payload["session_opening"]:
                 result.response += "这周请试着记录一次压力事件。"
             if schema.__name__ == "_SessionSummaryWrapper":
                 self.summary_payloads.append(payload)
@@ -172,61 +158,55 @@ def test_session_checklist_is_local_then_archived_into_complete_memory(
                         text="记录一次压力事件",
                         proposed_evidence=DialogueEvidence(turn_index=1, role="counselor", quote="这周请试着记录一次压力事件"),
                     )],
-                    "important_information": [],
-                    "important_methods": [],
-                    "important_results": [],
-                    "completed_items": [],
-                    "pending_items": [],
+                    "important_information": [payload["dialogue"][1]["content"]],
+                    "completed_items": ["了解来访者练习时的反应"],
+                    "pending_items": ["讨论压力对睡眠的影响"],
                 })
                 return result.model_copy(update={"session_summary": summary})
             return result
 
-    gateway = ChecklistGateway()
+    gateway = DialogueGateway()
     config = SandboxConfig(
         project_root=root,
-        max_turns_per_session=2,
+        max_turns_per_session=6,
         rft={"enabled": False},
         logprob_scoring=DISABLED_LOGPROB_SCORING,
-        database_path=tmp_path / "checklist.sqlite3",
-        trace_dir=tmp_path / "checklist-traces",
+        database_path=tmp_path / "dialogue.sqlite3",
+        trace_dir=tmp_path / "dialogue-traces",
     )
     sandbox = CounselingSandbox(config, gateway=gateway, repository=repository)
 
     result = asyncio.run(sandbox.run_case("psycheval-cbt-002", session_count=2))
 
-    first_session_payloads = [
-        item for item in gateway.planning_payloads if item["session_index"] == 1
-    ]
-    second_session_payloads = [
-        item for item in gateway.planning_payloads if item["session_index"] == 2
-    ]
-    assert first_session_payloads[0]["session_checklist"]["pending_items"] == []
-    assert first_session_payloads[1]["session_checklist"]["pending_items"] == [
-        "确认希望的称呼"
-    ]
-    assert all(
-        not values
-        for values in second_session_payloads[0]["session_checklist"].values()
-    )
+    obsolete = {"session_checklist", "client_message", "recent_messages"}
+    assert len(result.sessions) == len(gateway.summary_payloads) == 2
+    for session, summary_payload in zip(result.sessions, gateway.summary_payloads, strict=True):
+        messages = [message.model_dump(mode="json") for message in session.messages]
+        assert summary_payload["dialogue"] == messages
+        assert not obsolete & summary_payload.keys()
+        for schema in (CounselorPlanning, CounselorActorOutput):
+            calls = [payload for kind, payload in gateway.counselor_payloads
+                     if kind is schema and payload["session_index"] == session.session_index]
+            assert [len(payload["dialogue"]) for payload in calls] == [0, 2, 4, 6, 8, 10]
+            for turn, payload in enumerate(calls):
+                assert payload["dialogue"] == messages[:2 * turn]
+                assert not obsolete & payload.keys()
+        for record in session.turn_records:
+            assert "session_checklist" not in record
+            assert "checklist_update" not in record["planning"]
 
-    first_summary = gateway.summary_payloads[0]["session_checklist"]
-    assert first_summary["important_information"] == ["来访者希望称呼为明山"]
-    assert first_summary["important_methods"] == ["使用开放式问题确认称呼"]
-    assert first_summary["important_results"] == ["双方确认后续使用明山这一称呼"]
-    assert first_summary["completed_items"] == ["确认希望的称呼"]
-    assert first_summary["pending_items"] == ["讨论压力对睡眠的影响"]
-
+    first_client_text = result.sessions[0].messages[1].content
     archived = result.final_memory.checklist.per_session[0]
-    assert archived.important_information == ["来访者希望称呼为明山"]
-    assert archived.important_methods == ["使用开放式问题确认称呼"]
-    assert archived.important_results == ["双方确认后续使用明山这一称呼"]
-    assert archived.completed_items == ["确认希望的称呼"]
+    assert archived.important_information == [first_client_text]
+    assert archived.completed_items == ["了解来访者练习时的反应"]
     assert archived.pending_items == ["讨论压力对睡眠的影响"]
     assert "讨论压力对睡眠的影响" in result.final_memory.unresolved_topics
     assert "记录一次压力事件" in result.final_memory.homework
-    assert second_session_payloads[0]["session_memory"]["checklist"]["per_session"][0][
+    next_opening = next(payload for kind, payload in gateway.counselor_payloads
+                        if kind is CounselorPlanning and payload["session_index"] == 2)
+    assert next_opening["session_memory"]["checklist"]["per_session"][0][
         "important_information"
-    ] == ["来访者希望称呼为明山"]
+    ] == [first_client_text]
 
 
 def test_each_turn_has_safety_and_decision(sandbox):

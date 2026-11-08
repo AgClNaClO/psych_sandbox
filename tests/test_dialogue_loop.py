@@ -89,8 +89,7 @@ def test_counselor_respects_explicit_topic_boundary(sample_case):
         CounselorAgent(DeterministicGateway()).respond(
             memory=_memory_for(sample_case),
             plan=sample_case.global_plan[0],
-            client_message=client_message,
-            recent_messages=[{"role": "client", "content": client_message}],
+            dialogue=[{"role": "client", "content": client_message}],
             risk=RiskAssessment(level=RiskLevel.LOW),
             counselor_turn_count=1,
         )
@@ -106,8 +105,7 @@ def test_repeated_boundary_triggers_relationship_repair(sample_case):
         CounselorAgent(DeterministicGateway()).respond(
             memory=_memory_for(sample_case),
             plan=sample_case.global_plan[0],
-            client_message=client_message,
-            recent_messages=[
+            dialogue=[
                 {"role": "client", "content": client_message},
                 {"role": "counselor", "content": "这对你最直接的影响是什么？"},
                 {"role": "client", "content": client_message},
@@ -177,7 +175,7 @@ def test_repeated_minimal_client_turns_are_detected_as_idling():
         _client("没什么。"),
         _counselor("上周有没有变化？"),
     ]
-    signal = DialogueLoopGuard().inspect_client_idling("我不知道。", history)
+    signal = DialogueLoopGuard().inspect_client_idling([*history, _client("我不知道。")])
     assert signal.detected
     assert signal.observed_client_turns == 3
     assert IDLE_REASON_REPEATED_CONTENT in signal.reasons
@@ -193,18 +191,18 @@ def test_single_idling_cue_does_not_trigger_a_repair():
         _client("没什么。"),
         _counselor("周三呢？"),
     ]
-    signal = DialogueLoopGuard().inspect_client_idling("都行吧。", history)
+    signal = DialogueLoopGuard().inspect_client_idling([*history, _client("都行吧。")])
     assert signal.observed_client_turns == 3
     assert signal.reasons == (IDLE_REASON_WITHDRAWAL,)
     assert not signal.detected
     unrelated = DialogueLoopGuard().inspect_client_idling(
-        "周三去看了朋友。",
         [
             _counselor("最近怎么样？"),
             _client("我不知道。"),
             _counselor("那从最近的一天说起？"),
             _client("周一开了会。"),
             _counselor("会上发生了什么？"),
+            _client("周三去看了朋友。"),
         ],
     )
     assert unrelated.reasons == ()
@@ -225,17 +223,17 @@ def test_consecutive_simple_responses_alone_do_not_repair():
         _client("周二在家休息。"),
         _counselor("周三呢？"),
     ]
-    signal = guard.inspect_client_idling("周三去看了朋友。", history, signals)
+    signal = guard.inspect_client_idling([*history, _client("周三去看了朋友。")], signals)
     assert signal.reasons == (IDLE_REASON_SIMPLE_RESPONSE,)
     assert not signal.detected
     combined = guard.inspect_client_idling(
-        "都行吧。",
         [
             _counselor("周一发生了什么？"),
             _client("没什么。"),
             _counselor("周二呢？"),
             _client("我不知道。"),
             _counselor("周三呢？"),
+            _client("都行吧。"),
         ],
         signals,
     )
@@ -245,7 +243,7 @@ def test_consecutive_simple_responses_alone_do_not_repair():
 
 def test_idling_requires_enough_observed_client_turns():
     history = [_counselor("最近？"), _client("我不知道。")]
-    signal = DialogueLoopGuard().inspect_client_idling("没什么。", history)
+    signal = DialogueLoopGuard().inspect_client_idling([*history, _client("没什么。")])
     assert signal.observed_client_turns == 2
     assert not signal.detected
 
@@ -262,8 +260,7 @@ def test_idle_client_gets_a_direction_change_not_another_probe(sample_case):
         CounselorAgent(DeterministicGateway()).respond(
             memory=_memory_for(sample_case),
             plan=sample_case.global_plan[0],
-            client_message="我不知道。",
-            recent_messages=history,
+            dialogue=[*history, _client("我不知道。")],
             risk=RiskAssessment(level=RiskLevel.LOW),
             counselor_turn_count=3,
             recent_signals=[
@@ -290,8 +287,7 @@ def test_repeated_idle_repair_hands_the_direction_back(sample_case):
         CounselorAgent(DeterministicGateway()).respond(
             memory=_memory_for(sample_case),
             plan=sample_case.global_plan[0],
-            client_message="我不知道。",
-            recent_messages=history,
+            dialogue=[*history, _client("我不知道。")],
             risk=RiskAssessment(level=RiskLevel.LOW),
             counselor_turn_count=4,
         )

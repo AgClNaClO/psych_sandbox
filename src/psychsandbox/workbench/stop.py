@@ -1,5 +1,7 @@
 """停止 PsychSandbox 工作台及其后台 Worker 进程"""
-import os
+import json
+from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
@@ -9,33 +11,40 @@ def stop_all():
     print("[PsychSandbox] Stopping Workbench server and background workers...")
     stopped_count = 0
 
-    # 1. 查找占用 8000 端口的进程
+    project_python = Path(__file__).resolve().parents[3] / ".venv/Scripts/python.exe"
+    ps_cmd = (
+        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); "
+        "Get-CimInstance Win32_Process "
+        "-Filter \"Name = 'python.exe' OR Name = 'pythonw.exe'\" | "
+        "Select-Object ProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Compress"
+    )
     try:
-        out = subprocess.check_output("netstat -aon", shell=True, text=True, errors="ignore")
-        for line in out.splitlines():
-            if ":8000" in line and "LISTENING" in line:
-                parts = line.strip().split()
-                if len(parts) >= 5:
-                    try:
-                        pid = int(parts[-1])
-                        if pid != os.getpid() and pid > 0:
-                            subprocess.run(f"taskkill /F /PID {pid}", shell=True, capture_output=True)
-                            print(f"  - Terminated server process on port 8000 (PID: {pid})")
-                            stopped_count += 1
-                    except Exception:
-                        pass
-    except Exception as e:
-        print(f"  - Port 8000 check notice: {e}")
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+            check=True, capture_output=True, text=True, encoding="utf-8",
+        )
+        processes = json.loads(result.stdout) if result.stdout.strip() else []
+    except (OSError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+        print(f"[PsychSandbox] Could not inspect workbench processes: {exc}")
+        return
 
-    # 2. 查找 Worker 进程
-    try:
-        ps_cmd = "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*psychsandbox.workbench.worker*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
-        subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], check=False, capture_output=True)
-        print("  - Cleaned up background worker processes")
-    except Exception as e:
-        print(f"  - Worker cleanup notice: {e}")
+    if isinstance(processes, dict):
+        processes = [processes]
+    for process in processes:
+        if (process.get("ExecutablePath") or "").casefold() != str(project_python).casefold():
+            continue
+        if not re.search(
+            r"(?:^|\s)-m\s+psychsandbox\.workbench\.(?:server|worker)(?:\s|$)",
+            process.get("CommandLine") or "",
+        ):
+            continue
+        pid = str(process["ProcessId"])
+        result = subprocess.run(["taskkill", "/PID", pid, "/T", "/F"], capture_output=True)
+        if result.returncode == 0:
+            print(f"  - Stopped workbench process tree (PID: {pid})")
+            stopped_count += 1
 
-    print("[PsychSandbox] All workbench processes have been stopped.")
+    print(f"[PsychSandbox] Stopped {stopped_count} project workbench process trees.")
 
 
 if __name__ == "__main__":
