@@ -175,7 +175,7 @@ def test_homework_retires_only_with_dialogue_evidence():
     assert retired.homework == []
 
 
-def test_reworded_completed_item_retires_an_open_topic():
+def test_completed_items_are_archived_without_retiring_open_topics():
     memory = _memory(checklist=ChecklistMemory(open_items=[
         OpenItem(item_id="topic-1", text="讨论压力对睡眠的影响", source_session=1),
     ]))
@@ -187,9 +187,41 @@ def test_reworded_completed_item_retires_an_open_topic():
 
     updated = CONSOLIDATOR.consolidate(memory, session, next_index=3)
 
-    assert updated.unresolved_topics == ["练习呼吸放松"]
+    assert updated.unresolved_topics == ["讨论压力对睡眠的影响", "练习呼吸放松"]
     assert updated.checklist.per_session[0].completed_items == ["讨论压力对睡眠影响"]
-    assert updated.checklist.open_items[0].text == "练习呼吸放松"
+
+
+def test_summary_applies_explicit_checklist_decisions_by_id():
+    memory = _memory(checklist=ChecklistMemory(
+        open_items=[
+            OpenItem(item_id="topic-drop", text="复查旧记录", source_session=1),
+            OpenItem(item_id="topic-keep", text="了解支持资源", source_session=1),
+        ],
+        pending_verification=[
+            OpenItem(item_id=f"goal-s1-{index}", kind="goal", text=text, source_session=1,
+                     needs_verification=True)
+            for index, text in enumerate(("核对当下困扰", "讨论睡眠", "了解工作压力", "约定会谈目标"), 1)
+        ],
+    ))
+    reason = "来访者已说明当前主要困扰，咨询师确认了探索方向。"
+    session = _record(2, clinical=ClinicalSummary(session_index=2, item_updates=[
+        MemoryItemUpdate(item_id="goal-s1-1", status="done", evidence=reason),
+        MemoryItemUpdate(item_id="goal-s1-2", status="open"),
+        MemoryItemUpdate(item_id="goal-s1-4"),
+        MemoryItemUpdate(item_id="topic-drop", status="dropped"),
+        MemoryItemUpdate(item_id="unknown", status="done", evidence=reason),
+    ]))
+    notes: list[str] = []
+
+    updated = CONSOLIDATOR.consolidate(memory, session, next_index=3, warnings=notes)
+
+    assert not notes
+    assert [item.item_id for item in updated.checklist.open_items] == ["topic-keep", "goal-s1-2"]
+    assert updated.checklist.open_items[-1].needs_verification is False
+    assert [item.item_id for item in updated.checklist.pending_verification] == ["goal-s1-3", "goal-s1-4"]
+    assert all(item.needs_verification for item in updated.checklist.pending_verification)
+    assert session.clinical_summary.item_updates[0].evidence == reason
+    assert len(memory.checklist.pending_verification) == 4
 
 
 def test_max_turns_objective_is_carried_over_as_unverified():

@@ -37,6 +37,6 @@
 6. `SessionRecord` 不保存每场 `SessionEvaluationReport`；RFT 报告属于候选审计，整体分只在 `holistic_report`。
 7. 条目 logprob 缺失、对齐失败或质量低于门限必须报错，不用离散分、条目子集均值或零分替代。
 8. SQLite、JSONL、结果 JSON 与 HTML 来源于同一规范契约。删除须核对运行锁和删除日志；目录缺失不代表授权，共享病例和技能始终保留。
-9. 清单退役须有带 ID 的完成证据或本场已完成项匹配。空转检测至少观察三轮并满足三项线索中的两项，是工程假设而非临床阈值。
+9. 跨会谈待办由咨询师在 E.9 会后总结中判定，程序按已有 ID 应用明确状态。空转检测至少观察三轮并满足三项线索中的两项，是工程假设而非临床阈值。
 
 `ClientProfile.schema_version="4"` 版本化病例；`trace_schema_version=7` 版本化轨迹。评分方法另标 `item_logprob_v2`，三个编号互不替代。详情见 [记忆](../MEMORY.md)、[RFT](../SESSION_RFT.md) 和 [产物](../RUN_ARTIFACTS.md)。

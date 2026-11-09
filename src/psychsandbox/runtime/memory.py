@@ -51,13 +51,6 @@ def _same_item(left: str, right: str) -> bool:
     return SequenceMatcher(None, first, second).ratio() >= 0.85
 
 
-def _grounded(evidence: str, dialogue: str) -> bool:
-    """True when ``evidence`` really occurs in the current session dialogue."""
-
-    normalized = _normalized(evidence)
-    return len(normalized) >= 2 and normalized in _normalized(dialogue)
-
-
 def _supervisor_feedback(session: SessionRecord) -> list[str]:
     """Surface rule-based safety/disclosure gate reasons only.
 
@@ -85,14 +78,11 @@ class MemoryConsolidator:
     ) -> SessionMemory:
         """Fold one finished session into the four-field memory.
 
-        ``warnings`` collects rejected retirement decisions (a ``done`` update
-        without a quote from this session's dialogue, for example) so the caller
-        can log them; it never changes the stored structure.
+        ``warnings`` collects homework evidence failures for the caller to log.
         """
 
         notes = warnings if warnings is not None else []
         clinical = session.clinical_summary
-        dialogue = "\n".join(message.content for message in session.messages)
         if clinical is not None:
             assignments = []
             for item in clinical.homework_assignments:
@@ -112,10 +102,8 @@ class MemoryConsolidator:
             clinical.homework_assignments = assignments
             clinical.homework = _unique([item.text for item in assignments])
         recap = self._recap(session, clinical)
-        homework = self._homework(memory, session, recap, dialogue, notes)
-        checklist = self._checklist(
-            memory, session, clinical, dialogue, next_index, notes
-        )
+        homework = self._homework(memory, session, recap, notes)
+        checklist = self._checklist(memory, session, clinical, next_index)
         return memory.model_copy(
             update={
                 "session_recaps": memory.session_recaps + [recap],
@@ -178,36 +166,11 @@ class MemoryConsolidator:
         clinical = session.clinical_summary
         return list(clinical.item_updates) if clinical else []
 
-    @staticmethod
-    def _apply_update(
-        item: HomeworkItem | OpenItem,
-        update: MemoryItemUpdate,
-        dialogue: str,
-        notes: list[str],
-        *,
-        label: str,
-    ) -> None:
-        """Apply one id-addressed update, refusing unproven completions."""
-
-        if update.status == "done" and not _grounded(update.evidence, dialogue):
-            notes.append(
-                f"{label}条目 {item.item_id} 的完成更新缺少本场对话证据，保持未完成"
-            )
-            return
-        item.status = update.status
-        if update.status != "done":
-            return
-        if isinstance(item, HomeworkItem):
-            item.completion_evidence = update.evidence
-        else:
-            item.evidence = update.evidence
-
     def _homework(
         self,
         memory: SessionMemory,
         session: SessionRecord,
         recap: SessionRecap,
-        dialogue: str,
         notes: list[str],
     ) -> list[HomeworkItem]:
         """Carry open assignments forward, retire proven ones, add new ones."""
@@ -218,10 +181,18 @@ class MemoryConsolidator:
                 item.carried_sessions += 1
         clinical = session.clinical_summary
         by_id = {item.item_id: item for item in items}
+        dialogue = _normalized("\n".join(message.content for message in session.messages))
         for update in self._item_updates(session):
             item = by_id.get(update.item_id)
-            if item is not None:
-                self._apply_update(item, update, dialogue, notes, label="作业")
+            if item is None:
+                continue
+            if update.status == "done":
+                evidence = _normalized(update.evidence)
+                if len(evidence) < 2 or evidence not in dialogue:
+                    notes.append(f"作业条目 {item.item_id} 的完成更新缺少本场对话证据，保持未完成")
+                    continue
+                item.completion_evidence = update.evidence
+            item.status = update.status
         completed = list(clinical.completed_items) if clinical else []
         for item in items:
             if item.status != "open":
@@ -258,9 +229,7 @@ class MemoryConsolidator:
         memory: SessionMemory,
         session: SessionRecord,
         clinical,
-        dialogue: str,
         next_index: int,
-        notes: list[str],
     ):
         """Archive this session's checklist, then retire or verify open items."""
 
@@ -282,16 +251,10 @@ class MemoryConsolidator:
         explicit: set[str] = set()
         for update in self._item_updates(session):
             item = tracked.get(update.item_id)
-            if item is None:
+            if item is None or "status" not in update.model_fields_set:
                 continue
             explicit.add(item.item_id)
-            self._apply_update(item, update, dialogue, notes, label="待办")
-        completed = list(clinical.completed_items) if clinical else []
-        for item in checklist.open_items:
-            if item.status == "open" and any(
-                _same_item(entry, item.text) for entry in completed
-            ):
-                item.status = "done"
+            item.status = update.status
         # A boundary item the summary explicitly kept is a verified open topic now.
         confirmed = [
             item for item in checklist.pending_verification

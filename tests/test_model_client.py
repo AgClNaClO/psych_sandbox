@@ -466,7 +466,7 @@ def _structured_output_regressions():
 
     for field in ["completion_status_note", "objective_notes"]:
         invalid = json.loads(json.dumps(summary))
-        invalid["session_summary"]["goal_assessment"][field] = ""
+        invalid["session_summary"]["goal_assessment"][field] = "模型生成的额外内容"
         yield pytest.param("summarizer", _SessionSummaryWrapper, json.dumps(invalid), summary,
                            field, id=f"summary-extra-{field}")
     yield pytest.param("summarizer", _SessionSummaryWrapper, json.dumps(summary) + "}", summary,
@@ -523,6 +523,38 @@ def test_structured_output_repair_keeps_strict_contract(
     assert len(diagnostics) == (1 if repaired else 2)
     assert {record["attempt"] for record in diagnostics} == ({1} if repaired else {1, 2})
     assert all(record["raw_response"] == invalid for record in diagnostics)
+
+
+@pytest.mark.parametrize("defect", [None, "nonempty", "missing", "invalid"])
+def test_structured_gateway_repairs_only_empty_unknown_fields(tmp_path, defect):
+    from psychsandbox.domain import ScaleItems
+
+    valid = {"items": [{"item": "1", "score": 4}]}
+    raw = {"items": [{"item": "1", "score": 4, "generated_note": ""}], "footer": ""}
+    if defect == "nonempty":
+        raw["items"][0]["generated_note"] = "额外说明"
+    elif defect == "missing":
+        del raw["items"][0]["score"]
+    elif defect == "invalid":
+        raw["items"][0]["score"] = "four"
+    original = json.dumps(raw, ensure_ascii=False)
+    gateway, completions = _gateway(tmp_path, [original, json.dumps(valid)])
+
+    result = asyncio.run(gateway.complete_structured(
+        role="supervisor", system_prompt="JSON", input_payload={},
+        output_schema=ScaleItems, temperature=0,
+    ))
+
+    assert result.model_dump(mode="json", exclude_unset=True) == valid
+    assert len(completions.calls) == (1 if defect is None else 2)
+    record = json.loads(next(gateway.diagnostic_dir.glob("*.json")).read_text(encoding="utf-8"))
+    assert record["raw_response"] == original
+    if defect is None:
+        assert record["error"].startswith("local_repair:")
+        assert "items.0.generated_note" in record["error"]
+        assert "footer" in record["error"]
+    else:
+        assert not record["error"].startswith("local_repair:")
 
 
 class FailingTransport:

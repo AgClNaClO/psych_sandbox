@@ -154,6 +154,16 @@ class DialogueSummaryAgent:
         )
         summary = _SessionSummaryWrapper.model_validate(result).session_summary
         summary.session_index = session_index
+        # Persist explicit decisions before the summary is saved as a close step.
+        checklist_ids = {
+            item["item_id"]
+            for group in ("open_topics", "pending_verification")
+            for item in summary_payload["memory_items"].get(group, [])
+        }
+        summary.item_updates = [
+            update for update in summary.item_updates
+            if update.item_id not in checklist_ids or "status" in update.model_fields_set
+        ]
         return summary
 
 
@@ -219,7 +229,7 @@ def _merge_known_tree(history: Any, current: Any) -> Any:
 
 
 def memory_item_ledger(memory) -> dict:
-    """ID-addressed obligations available for evidence-bound session retirement."""
+    """Tracked items and stable IDs for the E.9 post-session decisions."""
     return {
         "open_homework": [item.model_dump(mode="json") for item in memory.last_homework if item.status == "open"],
         "open_topics": [item.model_dump(mode="json") for item in memory.checklist.open_items if item.status == "open"],

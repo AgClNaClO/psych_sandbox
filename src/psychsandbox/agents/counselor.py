@@ -219,7 +219,8 @@ class CounselorAgent:
         planning_payload = {
             **context,
             "meta_skill_catalog": [
-                item.model_dump(mode="json") for item in meta_catalog
+                item.model_dump(mode="json", exclude={"therapy", "stages", "source"})
+                for item in meta_catalog
             ],
             "previous_query_rejection": previous_rejection,
         }
@@ -271,10 +272,24 @@ class CounselorAgent:
         self, *, context: dict, plan: SessionPlan, planning: CounselorPlanning,
         observation: CounselorObservation, retry_available: bool,
     ) -> tuple[CounselorActorOutput, list[str]]:
+        # Keep the full observation for selection validation and audit records.
+        actor_observation = observation.model_dump(
+            mode="json",
+            exclude={
+                "embedding_model": True,
+                "similarity_scores": True,
+                "atomic_skills": {"__all__": {"therapy", "stages", "source", "version", "status"}},
+            },
+        )
+        stage = plan.stage.value
+        for skill in actor_observation["atomic_skills"]:
+            paths = skill["paths"]
+            if paths.get(stage):
+                skill["paths"] = {stage: paths[stage]}
         actor_payload = {
             **context,
             "planning": planning.model_dump(mode="json"),
-            "observation": observation.model_dump(mode="json"),
+            "observation": actor_observation,
             "query_retry_available": retry_available,
         }
         result = await self.gateway.complete_structured(

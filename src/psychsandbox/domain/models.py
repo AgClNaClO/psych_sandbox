@@ -701,12 +701,11 @@ class ClientStateAnalysis(StrictModel):
 
 
 class MemoryItemUpdate(StrictModel):
-    """One evidence-bound status change for an already tracked memory item.
+    """A post-session status decision for a tracked item.
 
-    ``item_updates`` lets E.9 retire or keep an open homework/topic item by its
-    stable id instead of re-typing its wording, so a paraphrase cannot orphan an
-    item. A ``done`` update is only accepted when ``evidence`` really appears in
-    the current session dialogue (enforced in ``runtime/memory.py``).
+    E.9 addresses checklist topics and goals by stable ID and records the
+    counselor's rationale in ``evidence``. Homework completion continues to
+    require a quote from the current session dialogue.
     """
 
     item_id: str

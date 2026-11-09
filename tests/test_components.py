@@ -38,6 +38,7 @@ from psychsandbox.domain import (
     TrustChange,
     TrustTier,
     SessionMemory,
+    SessionRecap,
     SessionStage,
     SkillSelectionConfig,
     SkillSelectionEvidence,
@@ -356,28 +357,68 @@ def test_legacy_memory_drops_preloaded_style_and_demands_before_replay():
 
 
 def test_counselor_uses_plan_then_react_observation(root, sample_case):
+    plan = sample_case.global_plan[0].model_copy(update={
+        "session_index": 2,
+        "objectives": ["核对这周的睡眠安排"],
+    })
+    dialogue = [
+        {"role": "client", "content": "上周已经记录了睡眠。"},
+        {"role": "counselor", "content": "我们可以看看记录。"},
+        {"role": "client", "content": "我很焦虑"},
+    ]
     memory = SessionMemory(
         case_id=sample_case.case_id,
-        known_background=UnlockedClientInfo(client_id=sample_case.profile.client_id),
+        known_background=UnlockedClientInfo(
+            client_id=sample_case.profile.client_id, main_problem="担心睡眠不足",
+        ),
+        session_recaps=[SessionRecap(session_index=1, summary="记录一周的睡眠")],
     )
     gateway = CountingDeterministicGateway()
+    catalog = SkillCatalog(SkillRegistry.from_project(root))
+    risk = RiskAssessment(level=RiskLevel.LOW)
     result = asyncio.run(CounselorAgent(
-        gateway,
-        SkillCatalog(SkillRegistry.from_project(root)),
+        gateway, catalog,
     ).respond(
         memory=memory,
-        plan=sample_case.global_plan[0],
-        dialogue=[{"role": "client", "content": "我很焦虑"}],
-        risk=RiskAssessment(level=RiskLevel.LOW),
-        counselor_turn_count=0,
+        plan=plan,
+        dialogue=dialogue,
+        risk=risk,
+        counselor_turn_count=1,
     ))
     assert result.response
     assert gateway.calls == [CounselorPlanning, CounselorActorOutput]
     assert result.planning.action is CounselorAction.LOOKUP_SKILLS
     assert result.observation.status == "skills_found"
     assert result.decision.selected_atomic_skill_ids
+    for request in gateway.requests:
+        payload = request["input_payload"]
+        assert payload["dialogue"] == dialogue
+        assert payload["known_background"]["main_problem"] == "担心睡眠不足"
+        assert payload["session_agenda"]["objectives"] == plan.objectives
+        assert payload["session_memory"]["session_recaps"][0]["summary"] == "记录一周的睡眠"
+        for text in ("担心睡眠不足", plan.objectives[0], "记录一周的睡眠"):
+            assert text not in request["system_prompt"]
+
+    planner_catalog = gateway.requests[0]["input_payload"]["meta_skill_catalog"]
+    assert planner_catalog == [
+        {
+            "meta_skill_id": item.meta_skill_id,
+            "name": item.name,
+            "description": item.description,
+            "selection_hint": item.selection_hint,
+        }
+        for item in catalog.available_meta(plan=plan, risk=risk)
+    ]
     actor_skills = gateway.requests[1]["input_payload"]["observation"]["atomic_skills"]
     assert all(item["paths"] and "brief_description" not in item for item in actor_skills)
+    for item, skill in zip(actor_skills, result.observation.atomic_skills, strict=True):
+        for field in (
+            "skill_id", "meta_skill_id", "name", "description", "when_to_use",
+            "triggers", "contraindications", "intervention_type",
+        ):
+            assert item[field] == getattr(skill, field)
+        assert item["paths"] == {plan.stage.value: skill.paths[plan.stage.value]}
+        assert not {"therapy", "stages", "source", "version", "status"} & item.keys()
 
 
 def test_high_risk_counselor_routes_to_safety(sample_case):
@@ -484,6 +525,10 @@ def test_skill_query_does_not_retry_without_rejected_candidates(
 def test_rejected_query_retries_once_and_excludes_entire_previous_group(
     selection_catalog, sample_case, second_assessment,
 ):
+    stage = sample_case.global_plan[0].stage
+    other_stage = next(item for item in SessionStage if item != stage)
+    for skill in selection_catalog.registry.atomic_skills.values():
+        skill.paths[other_stage.value] = "其他阶段的完整路径"
     gateway = SkillQueryGateway(("unsuitable", second_assessment), replay_first=True)
     turn = _run_skill_query(
         gateway, selection_catalog, sample_case,
@@ -499,7 +544,17 @@ def test_rejected_query_retries_once_and_excludes_entire_previous_group(
     assert len(first.returned_skill_ids) == len(second.returned_skill_ids) == 1
     assert second.selection_warnings  # Replayed excluded ID was rejected in code.
     assert gateway.requests[2]["input_payload"]["previous_query_rejection"] == first.rejection_reason
+    assert first.rejection_reason not in gateway.requests[2]["system_prompt"]
     assert gateway.requests[3]["input_payload"]["query_retry_available"] is False
+    actor_observation = gateway.requests[3]["input_payload"]["observation"]
+    assert actor_observation["vector_filtered"] is True
+    assert "embedding_model" not in actor_observation
+    assert "similarity_scores" not in actor_observation
+    assert turn.observation.embedding_model == gateway.embedding_model
+    assert turn.observation.similarity_scores == second.similarity_scores
+    skill = turn.observation.atomic_skills[0]
+    assert skill.paths[other_stage.value] == "其他阶段的完整路径"
+    assert actor_observation["atomic_skills"][0]["paths"] == {stage.value: skill.paths[stage.value]}
     embedding_query = json.loads(gateway.embedding_requests[0][0])
     assert embedding_query["current_client_message"] == "我很焦虑，想谈谈具体的困扰"
     for fact in sample_case.profile.disclosure_items:

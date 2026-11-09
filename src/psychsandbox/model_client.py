@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from .domain import ScaleItems
 
@@ -521,26 +521,29 @@ class OpenAICompatibleGateway(ModelGateway):
                 output_schema=output_schema,
                 force_json_schema=attempt > 0,
             )
+            repairs = []
             try:
-                return output_schema.model_validate(json.loads(_strip_fence(text)))
+                try:
+                    value = json.loads(_strip_fence(text))
+                except json.JSONDecodeError as exc:
+                    prefix = exc.doc[:exc.pos]
+                    malformed_tail = '","},"'
+                    if (output_schema.__name__ != "_SessionSummaryWrapper"
+                            or exc.msg != "Expecting ':' delimiter"
+                            or not prefix.endswith(malformed_tail)):
+                        raise
+                    value = json.loads(prefix.removesuffix(malformed_tail) + '"},"' + exc.doc[exc.pos:])
+                    repairs.append("removed stray comma and quote before object closure")
+
+                try:
+                    result = output_schema.model_validate(value)
+                except ValidationError as exc:
+                    removed = _remove_empty_extra_fields(value, exc)
+                    if not removed:
+                        raise
+                    result = output_schema.model_validate(value)
+                    repairs.append(f"removed empty extra fields: {', '.join(removed)}")
             except Exception as exc:
-                # Only this observed empty extension is semantically inert.
-                # Unknown keys with content (or at other paths) still fail.
-                if output_schema.__name__ == "_SessionSummaryWrapper":
-                    try:
-                        value = json.loads(_strip_fence(text))
-                        assessment = value["session_summary"]["goal_assessment"]
-                        if assessment.get("engagement_assessment") == "":
-                            del assessment["engagement_assessment"]
-                            repaired = output_schema.model_validate(value)
-                            self._write_invalid_output(
-                                role=role, output_schema=output_schema, attempt=attempt + 1,
-                                error="local_repair: removed empty session_summary.goal_assessment.engagement_assessment",
-                                text=text,
-                            )
-                            return repaired
-                    except (ValueError, KeyError, TypeError, AttributeError):
-                        pass
                 error = str(exc)
                 self._write_invalid_output(
                     role=role,
@@ -549,6 +552,13 @@ class OpenAICompatibleGateway(ModelGateway):
                     error=error,
                     text=text,
                 )
+            else:
+                if repairs:
+                    self._write_invalid_output(
+                        role=role, output_schema=output_schema, attempt=attempt + 1,
+                        error="local_repair: " + "; ".join(repairs), text=text,
+                    )
+                return result
         fallback = _lenient_parse(output_schema, text)
         if fallback is not None:
             self._write_invalid_output(
@@ -699,6 +709,29 @@ def _json_object_roles(
     if mode == "off":
         return set()
     return set(models) - json_schema_roles
+
+
+def _remove_empty_extra_fields(value: Any, error: ValidationError) -> list[str]:
+    """Remove empty strings only where validation rejected an unknown key."""
+    errors = error.errors()
+    if any(item["type"] != "extra_forbidden" or item["input"] != "" for item in errors):
+        return []
+
+    removed = []
+    for item in errors:
+        path = item["loc"]
+        *parents, field = path
+        target = value
+        try:
+            for key in parents:
+                target = target[key]
+        except (KeyError, IndexError, TypeError):
+            return []
+        if not isinstance(target, dict) or target.get(field) != "":
+            return []
+        del target[field]
+        removed.append(".".join(map(str, path)))
+    return removed
 
 
 def _lenient_parse(

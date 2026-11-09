@@ -12,6 +12,10 @@ item_logprob_v2直接获取每个原提示文件的批量JSON及位置logprobs�
 
 ## 信息边界与参考模板
 
+咨询师的 Planner 和 Actor 系统提示定义任务、权限和证据规则。公开背景、后台议程、允许的跨场记忆、完整场内对话和技能信息通过 JSON 字段提供。选技纠错原因也由 JSON 字段传入。技能输入和审计字段见 [技能选择](../docs/SKILL_SELECTION.md)。
+
+E.9 会后总结使用咨询师视角，根据完整对话判断跨会谈待办，并在同一结果的 `item_updates` 中提供已有 ID、明确状态和判断依据。
+
 simclient台词模板只接收授权事实、已说片段和表达指令，不能为复用模板而引入完整私密画像。client/dialogue.jinja2是来源/风格参考，生产调用仍是simclient模板；它的输入名和纯文本输出不符合ClientUtterance契约，不能只改路径启用。
 
 报告展示模型主动返回的简短规划/决策摘要与证据，不读取或索取供应商内部思维链。修改生成提示时同步相应版本并检查渲染、结构化输出、披露与跨会谈边界；最后跑pytest。评分细节见 [方法说明](../notes/logprob_scoring_borrowing.md)。

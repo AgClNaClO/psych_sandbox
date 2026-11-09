@@ -3,7 +3,7 @@ import asyncio
 
 from psychsandbox.domain import ClinicalSummary, ExtractedClientInfo, SessionMemory, UnlockedClientInfo
 from psychsandbox.runtime.memory import MemoryConsolidator
-from psychsandbox.runtime.memory_pipeline import ClientMergeAgent, _prevent_global_backfill
+from psychsandbox.runtime.memory_pipeline import ClientMergeAgent, DialogueSummaryAgent, _prevent_global_backfill
 from tests.deterministic_gateway import DeterministicGateway
 from tests.test_session_controls import record
 
@@ -42,6 +42,34 @@ def test_unassigned_homework_cannot_enter_recap_or_open_ledger():
     result = MemoryConsolidator().consolidate(memory, session, next_index=2)
     assert result.last_homework == []
     assert result.session_recaps[0].homework == []
+
+
+def test_summary_persists_only_explicit_checklist_decisions():
+    class SummaryGateway(DeterministicGateway):
+        async def complete_structured(self, **kwargs):
+            return kwargs["output_schema"].model_validate({"session_summary": {
+                "session_index": 1,
+                "item_updates": [
+                    {"item_id": "topic-1", "status": "done", "evidence": "已确认压力来源。"},
+                    {"item_id": "goal-s1-1", "evidence": "还需确认进度。"},
+                    {"item_id": "homework-s1-1", "evidence": "我做过记录"},
+                ],
+            }})
+
+    session = record()
+    summary = asyncio.run(DialogueSummaryAgent(SummaryGateway()).summarize(
+        1, session.messages, session.plan, [session.plan.therapy],
+        memory_items={
+            "open_topics": [{"item_id": "topic-1"}],
+            "pending_verification": [{"item_id": "goal-s1-1"}],
+            "open_homework": [{"item_id": "homework-s1-1"}],
+        },
+    ))
+    saved = ClinicalSummary.model_validate_json(summary.model_dump_json())
+    assert [(item.item_id, item.status) for item in saved.item_updates] == [
+        ("topic-1", "done"), ("homework-s1-1", "done"),
+    ]
+    assert saved.item_updates[0].evidence == "已确认压力来源。"
 
 
 def test_extraction_keeps_only_client_grounded_leaves_and_marks_hypotheses():

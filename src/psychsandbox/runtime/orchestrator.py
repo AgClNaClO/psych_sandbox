@@ -374,7 +374,7 @@ class CounselingSandbox:
                                 "topic_matcher": self.config.client_topic_matcher,
                             },
                             "temperature_counselor": self.config.temperature_counselor,
-                            "counselor_pipeline": "evidence_vector_retry_v2",
+                            "counselor_pipeline": "evidence_vector_retry_v3",
                             "skill_selection": self.config.skill_selection.model_dump(),
                             "memory_view": self.config.memory_view.model_dump(),
                             "rft": self.config.rft.model_dump(),

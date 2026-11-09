@@ -13,6 +13,8 @@ npm --prefix frontend run dev
 
 单独运行服务不会替你启动任务Worker。生产静态包来自frontend构建，见 [前端说明](../../frontend/README.md)。密钥留在环境/本机.env，不进入前端；服务定位为本机研究工具。
 
+后台 Worker 在启动时加载 Python 代码。更新代码后，先让当前任务结束或在会谈边界停止，再运行 `stop_workbench.bat` 和 `run_workbench.bat`。启动脚本发现本项目已有服务或 Worker 时会退出，避免旧 Worker 与新 Worker 争抢任务。两个 Worker 的启动和认领日志分别写入 `runs/runtime/worker_long.log` 和 `runs/runtime/worker_short.log`。
+
 API 与两个 Worker 可同时初始化工作台数据库。连接先设置 5 秒锁等待，再检查 WAL；已启用时不重复设置。连接配置和幂等建表遇到 SQLITE_BUSY/SQLITE_LOCKED 各最多尝试 3 次，失败连接会关闭；持续占锁或其他数据库错误仍报错。重试只覆盖初始化，不重放业务事务。不要删除数据库或 WAL/SHM 文件来解锁。
 
 ## 执行与恢复
