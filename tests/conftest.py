@@ -18,6 +18,30 @@ from psychsandbox.datasets import CaseRepository, convert_psycheval, merge_thera
 from psychsandbox.datasets.profile_compiler import AtomicSpan
 
 
+def _inherit_windows_temp_permissions(config: pytest.Config, run_dir: Path) -> None:
+    """Keep the invocation's inherited ACL when pytest/tempfile request 0700.
+
+    Windows Python applies a special owner-only ACL for 0700. Restricted
+    process tokens can then lose access to directories they just created.
+    Only this invocation's directories use the normal inherited Windows ACL;
+    other paths and non-Windows platforms retain their original behavior.
+    """
+    if sys.platform != "win32":
+        return
+    original_mkdir = os.mkdir
+    invocation_root = run_dir.resolve()
+
+    def mkdir(path, mode=0o777, *, dir_fd=None):
+        if (mode == 0o700 and dir_fd is None
+                and Path(os.fsdecode(path)).resolve().is_relative_to(invocation_root)):
+            mode = 0o777
+        return original_mkdir(path, mode, dir_fd=dir_fd)
+
+    patch = pytest.MonkeyPatch()
+    patch.setattr(os, "mkdir", mkdir)
+    config.add_cleanup(patch.undo)
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_configure(config: pytest.Config) -> None:
     """Retain each invocation, including tmp_path, subprocess files and reports."""
@@ -26,6 +50,7 @@ def pytest_configure(config: pytest.Config) -> None:
     config._artifact_dir = run_dir
     for name in ("tmp", "logs", "results", "artifacts"):
         (run_dir / name).mkdir()
+    _inherit_windows_temp_permissions(config, run_dir)
     config.option.basetemp = str(run_dir / "tmp" / "pytest")
     config.option.xmlpath = str(run_dir / "results" / "junit.xml")
     config.option.log_file = str(run_dir / "logs" / "pytest.log")

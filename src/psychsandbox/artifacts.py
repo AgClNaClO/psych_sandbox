@@ -87,6 +87,15 @@ def find_run_dir(base: Path, run_id: str) -> Path:
 
 
 def write_json(path: Path, value: dict) -> None:
+    if os.name == "nt":
+        # MoveFileEx (used by Path.replace) can reject a long destination even
+        # when creating the shorter temporary file succeeded. Use Windows'
+        # extended path syntax for both sides of the atomic replacement.
+        absolute = str(path.resolve())
+        if not absolute.startswith("\\\\?\\"):
+            absolute = ("\\\\?\\UNC\\" + absolute[2:] if absolute.startswith("\\\\")
+                        else "\\\\?\\" + absolute)
+        path = Path(absolute)
     path.parent.mkdir(parents=True, exist_ok=True)
     # Keep atomic-write names short enough for nested Windows run directories.
     temporary = path.with_name(f".tmp-{uuid.uuid4().hex[:16]}")

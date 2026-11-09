@@ -3,16 +3,18 @@ import { SimulationHub } from './components/SimulationHub';
 import { InteractiveChatHub } from './components/InteractiveChatHub';
 import { SkillLabHub } from './components/SkillLabHub';
 import { EvaluationHub } from './components/EvaluationHub';
+import { SkillEvolutionExperiment } from './components/SkillEvolutionExperiment';
 import { subscribeSSE } from './services/api';
 import { FlaskConical, MessageSquare, GitBranch, BarChart2, Eye, UserCheck, Layers } from 'lucide-react';
 import './App.css';
 
-type TabKey = 'simulation' | 'interactive' | 'skills' | 'evaluation';
+type TabKey = 'simulation' | 'interactive' | 'skills' | 'evaluation' | 'skill-experiment';
 
 const tabs = [
   { key: 'simulation', label: '自动实验台', icon: FlaskConical },
   { key: 'interactive', label: '人工多会谈', icon: MessageSquare },
   { key: 'skills', label: '技能实验室', icon: GitBranch },
+  { key: 'skill-experiment', label: '进化试验', icon: FlaskConical },
   { key: 'evaluation', label: '评测与数据', icon: BarChart2 },
 ] as const;
 
@@ -65,6 +67,7 @@ export const App: React.FC = () => {
         {activeTab === 'simulation' && <SimulationHub observerMode={observerMode} />}
         {activeTab === 'interactive' && <InteractiveChatHub observerMode={observerMode} />}
         {activeTab === 'skills' && <SkillLabHub observerMode={observerMode} />}
+        {activeTab === 'skill-experiment' && <SkillEvolutionExperiment observerMode={observerMode} />}
         {activeTab === 'evaluation' && <EvaluationHub observerMode={observerMode} />}
       </main>
     </div>

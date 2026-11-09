@@ -482,6 +482,12 @@ def create_app(
     # ====================================================
     # 6. 前端静态资源托管（若已打包构建）
     # ====================================================
+    # Opt-in experiment adapter owns its storage; existing workers/releases stay untouched.
+    from .skill_experiment_api import experiment_router
+    from ..artifacts import runtime_root
+    app.include_router(experiment_router(config.project_root, runtime_root(config.project_root),
+                                         Path(sim_store_path), assets_directory))
+
     f_dir = frontend_dir or (config.project_root / "src" / "psychsandbox" / "workbench" / "frontend_dist")
     if f_dir.exists():
         app.mount("/", StaticFiles(directory=str(f_dir), html=True), name="frontend")

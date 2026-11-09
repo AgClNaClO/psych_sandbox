@@ -9,8 +9,23 @@ from tests.test_rollout_runtime import setup, runner_for, run, session_for, Judg
 from tests.test_model_client import _gateway
 from psychsandbox.runtime.memory_pipeline import _SessionSummaryWrapper
 import json
+import os
 from pathlib import Path
 from psychsandbox.artifacts import write_json
+
+
+def test_atomic_checkpoint_supports_long_nested_paths(tmp_path):
+    parent = tmp_path
+    while len(str(parent)) < 260:
+        parent = parent / ('nested-' + 'x' * 30)
+    target = parent / 'extraction-BranchChoice-1.json'
+    write_json(target, {'status': 'rejected'})
+    # Windows readers also require extended syntax beyond MAX_PATH.
+    readable = Path('\\\\?\\' + str(target.resolve())) if os.name == 'nt' else target
+    assert json.loads(readable.read_text('utf-8')) == {'status': 'rejected'}
+    write_json(target, {'status': 'accepted'})
+    assert json.loads(readable.read_text('utf-8')) == {'status': 'accepted'}
+    assert not list(readable.parent.glob('.tmp-*'))
 
 
 def test_atomic_checkpoint_retries_transient_windows_lock(tmp_path, monkeypatch):

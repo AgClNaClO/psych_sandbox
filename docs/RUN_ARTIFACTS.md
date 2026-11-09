@@ -11,6 +11,7 @@
 | probe | `runs/runtime/<时间__probe-logprob-scoring__编号>/`：run.json、probe.json、diagnostics、tmp |
 | data fetch | 独立运行目录的 external/psycheval；成功后更新 external-latest.json |
 | Web SFT/DPO 导出 | 独立 export-sft / export-dpo 目录，文件名为经过验证的普通 `.jsonl` 名 |
+| 技能进化试验 | 独立 `skill-experiment__exp-<编号>` 目录：`experiment.sqlite3`、`run.json`、各任务日志/诊断；完整验证的两组数据库和轨迹各在任务目录内 |
 
 正式仿真共享 `runs/runtime/psychsandbox.sqlite3`，按 run_id 区分；Web 的队列和审计保存在 workbench 数据库。探针不写正式仿真记录。资源 `data/<therapy>`、assets、prompts 不属于运行产物。
 
@@ -38,6 +39,10 @@ Web 后台 Worker 在仿真完成或会谈边界停止后，持有运行锁生�
 ## 测试隔离
 
 conftest 每次创建独立目录，并接管 tmp_path、标准库临时目录、TEMP/TMP/TMPDIR、JUnit与日志；`PSYCHSANDBOX_RUNTIME_DIR` 只在测试期间指向本次 artifacts。pytest 缓存和字节码写入禁用。默认结束后删除本次测试目录；`PSYCHSANDBOX_KEEP_TESTS=1` 保留现场。硬终止可能留下 running 标记，它不代表成功。
+
+Windows 测试进程在本次调用目录内创建临时目录时，使用父目录继承的 ACL，避免 Python 对 `0700` 设置的仅所有者权限阻断受限进程自身访问。此兼容处理仅在测试期间生效，不修改已有目录权限；其他路径和非 Windows 平台保持原行为。
+
+JSON 产物在 Windows 上使用扩展长度路径执行原子写入，支持嵌套任务诊断目录；目录布局和对外保存的路径不变。
 
 正常模拟不并发调用同一个 sandbox 的 run_case；候选在同一运行内独立分支。跨实验并行使用不同进程，不在同进程互改临时环境。
 
