@@ -130,7 +130,12 @@ def create_app(
 
     @app.get("/api/cases")
     def get_cases():
-        return list_case_summaries(case_repo)
+        try:
+            return list_case_summaries(case_repo)
+        except RuntimeError as exc:
+            # An invalid processed library is unavailable, not an empty library.
+            # Keep the repository's strict checks and explicit repair guidance.
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     @app.get("/api/runs")
     def get_runs():

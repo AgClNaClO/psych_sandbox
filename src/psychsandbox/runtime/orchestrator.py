@@ -42,7 +42,7 @@ from ..model_client import ModelGateway, create_gateway
 from ..skills import SkillCatalog, SkillRegistry
 from ..therapies import normalize_therapy_id
 from .disclosure import DisclosureGate, create_activation_matcher
-from .progress import ScoringProgress, TurnProgress, format_duration as _format_duration
+from .progress import RunProgress, ScoringProgress, TurnProgress, format_duration as _format_duration
 from .run_management import available_run_dir
 from .memory import MemoryConsolidator
 from .memory_pipeline import (
@@ -143,6 +143,7 @@ class CounselingSandbox:
         *,
         run_id: str | None = None,
         should_stop: Callable[[], bool] | None = None,
+        status_progress: Callable[[RunProgress], None] | None = None,
     ) -> RunResult:
         with single_simulation(), ExitStack() as resources:
             target_run_id = resume_run_id or run_id
@@ -150,7 +151,7 @@ class CounselingSandbox:
                 resources.enter_context(available_run_dir(self.config.trace_dir, target_run_id))
             return await self._run_case(
                 case_id, therapy, session_count, seed, resume_run_id, progress_callback, turn_progress, resources,
-                run_id=run_id, should_stop=should_stop,
+                run_id=run_id, should_stop=should_stop, status_progress=status_progress,
             )
 
     async def _run_case(
@@ -158,6 +159,7 @@ class CounselingSandbox:
         turn_progress, resources: ExitStack,
         run_id: str | None = None,
         should_stop: Callable[[], bool] | None = None,
+        status_progress: Callable[[RunProgress], None] | None = None,
     ) -> RunResult:
         session_count = session_count if session_count is not None else self.config.session_count
         if not 1 <= session_count <= 100:
@@ -289,6 +291,13 @@ class CounselingSandbox:
         sessions = list(previous_sessions)
         start = len(sessions) + 1
         run_started_at = time.monotonic()
+
+        def report_phase(phase: str, index: int = 0) -> None:
+            if status_progress:
+                status_progress(RunProgress(phase, index, session_count, len(sessions),
+                                            time.monotonic() - run_started_at))
+
+        report_phase("preparing", len(sessions))
         with local_temp_dir(self.run_dir / "tmp"):
             try:
                 stopped_at_boundary = False
@@ -297,6 +306,7 @@ class CounselingSandbox:
                         notify(f"收到在会谈边界停止请求，Session {session_index} 未开始，停止仿真")
                         stopped_at_boundary = True
                         break
+                    report_phase("planning", session_index)
                     notify(f"Session {session_index}/{session_count} 开始")
                     plan = self._plan_for(case, session_index, sessions)
                     memory_before = memory.model_copy(deep=True)
@@ -325,6 +335,7 @@ class CounselingSandbox:
                         )
                     # Only the selected dialogue reaches E.7/E.8/E.9.  Review
                     # and next-session planning must see the newly merged memory.
+                    report_phase("consolidating", session_index)
                     await self._consolidate_memory_pipeline(
                         case, session, plan, memory
                     )
@@ -402,6 +413,7 @@ class CounselingSandbox:
                     self.store.save_session(run_id, session, memory, trajectory)
                     self._sync_jsonl(run_id)
                     sessions.append(session)
+                    report_phase("committed", session_index)
                     elapsed = time.monotonic() - run_started_at
                     completed = session_index - start + 1
                     remaining = session_count - session_index
@@ -440,6 +452,7 @@ class CounselingSandbox:
                 )
                 holistic_report = None
                 if status != "stopped":
+                    report_phase("holistic", len(sessions))
                     try:
                         holistic_report = await self.holistic_supervisor.evaluate(result, case)
                         self.store.save_holistic_report(run_id, holistic_report)
@@ -452,6 +465,7 @@ class CounselingSandbox:
                 )
                 metadata.update(status=status, completed_sessions=len(sessions))
                 write_json(metadata_path, metadata)
+                report_phase("finished", len(sessions))
                 notify(f"运行 {run_id} 已结束；状态={status}")
                 return result
             except BaseException as exc:
@@ -464,6 +478,7 @@ class CounselingSandbox:
                     handle.write(traceback.format_exc() + "\n")
                 metadata.update(status=failed_status, completed_sessions=len(sessions))
                 write_json(metadata_path, metadata)
+                report_phase("failed", len(sessions))
                 notify(f"运行 {run_id} 失败；状态已记录为 {failed_status}")
                 raise
 

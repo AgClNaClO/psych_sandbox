@@ -2,4 +2,6 @@
 
 这里保存Psych-new的五流派sample/rft人物画像，以及_excluded来源记录，用于核查和后续适配研究。历史盘点为1027份JSON：每流派196份，另有排除记录47份；这些不是341个沙盒病例的另一个索引。
 
-CaseRepository.from_project不递归加载本目录。生产病例由data/<therapy>或data/processed/psycheval读取。若要启用这些画像，须先明确dataset adapter、ID映射、去重、来源许可及隔离测试，不能只换一个目录参数。当前任务不启用或改写这些资产。
+截至 2026-11-10，`CaseRepository.from_project` 不递归加载本目录；生产运行要求有效的 `data/processed/psycheval` 缓存，该缓存由 `data/<therapy>` 的五流派原始病例显式编译。来源画像的数量不作为可运行病例数。
+
+若要启用这些画像，须先明确 dataset adapter、ID 映射、去重、来源许可及隔离测试，不能只换一个目录参数。独立技能试验也只导入正式数据库中已提交的公开会谈，不将本目录画像注入提取或对比上下文。路径与信息边界见 [来访者模拟](../../docs/CLIENT_SIMULATION.md)；本次文档同步未启用或改写这些资产。

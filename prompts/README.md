@@ -2,6 +2,8 @@
 
 生产生成模板在counselor、simclient、memory中，由Jinja2渲染，模型返回Pydantic契约。咨询师规划/执行/自评、来访者规划/台词和E.7/E.8/E.9各自有入口；通用prompt_pipeline辅助函数不代表所有调用已统一经过它。
 
+实现核对：2026-11-10。来访者模板版本为 `psycheval_patientact_v7`，来源抽取版本为 `psycheval_extract_only_v2`；它们与 `item_logprob_v2` 评分版本独立。抽取提示及独立技能试验提示由 Python 模块定义，并非全部位于本目录。
+
 ## 量表
 
 46个eval量表提示文件供RFT候选评估和完整疗程督导复用。固定映射在Instrument.prompt_files，条目目录在eval/_scoring/item_catalog.json：ID、原始范围、来源和换行规范化后的UTF-8 SHA-256必须与提示词一致。
@@ -19,3 +21,5 @@ E.9 会后总结使用咨询师视角，根据完整对话判断跨会谈待办�
 simclient台词模板只接收授权事实、已说片段和表达指令，不能为复用模板而引入完整私密画像。client/dialogue.jinja2是来源/风格参考，生产调用仍是simclient模板；它的输入名和纯文本输出不符合ClientUtterance契约，不能只改路径启用。
 
 报告展示模型主动返回的简短规划/决策摘要与证据，不读取或索取供应商内部思维链。修改生成提示时同步相应版本并检查渲染、结构化输出、披露与跨会谈边界；最后跑pytest。评分细节见 [方法说明](../notes/logprob_scoring_borrowing.md)。
+
+独立技能提取使用显式零基 `message_index` 和来访者逐字原话，语义校验最多纠错一次；它与正式选技的一次排除旧组纠错是不同预算。固定上下文对比复用正式咨询师模板，实验新增技能不会改写本目录的量表或生产提示。详见 [技能试验](../docs/workbench/SKILL_EVOLUTION_EXPERIMENT.md)。

@@ -80,6 +80,15 @@ async def test_web_controls_change_real_sessions_and_publish_html(root, tmp_path
         events = worker.event_hub.get_events(f'job:{job.job_id}')
         assert any(event.type == 'simulation_progress' for event in events)
         assert events[-1].type == 'job_succeeded'
+        snapshot = client.get(f'/api/jobs/{job.job_id}').json()['progress']
+        assert snapshot['phase'] == 'report'
+        assert (snapshot['sessions_completed'], snapshot['sessions_total']) == (2, 2)
+        stages = [event.payload['progress']['phase'] for event in events if event.type == 'simulation_status']
+        assert {'planning', 'generating', 'consolidating', 'committed', 'holistic', 'report'} <= set(stages)
+        assert ('scoring' in stages) == rft
+        initial = [event.payload['progress'] for event in events if event.type == 'simulation_status'
+                   and event.payload['progress']['phase'] == 'generating']
+        assert any(candidate['turn_index'] == 0 for tick in initial for candidate in tick['candidates'])
 
         # Completed retry must recover HTML without another model request.
         async def no_generation(**kwargs):

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import random
 import re
 import subprocess
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -33,6 +36,7 @@ from .profile_compiler import (
     PsychEvalProfileCompiler,
 )
 from ..evidence_text import has_semantic_content
+from .progress import ConversionProgress
 
 
 PSYCHEVAL_REPOSITORY = "https://github.com/ECNU-ICALK/PsychEval.git"
@@ -940,6 +944,8 @@ def convert_psycheval(
     atomizer: str = "rules",
     atomization_audit: dict[str, int] | None = None,
     atomizer_model: str | None = None,
+    progress_callback: Callable[[ConversionProgress], None] | None = None,
+    _raw_cases: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if therapy not in _RAW_THERAPY_MAP:
         supported = ", ".join(sorted(_RAW_THERAPY_MAP))
@@ -949,18 +955,17 @@ def convert_psycheval(
     if not files:
         raise FileNotFoundError(f"No PsychEval files found under {source}")
     adapter = PsychEvalAdapter(revision, therapy_code=therapy)
-    raw_cases = [
+    raw_cases = _raw_cases if _raw_cases is not None else [
         json.loads(path.read_text(encoding="utf-8"))
         for path in files
     ]
-    cases = [
-        adapter.convert_case(
-            raw,
-            str(path.relative_to(source_dir)),
-            free_text_spans=(free_text_spans_by_case or {}).get(str(raw["client_id"])),
-        )
-        for raw, path in zip(raw_cases, files, strict=True)
-    ]
+    started = time.monotonic()
+    def report(completed: int) -> None:
+        if progress_callback:
+            progress_callback(ConversionProgress(
+                therapy, "compile", completed, len(files), time.monotonic() - started,
+            ))
+    report(0)
     output_dir.mkdir(parents=True, exist_ok=True)
     split_counts = {"train": 0, "validation": 0, "test": 0}
     handles = {
@@ -969,12 +974,18 @@ def convert_psycheval(
     }
     all_handle = (output_dir / "all.jsonl").open("w", encoding="utf-8")
     try:
-        for case in cases:
+        for index, (raw, path) in enumerate(zip(raw_cases, files, strict=True), 1):
+            case = adapter.convert_case(
+                raw,
+                str(path.relative_to(source_dir)),
+                free_text_spans=(free_text_spans_by_case or {}).get(str(raw["client_id"])),
+            )
             line = case.model_dump_json()
             split = _case_split(case.case_id)
             handles[split].write(line + "\n")
             all_handle.write(line + "\n")
             split_counts[split] += 1
+            report(index)
     finally:
         for handle in handles.values():
             handle.close()
@@ -986,7 +997,7 @@ def convert_psycheval(
         "revision": revision,
         "license": "CC BY-NC 4.0",
         "therapy": therapy,
-        "case_count": len(cases),
+        "case_count": len(raw_cases),
         "meta_skill_count": len(registry.meta_skills),
         "atomic_skill_count": len(registry.atomic_skills),
         "split_counts": split_counts,
@@ -1019,14 +1030,22 @@ async def convert_psycheval_extractive(
     revision: str = PSYCHEVAL_REVISION,
     cache_dir: Path | None = None,
     temperature: float = 0.0,
+    concurrency: int = 4,
+    progress_callback: Callable[[ConversionProgress], None] | None = None,
 ) -> dict[str, Any]:
     """Atomize growth, language features and core demands before conversion."""
 
     from .atomizer import ExtractiveAtomizer
 
+    if isinstance(concurrency, bool) or not isinstance(concurrency, int) or not 1 <= concurrency <= 32:
+        raise ValueError("conversion concurrency must be an integer from 1 to 32")
+    if therapy not in _RAW_THERAPY_MAP:
+        raise ValueError(f"Unsupported therapy {therapy!r}")
+
     source = source_dir / "data" / therapy
     files = sorted(source.glob("*.json"), key=lambda path: int(path.stem))
     atomizer = ExtractiveAtomizer(gateway, cache_dir or output_dir / ".profile-cache", temperature)
+    source_digest = _files_digest(files)
     raw_by_path = {
         path: json.loads(path.read_text(encoding="utf-8")) for path in files
     }
@@ -1049,9 +1068,70 @@ async def convert_psycheval_extractive(
             ))
         return [item for item in values if item[1]]
 
+    sources_by_path = {path: sources_for(raw) for path, raw in raw_by_path.items()}
+    # One request for each distinct input, shared by pilot and full conversion.
+    # Therapy-specific atomizers/cache directories keep the namespaces separate.
+    resolved = {}
+
+    async def extract(paths: list[Path], phase: str):
+        jobs = [(path, *entry) for path in paths for entry in sources_by_path[path]]
+        grouped = {}
+        for index, (_, source_path, text, purpose) in enumerate(jobs):
+            grouped.setdefault((source_path, text, purpose), []).append(index)
+        results = [None] * len(jobs)
+        counts = {"completed": 0, "cache_hits": 0, "reused": 0, "fallbacks": 0, "skipped": 0}
+        started = time.monotonic()
+
+        def report():
+            if progress_callback:
+                progress_callback(ConversionProgress(
+                    therapy, phase, total=len(jobs), elapsed=time.monotonic() - started, **counts,
+                ))
+
+        def finish(key, reused: bool):
+            spans, audit = resolved[key]
+            for offset, index in enumerate(grouped[key]):
+                item_audit = audit
+                if reused or offset > 0:
+                    item_audit = audit.model_copy(update={"cache_hit": False, "reused": True})
+                results[index] = (jobs[index], spans, item_audit)
+                counts["completed"] += 1
+                counts["cache_hits"] += int(item_audit.cache_hit)
+                counts["reused"] += int(item_audit.reused)
+                counts["fallbacks"] += int(item_audit.fallback)
+                counts["skipped"] += int(item_audit.skipped)
+            report()
+
+        report()
+        pending = []
+        for key in grouped:
+            if key in resolved:
+                finish(key, reused=True)
+            else:
+                pending.append(key)
+        inputs = iter(pending)
+
+        async def worker():
+            for key in inputs:
+                source_path, text, purpose = key
+                resolved[key] = await atomizer.atomize(
+                    source_path=source_path, source_text=text, purpose=purpose,
+                )
+                finish(key, reused=False)
+
+        workers = [asyncio.create_task(worker()) for _ in range(min(concurrency, len(pending)))]
+        try:
+            await asyncio.gather(*workers)
+        except BaseException:
+            for task in workers:
+                task.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
+            raise
+        return results
+
     lengths = sorted(
         (
-            sum(len(text) for _, text, purpose in sources_for(raw) if purpose == "growth"),
+            sum(len(text) for _, text, purpose in sources_by_path[path] if purpose == "growth"),
             path,
         )
         for path, raw in raw_by_path.items()
@@ -1063,20 +1143,15 @@ async def convert_psycheval_extractive(
     ]))
     remaining = [path for _, path in lengths if path not in pilot_paths]
     pilot_paths.extend(random.Random(42).sample(remaining, k=min(2, len(remaining))))
-    pilot_total = 0
-    pilot_fallbacks = 0
+    pilot_results = await extract(pilot_paths, "pilot")
+    pilot_total = len(pilot_results)
+    pilot_fallbacks = sum(int(result[2].fallback) for result in pilot_results)
     pilot_failure_reasons: dict[str, int] = {}
-    for path in pilot_paths:
-        for source_path, text, purpose in sources_for(raw_by_path[path]):
-            _, item_audit = await atomizer.atomize(
-                source_path=source_path, source_text=text, purpose=purpose
-            )
-            pilot_total += 1
-            pilot_fallbacks += int(item_audit.fallback)
-            if item_audit.fallback:
-                detail = item_audit.reason or "unknown atomizer failure"
-                reason = f"{source_path} [{purpose}]: {detail}"
-                pilot_failure_reasons[reason] = pilot_failure_reasons.get(reason, 0) + 1
+    for (_, source_path, _, purpose), _, item_audit in pilot_results:
+        if item_audit.fallback:
+            detail = item_audit.reason or "unknown atomizer failure"
+            reason = f"{source_path} [{purpose}]: {detail}"
+            pilot_failure_reasons[reason] = pilot_failure_reasons.get(reason, 0) + 1
     if pilot_total and pilot_fallbacks / pilot_total > 0.05:
         reasons = sorted(
             pilot_failure_reasons.items(), key=lambda item: (-item[1], item[0])
@@ -1094,45 +1169,42 @@ async def convert_psycheval_extractive(
         "pilot_cases": [str(raw_by_path[path]["client_id"]) for path in pilot_paths],
         "pilot_items": pilot_total,
         "pilot_fallbacks": pilot_fallbacks,
+        "pilot_cache_hits": sum(int(result[2].cache_hit) for result in pilot_results),
         "cache_hits": 0,
+        "reused": 0,
+        "skipped": 0,
         "fallbacks": 0,
         "validation_failures": 0,
         "needs_review": 0,
     }
     audit_records: list[dict[str, Any]] = []
-    for path in files:
+    for (path, source_path, _, purpose), spans, item_audit in await extract(files, "extract"):
         raw = raw_by_path[path]
-        case_spans: dict[str, list[AtomicSpan]] = {}
-        for source_path, text, purpose in sources_for(raw):
-            spans, item_audit = await atomizer.atomize(
-                source_path=source_path, source_text=text, purpose=purpose
-            )
-            case_spans[source_path] = spans
-            audit["cache_hits"] += int(item_audit.cache_hit)
-            audit["fallbacks"] += int(item_audit.fallback)
-            audit["validation_failures"] += int(item_audit.validation_failed)
-            audit["needs_review"] += int(item_audit.needs_review)
-            audit_records.append(
+        spans_by_case.setdefault(str(raw["client_id"]), {})[source_path] = spans
+        for counter, field in (
+            ("cache_hits", "cache_hit"), ("reused", "reused"), ("skipped", "skipped"),
+            ("fallbacks", "fallback"), ("validation_failures", "validation_failed"),
+            ("needs_review", "needs_review"),
+        ):
+            audit[counter] += int(getattr(item_audit, field))
+        audit_records.append({
+            "client_id": str(raw["client_id"]),
+            "source_path": source_path,
+            "purpose": purpose,
+            "spans": [
                 {
-                    "client_id": str(raw["client_id"]),
-                    "source_path": source_path,
-                    "purpose": purpose,
-                    "spans": [
-                        {
-                            "start": span.start,
-                            "end": span.end,
-                            "text": span.text,
-                            "kind": span.kind,
-                            "trust_tier": span.trust_tier.value,
-                            "five_ps_roles": list(span.five_ps_roles),
-                            "needs_review": span.needs_review,
-                        }
-                        for span in spans
-                    ],
-                    **item_audit.model_dump(mode="json"),
+                    "start": span.start,
+                    "end": span.end,
+                    "text": span.text,
+                    "kind": span.kind,
+                    "trust_tier": span.trust_tier.value,
+                    "five_ps_roles": list(span.five_ps_roles),
+                    "needs_review": span.needs_review,
                 }
-            )
-        spans_by_case[str(raw["client_id"])] = case_spans
+                for span in spans
+            ],
+            **item_audit.model_dump(mode="json"),
+        })
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "atomization_audit.jsonl").write_text(
         "".join(
@@ -1141,7 +1213,7 @@ async def convert_psycheval_extractive(
         encoding="utf-8",
     )
     models = getattr(gateway, "models", {})
-    return convert_psycheval(
+    manifest = convert_psycheval(
         source_dir,
         output_dir,
         therapy=therapy,
@@ -1152,7 +1224,12 @@ async def convert_psycheval_extractive(
         atomizer_model=models.get(
             "profile", getattr(gateway, "provider_name", "unknown")
         ),
+        progress_callback=progress_callback,
+        _raw_cases=list(raw_by_path.values()),
     )
+    if manifest["source_digest"] != source_digest:
+        raise RuntimeError(f"PsychEval {therapy} source changed during conversion; retry with stable source files.")
+    return manifest
 
 
 def merge_therapy_conversions(
@@ -1203,7 +1280,7 @@ def merge_therapy_conversions(
                 raise RuntimeError(f"Illegal 5Ps coverage source ID in {case.case_id}")
     atomization_totals = {
         key: sum(int(item.get("atomization_audit", {}).get(key, 0)) for item in manifests)
-        for key in ("pilot_items", "pilot_fallbacks", "cache_hits", "fallbacks", "validation_failures", "needs_review")
+        for key in ("pilot_items", "pilot_fallbacks", "pilot_cache_hits", "cache_hits", "reused", "skipped", "fallbacks", "validation_failures", "needs_review")
     }
     combined = {
         "source": PSYCHEVAL_REPOSITORY,

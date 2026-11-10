@@ -35,7 +35,7 @@ export const App: React.FC = () => {
     <div className="app-shell">
       <header className="workbench-header">
         <div className="workbench-brand">
-          <div className="workbench-mark"><Layers size={23} strokeWidth={1.8} /></div>
+          <div className="workbench-mark"><Layers size={18} strokeWidth={1.8} /></div>
           <div>
             <div className="workbench-brand-name">PsychSandbox <span>科研工作台</span></div>
             <p className="workbench-brand-description">心理咨询多智能体仿真与技能演化平台</p>
@@ -45,17 +45,17 @@ export const App: React.FC = () => {
           {tabs.map(({ key, label, icon: Icon }) => (
             <button key={key} className={`workbench-nav-item ${activeTab === key ? 'active' : ''}`}
               onClick={() => setActiveTab(key)} aria-pressed={activeTab === key}>
-              <Icon size={17} strokeWidth={1.8} /><span>{label}</span>
+              <Icon size={15} strokeWidth={1.8} /><span>{label}</span>
             </button>
           ))}
         </nav>
         <div className="workbench-header-tools">
           <div className="view-switch" role="group" aria-label="角色视角">
             <button className={!observerMode ? 'active' : ''} aria-pressed={!observerMode} onClick={() => setObserverMode(false)}>
-              <UserCheck size={14} />研究员
+              <UserCheck size={12} />研究员
             </button>
             <button className={observerMode ? 'active' : ''} aria-pressed={observerMode} onClick={() => setObserverMode(true)}>
-              <Eye size={14} />访客观察
+              <Eye size={12} />访客观察
             </button>
           </div>
           <div className={`connection-status ${sseConnected ? 'connected' : ''}`} title={`最近事件: ${lastEvent}`}>

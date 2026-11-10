@@ -88,6 +88,7 @@ class JobResponse(BaseModel):
     stop_requested: bool = False
     cancel_requested: bool = False
     result: dict[str, Any] | None = None
+    progress: dict[str, Any] | None = None
     error: str | None = None
     run_id: str | None = None
     course_id: str | None = None

@@ -2,6 +2,8 @@
 
 每次调用单独建立目录。生成文件不得散落根目录，不得通过整理文档或缺失文件夹推定清理授权。正式运行与共享数据库须共同保留。
 
+本页按 2026-11-10 的路径与恢复实现核对。`runs/` 中三个受版本管理的 README 是入口文档，其他忽略产物保留原始实验含义。
+
 ## 路径和内容
 
 | 调用 | 位置及主要文件 |
@@ -10,12 +12,19 @@
 | simulate | `runs/runtime/<时间__案例__run编号>/`：run.json、result.json、trajectory.jsonl、report.html、logs、diagnostics、tmp |
 | probe | `runs/runtime/<时间__probe-logprob-scoring__编号>/`：run.json、probe.json、diagnostics、tmp |
 | data fetch | 独立运行目录的 external/psycheval；成功后更新 external-latest.json |
+| data convert | 独立 data-convert 目录：run.json、progress.jsonl、diagnostics，以及替换前的 processed-backup |
 | Web SFT/DPO 导出 | 独立 export-sft / export-dpo 目录，文件名为经过验证的普通 `.jsonl` 名 |
 | 技能进化试验 | 独立 `skill-experiment__exp-<编号>` 目录：`experiment.sqlite3`、`run.json`、各任务日志/诊断；完整验证的两组数据库和轨迹各在任务目录内 |
 
 正式仿真共享 `runs/runtime/psychsandbox.sqlite3`，按 run_id 区分；Web 的队列和审计保存在 workbench 数据库。探针不写正式仿真记录。资源 `data/<therapy>`、assets、prompts 不属于运行产物。
 
-`data convert` 是例外：在 `data/processed/.psycheval-staging-<编号>` 暂存，成功后原子更新 `data/processed/psycheval`；抽取缓存保存在忽略目录中，不覆盖旧运行。配置显式指定 database_path/trace_dir 时，Python 调用跟随指定路径，测试必须使用 tmp_path。
+`data convert` 是例外：在 `data/processed/.psycheval-staging-<编号>` 暂存，校验成功后发布到 `data/processed/psycheval`；抽取缓存保存在忽略目录中，不覆盖旧运行。配置显式指定 database_path/trace_dir 时，Python 调用跟随指定路径，测试必须使用 tmp_path。
+
+转换默认并发 4 个抽取请求，可用 `--concurrency 1–32` 调整；试转换和相同输入在本次调用内复用，缓存写入使用临时文件加原子替换。各阶段进度写入 stderr 与本次目录的 `progress.jsonl`，stdout 仅输出最终 manifest JSON，`--no-progress` 仅关闭终端显示。非交互日志按约 10% 的进度间隔输出。
+
+五流派依次转换，复用键包含来源路径、原文和用途；跨流派不共享抽取结果。manifest 分别记录 pilot 缓存命中、全量缓存命中、复用、跳过、回退和待复核计数；这些计数不是人工审核通过率。抽取前后的来源摘要必须一致，转换过程中不得编辑原始病例。
+
+转换持有 `data/processed/.run.lock` 的 OS 锁。新数据通过五流派合并和完整加载校验后，将旧 processed 目录移入本次调用的 `processed-backup/` 再发布新目录；发布失败恢复旧目录。失败 staging 保留，位置记录在 `run.json`，不自动删除历史产物或共享数据库。两个目录重命名之间存在短暂切换窗口；异常断电时可按 `run.json` 中的输出、staging 与备份路径检查恢复。
 
 ## 查找、恢复和探针
 
@@ -32,9 +41,11 @@ probe.json 记录实际批量请求参数、方法版本、每项原始数值质
 
 Web 后台 Worker 在仿真完成或会谈边界停止后，持有运行锁生成 `report.html`，随后才将任务标记为成功或停止。若报告生成阶段失败，已完成的轨迹保留；已完成运行的任务重试只重建报告，不重新生成或评分。旧实验可以用 `visualize --run <id>` 补出报告。网页仅在检测到报告文件时显示报告入口。
 
-网页支持统一轮数上限（1–50）或逐场轮数上限，以及 RFT 开关与候选数量（2–32）。这些参数保存进本次运行配置；轮数是上限，咨询师仍可提前结束。续跑与任务重试沿用原运行的轮数和 RFT 设置。浏览器保存所选任务编号，返回页面后从后台恢复任务状态并重放持久日志；任务在离开期间完成也能恢复查看。日志是阶段进度，并非逐 token 或逐轮流式输出。
+网页支持统一轮数上限（1–50）或逐场轮数上限，以及 RFT 开关与候选数量（2–32）。这些参数保存进本次运行配置；轮数是上限，咨询师仍可提前结束。续跑与任务重试沿用原运行的轮数和 RFT 设置。浏览器保存所选实验编号，返回页面后恢复当前阶段、已提交场数、候选轮数和量表计数；任务在离开期间完成也能恢复查看。结构化进度作为 `simulation_status` 事件写入现有工作台数据库，不新增运行目录；写入受 attempt、owner 和租约保护。任务接口返回当前 attempt 的最新快照，实时事件按 revision 合并。进度是已完成步骤的计数，不是 token 流，也不把轮数上限当成必达轮数或整体耗时百分比。
 
 数值输入允许暂时清空或输入 0，启动时按整数范围校验；会谈次数为 1–100，随机种子可以为 0。选择失败或已停止的历史运行后，可点击「从会谈边界续跑」：保留已提交会谈，从下一场恢复，使用原运行的案例、随机种子和 `run.json` 中的总会谈数，不读取左侧新实验草稿。页面显示已提交场数和恢复位置；原目录或恢复信息缺失、疗程已关闭时禁用入口，安全暂停不提供普通续跑。
+
+已提交场数与当前候选轮数独立统计；会后整理完成并落库后才增加提交计数。`finished` 表示仿真轨迹已保存，Worker 随后仍可能处于报告生成阶段；以任务最终状态确认工作台操作结束。缺少新进度快照的旧任务仍可显示已存会谈，不伪造当前候选计数。
 
 ## 测试隔离
 

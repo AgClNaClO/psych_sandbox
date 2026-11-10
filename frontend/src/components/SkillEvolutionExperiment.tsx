@@ -121,8 +121,8 @@ export function SkillEvolutionExperiment({ observerMode = false }: { observerMod
       <p>从会谈经验提取技能，观察知识如何变化、是否被实际使用。</p></div>
       <span className="evo-isolation">独立存储 · 正式技能库只读</span></div>
     {error && <div role="alert" className="evo-error">{error}</div>}
-    {enabled === false ? <section className="evo-card evo-disabled"><h3>实验功能默认关闭</h3><p>在启动工作台的终端中设置以下变量，再启动服务。原有工作台功能可继续使用。</p>
-      <code>$env:PSYCHSANDBOX_SKILL_EXPERIMENT = '1'</code><p>也可以运行项目根目录的 <code>run_skill_experiment.bat</code>。</p></section>
+    {enabled === false ? <section className="evo-card evo-disabled"><h3>技能进化试验未启用</h3><p>将项目根目录 run_workbench.bat 中的以下配置设为 1，再重新启动工作台。</p>
+      <code>set "PSYCHSANDBOX_SKILL_EXPERIMENT=1"</code><p>手动启动服务时，也可在启动终端设置同名环境变量。</p></section>
       : enabled === null ? <p>正在检查实验状态…</p> : <div className="evo-layout">
       <aside className="evo-sidebar"><section className="evo-card"><h3>01 / 选择经验</h3>
         <label>已提交会谈<select value={sourceIndex} onChange={e => setSourceIndex(e.target.value)} disabled={busy}>

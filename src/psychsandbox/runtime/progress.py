@@ -1,13 +1,66 @@
-"""Live progress ticks for the CLI bars.
-
-Two shapes are rendered here: one bar per candidate session while it is being
-generated (:class:`TurnProgress`) and one aggregated bar for the RFT scoring
-phase (:class:`ScoringProgress`). Both expose ``label`` plus ``render()``, which
-is the small contract the CLI renderer relies on.
-"""
+"""Execution stages, candidate turns and scoring counts for CLI and Web views."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+import time
+
+
+PHASE_LABELS = {
+    "preparing": "准备实验", "planning": "准备会谈", "generating": "生成对话",
+    "scoring": "候选评估", "consolidating": "会后整理", "committed": "会谈已提交",
+    "holistic": "全程督导", "report": "生成报告", "finished": "轨迹已保存",
+    "failed": "执行中断",
+}
+
+
+@dataclass(frozen=True)
+class RunProgress:
+    """Execution telemetry only; never a planning signal or clinical score."""
+
+    phase: str
+    session_index: int
+    sessions_total: int
+    sessions_completed: int
+    elapsed: float
+
+
+class SimulationProgressTracker:
+    """Combine stage, parallel candidate and scoring ticks into a public snapshot."""
+
+    def __init__(self, sessions_total: int, *, candidates_total: int = 1, clock=time.monotonic):
+        self.clock = clock
+        self.started = clock()
+        self.stage = RunProgress("preparing", 0, sessions_total, 0, 0.0)
+        self.candidates: dict[str, dict] = {}
+        self.scoring: dict | None = None
+        self.candidates_total = candidates_total
+
+    def update(self, event: RunProgress | TurnProgress | ScoringProgress | None) -> dict:
+        if isinstance(event, RunProgress):
+            if event.session_index != self.stage.session_index:
+                self.candidates.clear()
+                self.scoring = None
+            self.stage = event
+            self.started = self.clock() - event.elapsed
+        elif event is not None:
+            phase = "scoring" if isinstance(event, ScoringProgress) else "generating"
+            if event.session_index != self.stage.session_index:
+                self.candidates.clear()
+                self.scoring = None
+            self.stage = RunProgress(phase, event.session_index, self.stage.sessions_total,
+                                     self.stage.sessions_completed, self.clock() - self.started)
+            if isinstance(event, TurnProgress):
+                self.candidates[event.label or "1"] = asdict(event)
+            else:
+                self.scoring = asdict(event)
+        return self.snapshot()
+
+    def snapshot(self) -> dict:
+        return {
+            **asdict(self.stage), "elapsed": max(0.0, self.clock() - self.started),
+            "candidates": list(self.candidates.values()), "scoring": self.scoring,
+            "candidates_total": self.candidates_total,
+        }
 
 
 def format_duration(seconds: float) -> str:
@@ -98,4 +151,4 @@ class ScoringProgress:
         return text + f"  已用 {format_duration(self.elapsed)}  预计剩余 {eta}"
 
 
-__all__ = ["ScoringProgress", "TurnProgress", "format_duration"]
+__all__ = ["PHASE_LABELS", "RunProgress", "ScoringProgress", "SimulationProgressTracker", "TurnProgress", "format_duration"]

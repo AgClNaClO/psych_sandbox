@@ -328,6 +328,7 @@ def test_simulate_uses_resolved_config(
         "psycheval-cbt-001", therapy=None, session_count=config.session_count,
         seed=expected_seed, resume_run_id=args.resume_run, progress_callback=None,
         turn_progress=None,
+        status_progress=None,
     )
     sandbox.store.close.assert_called_once_with()
 

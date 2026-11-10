@@ -221,6 +221,7 @@ export function subscribeSSE(
     'opening_requested',
     'course_closed',
     'simulation_progress',
+    'simulation_status',
     'message_submitted',
     'counselor_replied',
     'session_closed',

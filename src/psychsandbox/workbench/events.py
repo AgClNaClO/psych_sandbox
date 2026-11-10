@@ -25,11 +25,22 @@ class EventHub:
         event_type: str,
         payload: dict[str, Any],
         schema_version: int = 1,
-    ) -> WorkbenchEvent:
+        *,
+        job_fence: tuple[str, int, str] | None = None,
+    ) -> WorkbenchEvent | None:
         """同步持久化写入事件，并调度异步通知"""
         conn = get_connection(self.db_path)
         try:
             with db_transaction(conn) as cur:
+                if job_fence is not None:
+                    job_id, attempt, worker_id = job_fence
+                    cur.execute(
+                        """SELECT 1 FROM jobs WHERE job_id = ? AND attempt = ?
+                        AND lease_owner = ? AND status = 'running' AND lease_expires_at > ?""",
+                        (job_id, attempt, worker_id, utc_now()),
+                    )
+                    if cur.fetchone() is None:
+                        return None
                 cur.execute(
                     "SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq FROM events WHERE stream = ?",
                     (stream,),

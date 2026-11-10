@@ -66,7 +66,11 @@ def test_api_therapies_and_cases(workbench_client):
     resp = client.get("/api/cases")
     assert resp.status_code == 200
     cases = resp.json()
-    assert len(cases) > 0
+    assert len(cases) == 341
+    assert {therapy: sum(case["therapy"] == therapy for case in cases)
+            for therapy in ("bt", "cbt", "het", "pdt", "pmt")} == {
+        "bt": 43, "cbt": 148, "het": 50, "pdt": 50, "pmt": 50,
+    }
     first_case = cases[0]
     assert "case_id" in first_case
     assert "client_name" in first_case
@@ -74,6 +78,26 @@ def test_api_therapies_and_cases(workbench_client):
     # 隐私保护断言：绝对不能直接暴露未披露的 private_notes 或内部全画像
     assert "private_notes" not in first_case
     assert "unconscious_conflict" not in first_case
+
+
+def test_api_cases_reports_unavailable_and_can_be_retried(workbench_client, monkeypatch):
+    client, _, _ = workbench_client
+    from psychsandbox.datasets import CaseRepository
+
+    guidance = "Processed case contains punctuation-only evidence; run explicit data convert."
+
+    def unavailable(_repo):
+        raise RuntimeError(guidance)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(CaseRepository, "list", unavailable)
+        response = client.get("/api/cases")
+        assert response.status_code == 503
+        assert response.json() == {"detail": guidance}
+
+    response = client.get("/api/cases")
+    assert response.status_code == 200
+    assert len(response.json()) == 341
 
 
 def test_api_jobs_lifecycle(workbench_client):

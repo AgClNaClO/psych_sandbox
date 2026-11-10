@@ -1,13 +1,15 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { api, subscribeSSE } from '../services/api';
-import type { CaseSummary, JobItem, RunDetail, RunSummary } from '../types';
+import type { CaseSummary, JobItem, RunDetail, RunSummary, SimulationProgress as Progress } from '../types';
 import {
   Play, Square, XCircle, RotateCcw, FileText, FlaskConical, History,
-  MessageSquare, ChevronDown, ChevronRight, PanelRightOpen, Settings2,
-  Terminal, ShieldCheck, BookOpen, Brain, X, Check, Circle,
+  MessageSquare, ChevronDown, ChevronRight, PanelLeftClose, PanelLeftOpen, PanelRightOpen, Settings2,
+  ShieldCheck, BookOpen, Brain, X, Check, Circle,
 } from 'lucide-react';
 import { getReplayMessages } from '../utils/replay';
 import { getSessionResumePayload } from '../utils/simulation';
+import { newerProgress } from '../utils/progress';
+import { SimulationProgress } from './SimulationProgress';
 import './SimulationHub.css';
 
 const therapyNames: Record<string, string> = {
@@ -40,6 +42,9 @@ const normalizeTherapy = (th?: string): string => {
 
 export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = false }) => {
   const [cases, setCases] = useState<CaseSummary[]>([]);
+  const [casesLoading, setCasesLoading] = useState(true);
+  const [casesError, setCasesError] = useState<string | null>(null);
+  const [casesLoadAttempt, setCasesLoadAttempt] = useState(0);
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedRunDetail, setSelectedRunDetail] = useState<RunDetail | null>(null);
@@ -48,7 +53,14 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
 
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const sidebarExpandRef = useRef<HTMLButtonElement>(null);
+  const sidebarCollapseRef = useRef<HTMLButtonElement>(null);
   const sessionTabsRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (sidebarCollapsed) sidebarExpandRef.current?.focus({ preventScroll: true });
+  }, [sidebarCollapsed]);
 
   useEffect(() => {
     const closePanels = (event: KeyboardEvent) => {
@@ -74,9 +86,10 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
     ? Math.min(100, Math.max(0, Number(sessionCount))) : 0;
   const [defaultsReady, setDefaultsReady] = useState(false);
   const [jobs, setJobs] = useState<JobItem[]>([]);
-  const [connected, setConnected] = useState(false);
+  const [connection, setConnection] = useState<{ jobId: string | null; connected: boolean }>({ jobId: null, connected: false });
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
-  const [liveLogs, setLiveLogs] = useState<string[]>([]);
+  const connected = connection.jobId === activeJobId && connection.connected;
+  const [progressByJob, setProgressByJob] = useState<Record<string, Progress>>({});
   const [loading, setLoading] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const trackedJob = jobs.find((job) => job.job_id === activeJobId);
@@ -99,13 +112,24 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
       setCandidates(String(data.rft.candidates));
       setDefaultsReady(true);
     }).catch((error: Error) => { if (!cancelled) setErrorMsg(error.message); });
-    api.getCases().then((data) => {
-      setCases(data);
-      if (data.length > 0) setSelectedCaseId(data[0].case_id);
-    }).catch(console.error);
     fetchRuns();
     return () => { cancelled = true; };
   }, [fetchRuns]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.getCases().then((data) => {
+      if (cancelled) return;
+      setCases(data);
+      setSelectedCaseId((current) => data.some((item) => item.case_id === current)
+        ? current : data[0]?.case_id ?? '');
+    }).catch((error: Error) => {
+      if (!cancelled) setCasesError(error.message);
+    }).finally(() => {
+      if (!cancelled) setCasesLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [casesLoadAttempt]);
 
   // Restore from the durable job list, including a job that completed while away.
   useEffect(() => {
@@ -176,28 +200,30 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
 
   // SSE 实时进度监听
   useEffect(() => {
-    // Reset the view when attaching to a different external event stream.
-    // oxlint-disable-next-line react/set-state-in-effect
-    setLiveLogs([]);
     if (!activeJobId) return;
-    setConnected(false);
+    let cancelled = false;
     const unsub = subscribeSSE(`job:${activeJobId}`, (event) => {
-      if (event.type === 'simulation_progress') {
-        setLiveLogs((prev) => [...prev.slice(-100), event.payload.message]);
+      if (cancelled) return;
+      if (event.type === 'simulation_status' && event.payload.progress) {
+        setProgressByJob(previous => ({ ...previous,
+          [activeJobId]: newerProgress(previous[activeJobId], event.payload.progress)!,
+        }));
       }
       if (['job_succeeded', 'job_stopped', 'job_failed', 'job_cancelled'].includes(event.type)) {
-        setJobs((prev) => prev.map((job) => job.job_id === activeJobId
-          ? { ...job, status: event.type === 'job_succeeded' ? 'succeeded' : event.type === 'job_stopped' ? 'stopped' : event.type === 'job_failed' ? 'failed' : 'cancelled' }
-          : job));
-        if (event.type === 'job_failed') setErrorMsg(event.payload.error || '任务失败');
+        // Replayed terminal events may belong to an older attempt. Read the
+        // durable job instead of letting an old event end a resumed run.
+        api.getJob(activeJobId).then(job => {
+          if (!cancelled) setJobs(previous => previous.map(item => item.job_id === job.job_id ? job : item));
+        }).catch(console.error);
         fetchRuns();
         if (event.payload.run_id) {
           setSelectedRunId(event.payload.run_id);
           api.getRunDetail(event.payload.run_id).then(setSelectedRunDetail).catch(console.error);
         }
       }
-    }, () => setConnected(false), () => setConnected(true));
-    return unsub;
+    }, () => { if (!cancelled) setConnection({ jobId: activeJobId, connected: false }); },
+    () => { if (!cancelled) setConnection({ jobId: activeJobId, connected: true }); });
+    return () => { cancelled = true; unsub(); };
   }, [activeJobId, fetchRuns]);
 
   const handleStartSimulation = async (resumeRun?: RunDetail) => {
@@ -207,7 +233,6 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
     try {
       setLoading(true);
       setErrorMsg(null);
-      setLiveLogs([]);
       const job = await api.createSimulationJob(resumePayload ?? {
         case_id: selectedCaseId,
         session_count: Number(sessionCount),
@@ -222,7 +247,6 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
       setSelectedRunId(job.run_id ?? resumeRun?.run_id ?? null);
       setSelectedRunDetail(resumeRun ?? null);
       setActiveJobId(job.job_id);
-      setLiveLogs([`任务已提交至后台 Long Lane (ID: ${job.job_id})...`]);
     } catch (err: any) {
       setErrorMsg(err.message);
     } finally {
@@ -234,7 +258,7 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
     if (!activeJobId) return;
     try {
       await api.stopJob(activeJobId);
-      setLiveLogs((prev) => [...prev, '>>> 已发送在会谈边界停止请求，等待当前会谈提交后退出...']);
+      setJobs(previous => previous.map(job => job.job_id === activeJobId ? { ...job, stop_requested: true } : job));
     } catch (err: any) {
       setErrorMsg(err.message);
     }
@@ -244,7 +268,7 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
     if (!activeJobId) return;
     try {
       await api.cancelJob(activeJobId);
-      setLiveLogs((prev) => [...prev, '>>> 已发送立即取消请求...']);
+      setJobs(previous => previous.map(job => job.job_id === activeJobId ? { ...job, cancel_requested: true } : job));
     } catch (err: any) {
       setErrorMsg(err.message);
     }
@@ -290,14 +314,22 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
   }
 
   return (
-    <div className={`three-column-container simulation-workspace ${inspectorOpen ? 'inspector-open' : ''} ${configOpen ? 'config-open' : ''}`}>
+    <div className={`three-column-container simulation-workspace ${inspectorOpen ? 'inspector-open' : ''} ${configOpen ? 'config-open' : ''} ${sidebarCollapsed ? 'config-collapsed' : ''}`}>
       {(inspectorOpen || configOpen) && <button className="workspace-scrim" aria-label="关闭侧栏"
         onClick={() => { setInspectorOpen(false); setConfigOpen(false); }} />}
+
+      <button ref={sidebarExpandRef} type="button" className="sidebar-expand" aria-label="展开左侧栏" title="展开配置与历史记录"
+        aria-controls="simulation-config" aria-expanded={!sidebarCollapsed} onClick={() => {
+          setSidebarCollapsed(false);
+          window.requestAnimationFrame(() => sidebarCollapseRef.current?.focus({ preventScroll: true }));
+        }}><PanelLeftOpen size={16} /></button>
 
       <aside id="simulation-config" className="column-left sim-sidebar" aria-label="实验配置与历史记录">
         <div className="sim-panel-heading">
           <span className="panel-heading-icon"><FlaskConical size={18} /></span>
           <div><h2>实验配置</h2><p>设置参数，开始一次仿真</p></div>
+          <button ref={sidebarCollapseRef} type="button" className="icon-button sidebar-collapse" aria-label="折叠左侧栏" title="折叠配置与历史记录"
+            aria-controls="simulation-config" aria-expanded={!sidebarCollapsed} onClick={() => { setSidebarCollapsed(true); setConfigOpen(false); }}><PanelLeftClose size={17} /></button>
           <button className="icon-button config-close" aria-label="关闭实验配置" onClick={() => setConfigOpen(false)}><X size={17} /></button>
         </div>
         <div className="column-body sim-sidebar-body">
@@ -307,8 +339,10 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
           }}>
             <div className="sim-config-fields">
               <div className="sim-field therapy-filter-field">
-                <div className="field-label-row"><label htmlFor="therapy-filter">案例库</label><span>{cases.length} 个案例</span></div>
-                <select id="therapy-filter" value={therapyFilter} onChange={(event) => {
+                <div className="field-label-row"><label htmlFor="therapy-filter">案例库</label>
+                  <span aria-live="polite">{casesLoading ? '正在加载…' : casesError ? '加载失败' : `${cases.length} 个案例`}</span>
+                </div>
+                <select id="therapy-filter" value={therapyFilter} disabled={casesLoading || !!casesError} onChange={(event) => {
                   const filter = event.target.value;
                   setTherapyFilter(filter);
                   const matching = cases.filter((item) => filter === 'all' || normalizeTherapy(item.therapy) === filter);
@@ -316,14 +350,15 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
                 }}>
                   <option value="all">全部流派</option>
                   {Object.entries(therapyNames).map(([id, name]) => <option key={id} value={id}>
-                    {id.toUpperCase()} · {name}（{cases.filter((item) => normalizeTherapy(item.therapy) === id).length}）
+                    {id.toUpperCase()} · {name}（{casesLoading || casesError ? '—' : cases.filter((item) => normalizeTherapy(item.therapy) === id).length}）
                   </option>)}
                 </select>
               </div>
               <div className="sim-field">
                 <label htmlFor="simulation-case">来访者案例</label>
-                <select id="simulation-case" value={selectedCaseId} onChange={(event) => setSelectedCaseId(event.target.value)}>
-                  {filteredCases.length === 0 && <option value="">暂无可用案例</option>}
+                <select id="simulation-case" value={selectedCaseId} disabled={casesLoading || !!casesError || filteredCases.length === 0}
+                  aria-describedby={casesError ? 'case-library-error' : undefined} onChange={(event) => setSelectedCaseId(event.target.value)}>
+                  {filteredCases.length === 0 && <option value="">{casesLoading ? '正在加载案例…' : casesError ? '案例库加载失败' : '暂无可用案例'}</option>}
                   {Object.entries(therapyNames).map(([id, name]) => {
                     const group = filteredCases.filter((item) => normalizeTherapy(item.therapy) === id);
                     return group.length > 0 && <optgroup key={id} label={`${id.toUpperCase()} · ${name}`}>
@@ -331,6 +366,14 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
                     </optgroup>;
                   })}
                 </select>
+                {casesError && <div id="case-library-error" className="sim-error case-library-error" role="alert">
+                  <p>案例库加载失败：{casesError}</p>
+                  <button type="button" className="btn btn-secondary" onClick={() => {
+                    setCasesLoading(true);
+                    setCasesError(null);
+                    setCasesLoadAttempt((previous) => previous + 1);
+                  }}><RotateCcw size={12} />重新加载</button>
+                </div>}
               </div>
               <div className="sim-field-grid">
                 <div className="sim-field">
@@ -343,7 +386,7 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
                   <input id="simulation-seed" type="number" required step={1} value={seed} onChange={(event) => setSeed(event.target.value)} />
                 </div>
               </div>
-              <div className="sim-field">
+              <div className="sim-field turn-limit-field">
                 <div className="field-label-row"><label htmlFor="max-turns">每场轮数上限</label><span>1–50 轮</span></div>
                 <input id="max-turns" aria-label="每场轮数上限" type="number" required min={1} max={50} step={1} value={maxTurns}
                   onChange={(event) => setMaxTurns(event.target.value)} />
@@ -375,7 +418,7 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
                 </>}
               </div>
             </div>
-            <button type="submit" className="btn btn-primary start-simulation" disabled={loading || observerMode || simulationBusy || !defaultsReady || !selectedCaseId}>
+            <button type="submit" className="btn btn-primary start-simulation" disabled={loading || observerMode || simulationBusy || !defaultsReady || casesLoading || !!casesError || !selectedCaseId}>
               {loading ? <RotateCcw size={15} className="animate-spin" /> : <Play size={15} />}
               {observerMode ? '观察者模式' : loading ? '正在提交…' : simulationBusy ? '实验进行中' : '启动后台实验'}
             </button>
@@ -444,23 +487,11 @@ export const SimulationHub: React.FC<SimulationHubProps> = ({ observerMode = fal
           <span className="session-total">共 {displayedRun.sessions.length} 场</span>
         </div>}
 
-        {jobs.length > 0 && <div className="job-monitor">
-          <div className="job-monitor-row"><Terminal size={14} /><label htmlFor="background-job">后台任务</label>
-            <select id="background-job" aria-label="后台任务" value={activeJobId ?? ''} onChange={(event) => setActiveJobId(event.target.value || null)}>
-              <option value="">选择任务查看进度</option>
-              {jobs.map((job) => <option key={job.job_id} value={job.job_id}>{job.job_id} · {job.payload.case_id} · {statusLabels[job.status] ?? job.status}</option>)}
-            </select>
-            {trackedJob && <span className={`tag tag-${statusTone(trackedJob.status)}`}>{statusLabels[trackedJob.status] ?? trackedJob.status}</span>}
-          </div>
-          {activeJobId && <div className="job-monitor-caption"><span className={`monitor-dot ${connected ? 'connected' : ''}`} />
-            {connected ? '进度已连接' : '进度连接中，自动重连'}<span>· 返回页面后自动恢复</span>
-          </div>}
-          {trackedJob?.error && <div className="sim-error" role="alert">{trackedJob.error}</div>}
-          {liveLogs.length > 0 && <details className="progress-log">
-            <summary><Terminal size={13} /><span>运行日志</span><span className="latest-log">{liveLogs[liveLogs.length - 1]}</span><ChevronDown size={14} /></summary>
-            <div className="progress-log-content" aria-label="运行日志内容">{liveLogs.map((log, index) => <div key={index}>{log}</div>)}</div>
-          </details>}
-        </div>}
+        {(trackedJob || displayedRun) && <SimulationProgress job={trackedJob} run={displayedRun}
+          progress={activeJobId ? progressByJob[activeJobId] : null} connected={connected}
+          experiments={jobs.map((job, index) => ({ id: job.job_id,
+            label: `${cases.find(item => item.case_id === job.payload.case_id)?.title ?? '仿真实验'} · ${statusLabels[job.status] ?? job.status} · ${index + 1}`,
+          }))} onSelect={id => setActiveJobId(id || null)} />}
 
         <div className="column-body sim-transcript" key={`${selectedRunId}-${selectedSessionIdx}`}>
           {currentSession ? <>

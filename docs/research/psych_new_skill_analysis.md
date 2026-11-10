@@ -10,6 +10,10 @@
 
 当前沙盒的Planner/Observation/Actor与来源链不同：公开证据选组、精确展开、超阈值才向量筛选，Actor给出目录内ID。不能把来源项目文字标签当成原生tools协议。
 
+2026-11-10 对照：沙盒最多选择 3 个有公开依据的末级组，展开数严格大于 24 时默认保留 12 个原子技能，查询最多纠错一次。下方的粗筛 20、精筛 5、重试 16 和 45 轮属于原 Psych-new 核查，不是沙盒默认值。现行输入、过滤与审计见 [技能选择](../SKILL_SELECTION.md)。
+
+独立技能试验的同分支 embedding 查重用于决定 Append/Merge/Skip，与正式咨询师的逐轮候选缩减用途不同；试验产物不回写原始 JSON，也不使用旧 `.pt` 缓存。
+
 ## 未实施建议与验证边界
 
 若比较两条链，应固定病例、目标、可见记忆与候选库，并报告成本/失败；本次没有启动外部服务或复现效果。历史表格记录资源与调用形态。
@@ -57,7 +61,7 @@
 | PMT stage2 | 56 | 44 | 370 | 6 / 7 |
 | PMT stage3 | 4 | 1 | 9 | 4 / 5 |
 
-| 参数 | 默认值/当前默认 YAML | 实际作用 |
+| Psych-new 参数 | 历史核查的默认值/YAML | 当时的实际作用 |
 |---|---|---|
 | psychagent_skill_base_dir | assets/skills/sect | 技能资源根目录 |
 | psychagent_skill_sects | all，即 cbt、bt、pdt、het、pmt | 启动加载这五个流派各三个阶段 |
@@ -72,7 +76,7 @@
 | psychagent_max_retries | 16 | sample 外层粗筛、检索、回复等重试 |
 | psychagent_max_turns | 45 | sample rollout 的咨询师轮次上限 |
 
-| 提示词 | 当前调查入口中的状态 |
+| Psych-new 提示词 | 历史调查入口中的状态 |
 |---|---|
 | skill/select_skill/system.txt、user.txt | 启动时读入；粗筛时渲染并发送 |
 | skill/rewrite/system.txt、user.txt | 启动时读入；非空候选的精筛调用中发送 |

@@ -4,6 +4,10 @@ rem  PsychSandbox Scientific Workbench Launcher
 rem  Maintenance: this file must stay ASCII-only.
 rem ============================================================
 
+setlocal
+rem Workbench configuration: set to 0 to disable skill evolution experiments.
+set "PSYCHSANDBOX_SKILL_EXPERIMENT=1"
+
 cd /d "%~dp0"
 
 set PY=%~dp0.venv\Scripts\python.exe

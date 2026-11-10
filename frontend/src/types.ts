@@ -110,11 +110,26 @@ export interface JobItem {
   stop_requested: boolean;
   cancel_requested: boolean;
   result?: any;
+  progress?: SimulationProgress | null;
   error?: string | null;
   run_id?: string | null;
   course_id?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface SimulationProgress {
+  phase: string;
+  session_index: number;
+  sessions_total: number;
+  sessions_completed: number;
+  elapsed: number;
+  updated_at: string;
+  attempt: number;
+  revision: number;
+  candidates_total: number;
+  candidates: { label: string; turn_index: number; total_turns: number; elapsed: number; eta: number }[];
+  scoring: { instruments_done: number; instruments_total: number; candidates_scored: number; candidates_total: number; elapsed: number; eta: number; last_instrument: string } | null;
 }
 
 export interface Course {

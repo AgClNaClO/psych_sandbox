@@ -21,7 +21,16 @@ from .models import JobKind, JobLane, JobResponse
 from ..domain import utc_now
 
 
+_WITH_PROGRESS = """SELECT jobs.*, (
+    SELECT payload_json FROM events
+    WHERE stream = 'job:' || jobs.job_id AND type = 'simulation_status'
+    ORDER BY seq DESC LIMIT 1
+) AS progress_json FROM jobs"""
+
+
 def _to_job_response(row: Any) -> JobResponse:
+    event = json.loads(row["progress_json"]) if "progress_json" in row.keys() and row["progress_json"] else None
+    progress = event.get("progress") if event and event.get("attempt") == row["attempt"] else None
     return JobResponse(
         job_id=row["job_id"],
         kind=row["kind"],
@@ -36,6 +45,7 @@ def _to_job_response(row: Any) -> JobResponse:
         stop_requested=bool(row["stop_requested"]),
         cancel_requested=bool(row["cancel_requested"]),
         result=json.loads(row["result_json"]) if row["result_json"] else None,
+        progress=progress,
         error=row["error"],
         run_id=row["run_id"],
         course_id=row["course_id"],
@@ -350,7 +360,7 @@ class JobManager:
         conn = get_connection(self.db_path)
         try:
             cur = conn.cursor()
-            cur.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,))
+            cur.execute(_WITH_PROGRESS + " WHERE job_id = ?", (job_id,))
             row = cur.fetchone()
             return _to_job_response(row) if row else None
         finally:
@@ -362,12 +372,12 @@ class JobManager:
             cur = conn.cursor()
             if lane:
                 cur.execute(
-                    "SELECT * FROM jobs WHERE lane = ? ORDER BY created_at DESC LIMIT ?",
+                    _WITH_PROGRESS + " WHERE lane = ? ORDER BY created_at DESC LIMIT ?",
                     (lane, limit),
                 )
             else:
                 cur.execute(
-                    "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)
+                    _WITH_PROGRESS + " ORDER BY created_at DESC LIMIT ?", (limit,)
                 )
             return [_to_job_response(r) for r in cur.fetchall()]
         finally:

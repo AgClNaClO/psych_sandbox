@@ -10,6 +10,8 @@
 
 Compact压缩内部决策为一次规划；Faithful分阶段规划并在接受台词后判断信任。项目额外保留会谈范围、依赖、歧义、台词证据和泄漏检查；blocked只传元数据，生成器不见完整画像。详见 [实现说明](../CLIENT_SIMULATION.md)。
 
+2026-11-10 对照：当前提示词版本为 `psycheval_patientact_v7`，默认 `compact_patientact`、来访者生成温度 0.7、规划温度 0。新信任下一轮才影响披露，生成重试不重复提交状态。CLI 与网页的候选进度不改变这些时序，也不为已结束候选补足轮数。
+
 ## 未实施建议与验证边界
 
 真实度、阻抗质量、事实忠实及披露节奏需独立评价。关闭记忆的基线故意不直喂私有画像，因此不宣称逐项复现论文消融。
@@ -33,7 +35,7 @@ Compact压缩内部决策为一次规划；Faithful分阶段规划并在接受�
 | 情绪真实性 | 4.15 | 3.83 | +0.32 |
 | 行为真实性 | 4.15 | 3.52 | +0.63 |
 
-| PatientAct 论文机制 | 当前项目对应物 | 关系 |
+| PatientAct 论文机制 | 历史核查时项目对应物 | 关系（原核查口径） |
 |---|---|---|
 | 静态身份/表达与动态记忆分离 | `ClientProfile.static_traits`、`DisclosureItem` | 结构思想相近，但字段来自 PsychEval 编译，不照搬论文生成画像 |
 | 激活标签 + 信任阈值 | `TagActivationMatcher`、`DisclosureGate.evaluate` | 当前实现还加入 session scope、依赖条件、歧义消解 |

@@ -2,6 +2,8 @@
 
 借鉴 Zhang et al., *Mechanistic control of large language models as simulated participants via linear representation*，DOI [10.1038/s44387-026-00160-9](https://doi.org/10.1038/s44387-026-00160-9)，式8及数值概率质量门。只借鉴评分方法，不迁移激活引导、开放权重或内部表征访问。
 
+实现核对日期：2026-11-10；下方 2026-11-02 与 2026-09-27 的端点表保留原始观测日期，本次文档同步没有重新请求真实端点。当前默认仍为 RFT 开启、logprob 关闭。
+
 ## 当前实现：item_logprob_v2
 
 每个 PsychEval 原提示文件只请求一次完整 `{"items":[...]}` JSON，开启 logprobs/top_logprobs，不发送 response_format 或 tools。逐项定位 `items[*].score` 的 JSON 词法跨度，并与 UTF-8 Token 字节位置对齐。条目编号、证据字符串和其他数字不参与评分；不通过宽泛正则扫描或文本修复猜位置。
@@ -40,6 +42,8 @@ Top-20不是全词表；缺席候选不能当作已知零概率。期望与质�
 logprob默认关闭，可用YAML enabled:true或CLI --logprob-scoring显式开启；开启前先执行端点探针。启动器默认关闭评分和预探针，可分别设置LOGPROB_SCORING=1与PROBE_LOGPROB=1启用；批处理保持ASCII且不调用chcp。RFT默认开启，候选数为3。`temperature.control=0`控制规划/记忆，生成温度分别为来访者0.7和咨询师0.9，评分0是项目的稳定性默认，区别于论文0.7。
 
 评分快照记录item_logprob_v2。旧instrument_logprob_v1历史奖励不能作为新RFT运行的比较基线；恢复时不匹配要求新建运行。已有文件和共享数据库不自动迁移。
+
+网页显示的“量表已完成”只是执行计数，不是概率质量、评分接受状态或临床结论。进度快照不改变严格评分失败规则；独立技能试验的两组完整模拟也沿用项目当前评分开关，而不是自动启用 logprob。开关与产物路径见 [工作台](../docs/workbench/README.md)。
 
 ## 历史：总体评分探针（2026-09-27，仅代表旧方法）
 

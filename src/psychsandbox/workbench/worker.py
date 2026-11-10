@@ -16,6 +16,7 @@ from pathlib import Path
 import signal
 import sys
 import traceback
+import time
 import uuid
 from typing import Any, Callable
 
@@ -33,6 +34,7 @@ from .models import JobLane, JobResponse, SimulationJobPayload
 from .events import get_event_hub
 from .interactive import CourseManager, InteractiveRunner
 from ..runtime import CounselingSandbox
+from ..runtime.progress import RunProgress, ScoringProgress, SimulationProgressTracker, TurnProgress
 from ..runtime.storage import SQLiteStore
 from ..runtime.run_management import available_run_dir
 from ..visualization import generate_run_report
@@ -231,6 +233,31 @@ class WorkbenchWorker:
         sandbox.skill_catalog = SkillCatalog(registry)
         sandbox.counselor.skill_catalog = sandbox.skill_catalog
 
+        tracker = SimulationProgressTracker(session_count, candidates_total=config.rft.candidates if config.rft.enabled else 1)
+        last_progress_at = 0.0
+        revision = 0
+
+        def status_cb(event: RunProgress | TurnProgress | ScoringProgress | None):
+            nonlocal last_progress_at, revision
+            previous_phase = tracker.stage.phase
+            new_candidate = isinstance(event, TurnProgress) and (event.label or "1") not in tracker.candidates
+            snapshot = tracker.update(event)
+            now = time.monotonic()
+            finished_tick = (isinstance(event, TurnProgress) and event.turn_index >= event.total_turns
+                             or isinstance(event, ScoringProgress) and event.candidates_scored >= event.candidates_total)
+            changed_phase = snapshot["phase"] != previous_phase
+            if (event is not None and not isinstance(event, RunProgress) and not finished_tick
+                    and not changed_phase and not new_candidate and now - last_progress_at < 0.3):
+                return
+            revision += 1
+            snapshot.update(attempt=job.attempt, revision=revision, updated_at=utc_now())
+            self.event_hub.emit(
+                f"job:{job.job_id}", "simulation_status",
+                {"job_id": job.job_id, "run_id": run_id, "attempt": job.attempt, "progress": snapshot},
+                job_fence=(job.job_id, job.attempt, self.worker_id),
+            )
+            last_progress_at = now
+
         def progress_cb(msg: str):
             nonlocal run_id
             if run_id is None and sandbox.run_dir is not None:
@@ -264,11 +291,14 @@ class WorkbenchWorker:
                     case_id=case_id, therapy=therapy, session_count=session_count,
                     seed=seed, resume_run_id=resume_run_id, run_id=run_id,
                     progress_callback=progress_cb, should_stop=should_stop,
+                    turn_progress=status_cb, status_progress=status_cb,
                 )
         finally:
             sandbox.store.close()
 
         # Match CLI reporting; reacquire the run lock and honor deletion journals.
+        status_cb(RunProgress("report", len(result.sessions), session_count,
+                              len(result.sessions), tracker.snapshot()["elapsed"]))
         with available_run_dir(config.trace_dir, result.run_id) as report_dir:
             generate_run_report(result, report_dir / "report.html")
 

@@ -7,19 +7,25 @@ import os
 import shutil
 import sqlite3
 import sys
+import time
 import uuid
 from contextlib import closing
+from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 from .artifacts import (
-    create_artifact_dir, latest_data_dir, local_temp_dir, runtime_root,
+    create_artifact_dir, exclusive_run_dir, latest_data_dir, local_temp_dir, runtime_root,
     set_latest_data, write_json,
 )
+from .console import ProgressDisplay, enable_vt, progress_text
+from .runtime.progress import PHASE_LABELS, RunProgress, ScoringProgress, TurnProgress
 from .config import default_config
 from .datasets import (
     CaseRepository,
+    ConversionProgress,
     convert_psycheval_extractive,
     fetch_psycheval,
     merge_therapy_conversions,
@@ -39,6 +45,16 @@ from .visualization import generate_run_report
 
 
 DISCLAIMER = "仅用于非商业教学研究；不是医疗服务，不用于诊断、治疗或危机处置。"
+
+
+def _conversion_concurrency(value: str) -> int:
+    try:
+        result = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("并发数必须是 1–32 的整数") from exc
+    if not 1 <= result <= 32:
+        raise argparse.ArgumentTypeError("并发数必须是 1–32 的整数")
+    return result
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -70,6 +86,11 @@ def build_parser() -> argparse.ArgumentParser:
     convert.add_argument(
         "--atomizer", choices=["extractive", "rules"], default="extractive"
     )
+    convert.add_argument(
+        "--concurrency", type=_conversion_concurrency, default=4,
+        help="抽取请求的最大并发数，1–32，默认 4；设为 1 串行执行",
+    )
+    convert.add_argument("--no-progress", action="store_true", help="关闭转换进度输出；标准输出仍为 JSON")
 
     cases = commands.add_parser("cases")
     case_commands = cases.add_subparsers(dest="cases_command", required=True)
@@ -156,108 +177,175 @@ def _config(args: argparse.Namespace) -> SandboxConfig:
 
 
 def _enable_windows_vt() -> bool:
-    """Try to enable ANSI/VT processing; return whether ANSI is available.
-
-    The legacy Windows console does not interpret ``\\x1b[...`` sequences by
-    default, so a live progress bar would print a trailing ``[K``. Enabling
-    virtual-terminal processing fixes that. Non-Windows terminals handle ANSI
-    natively, and non-TTY output is handled separately by the renderer.
-    """
-    if sys.platform != "win32":
-        return True
-    try:
-        import ctypes
-
-        kernel32 = ctypes.windll.kernel32
-        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
-        mode = ctypes.c_uint32()
-        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
-            return False
-        # ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
-        kernel32.SetConsoleMode(handle, mode.value | 0x0004)
-        updated = ctypes.c_uint32()
-        kernel32.GetConsoleMode(handle, ctypes.byref(updated))
-        return bool(updated.value & 0x0004)
-    except Exception:
-        return False
+    return enable_vt(sys.stdout)
 
 
 class _ProgressRenderer:
-    """Draw live progress bars alongside line messages without interleaving.
+    """Stable width-aware bars in CMD; bounded plain lines when redirected."""
 
-    When ANSI is available, progress bars form a block anchored at the bottom
-    and line messages are inserted above it. Otherwise it falls back to a
-    single carriage-return bar, which every terminal supports.
-    """
-
-    def __init__(self, ansi: bool) -> None:
-        self._ansi = ansi and bool(getattr(sys.stdout, "isatty", lambda: False)())
-        self._entries: dict[str, str] = {}
-        self._order: list[str] = []
-        self._active = False
-        self._width = 0
+    def __init__(self, ansi: bool, *, stream=None, clock=time.monotonic, size=None) -> None:
+        self.display = ProgressDisplay(stream, ansi=ansi, size=size)
+        self.clock = clock
+        self._ticks = {}
+        self._run = None
+        self._run_received = clock()
+        self._drawn = 0.0
+        self._buckets = {}
+        self._printed_counts = {}
 
     def line(self, message: str) -> None:
-        if self._ansi:
-            n = len(self._order)
-            if n:
-                sys.stdout.write(f"\x1b[{n}A\r")
-            sys.stdout.write(message + "\x1b[K\n")
-            for key in self._order:
-                sys.stdout.write("\r" + self._entries[key] + "\x1b[K\n")
-            sys.stdout.flush()
-            return
-        self._clear_line()
-        print(message, flush=True)
+        self.display.line(message)
 
-    def progress(self, progress) -> None:
-        if progress is None:
-            self._entries.clear()
-            self._order.clear()
-            self._active = False
-            self._width = 0
-            return
-        text = progress.render()
-        if self._ansi:
-            key = progress.label
-            if key not in self._entries:
-                self._order.append(key)
-                self._entries[key] = text
-                sys.stdout.write("\r" + text + "\x1b[K\n")
-                sys.stdout.flush()
-                return
-            self._entries[key] = text
-            self._redraw()
-            return
-        self._active = True
-        if len(text) < self._width:
-            text += " " * (self._width - len(text))
+    def status(self, event: RunProgress) -> None:
+        if self._run is None or self._run.phase != event.phase:
+            self.display.finish()
+            self._ticks.clear()
+        self._run, self._run_received = event, self.clock()
+        if self.display.tty:
+            self.refresh(force=True)
         else:
-            self._width = len(text)
-        sys.stdout.write("\r" + text)
-        sys.stdout.flush()
+            self.display.line(f"{PHASE_LABELS.get(event.phase, event.phase)} | "
+                              f"会谈 {event.sessions_completed}/{event.sessions_total} 已提交")
 
-    def _redraw(self) -> None:
-        n = len(self._order)
-        if n == 0:
+    def progress(self, event) -> None:
+        if event is None:
+            if self.display.tty:
+                self.refresh(force=True)
+            else:
+                for key, (tick, _) in self._ticks.items():
+                    if self._printed_counts.get(key) != self._counts(tick)[0]:
+                        self.display.line(self._format(tick, 160, tick.elapsed))
+            self.display.finish()
+            self._ticks.clear()
             return
-        sys.stdout.write(f"\x1b[{n}A\r")
-        for key in self._order:
-            sys.stdout.write("\r" + self._entries[key] + "\x1b[K\n")
-        sys.stdout.flush()
+        key = (type(event).__name__, event.session_index, event.label)
+        self._ticks[key] = (event, self.clock())
+        if self._run:
+            phase = "scoring" if isinstance(event, ScoringProgress) else "generating"
+            self._run = RunProgress(phase, event.session_index, self._run.sessions_total,
+                                    self._run.sessions_completed, self._run.elapsed)
+        done, total = self._counts(event)
+        if not self.display.tty:
+            bucket = int(min(1.0, done / max(1, total)) * 10)
+            if bucket > self._buckets.get(key, -1):
+                self.display.line(self._format(event, 160, event.elapsed))
+                self._buckets[key] = bucket
+                self._printed_counts[key] = done
+            return
+        self.refresh(force=done >= total)
 
-    def _clear_line(self) -> None:
-        if self._active:
-            sys.stdout.write("\r" + " " * self._width + "\r")
-            sys.stdout.flush()
-            self._active = False
-            self._width = 0
+    @staticmethod
+    def _counts(event):
+        if isinstance(event, TurnProgress):
+            return event.turn_index, event.total_turns
+        return ((event.instruments_done, event.instruments_total) if event.instruments_total > 0
+                else (event.candidates_scored, event.candidates_total))
+
+    def _format(self, event, width, elapsed):
+        done, total = self._counts(event)
+        if isinstance(event, TurnProgress):
+            prefix = f"会谈 {event.session_index}" + (f" 候选 {event.label}" if event.label else "")
+            unit, detail = "轮上限", ""
+        else:
+            prefix = f"会谈 {event.session_index} 候选评估"
+            unit = "量表" if event.instruments_total > 0 else "候选"
+            detail = f"候选 {event.candidates_scored}/{event.candidates_total}"
+        return progress_text(prefix, done, total, width, unit=unit, elapsed=elapsed,
+                             eta=event.eta if done > 0 else None, detail=detail)
+
+    def refresh(self, force: bool = False) -> None:
+        if not self.display.tty:
+            return
+        now = self.clock()
+        if not force and now - self._drawn < 0.1:
+            return
+        width, lines = self.display.columns, []
+        if self._run:
+            event = self._run
+            elapsed = event.elapsed + now - self._run_received
+            lines.append(progress_text("会谈提交", event.sessions_completed, event.sessions_total, width,
+                                       unit="场", elapsed=elapsed,
+                                       detail=PHASE_LABELS.get(event.phase, event.phase)))
+        for event, received in self._ticks.values():
+            done, total = self._counts(event)
+            elapsed = event.elapsed if done >= total else event.elapsed + now - received
+            lines.append(self._format(event, width, elapsed))
+        self.display.show(lines)
+        self._drawn = now
+
+    def finish(self) -> None:
+        self.display.finish()
+
+
+
+class _ConversionProgressRenderer:
+    """Keep JSON stdout clean; render live bars or bounded plain-text log lines."""
+
+    def __init__(self, *, enabled: bool = True, stream=None):
+        self.enabled = enabled
+        self.stream = stream if stream is not None else sys.stderr
+        self._display = ProgressDisplay(self.stream)
+        self.tty = self._display.tty
+        self._phase = None
+        self._bucket = -1
+        self._printed = 0.0
+        self._width = 0
+
+    def __call__(self, event: ConversionProgress) -> None:
+        if not self.enabled:
+            return
+        key = (event.therapy, event.phase)
+        changed = key != self._phase
+        ratio = min(1.0, event.completed / event.total) if event.total else 1.0
+        bucket = int(ratio * 10)
+        complete = event.completed >= event.total
+        now = time.monotonic()
+        if not changed and not complete:
+            if self.tty and now - self._printed < 0.1:
+                return
+            if not self.tty and bucket <= self._bucket:
+                return
+        if changed:
+            self.finish()
+        phases = {"pilot": "试转换", "extract": "抽取", "compile": "编译病例",
+                  "merge": "合并", "validate": "校验", "publish": "发布"}
+        filled = int(ratio * 20)
+        eta = "--" if event.eta is None else f"{event.eta:.0f}s"
+        text = (
+            f"{event.therapy.upper()} {phases.get(event.phase, event.phase)} "
+            f"[{'#' * filled}{'-' * (20 - filled)}] {ratio:6.1%} "
+            f"{event.completed}/{event.total}  缓存 {event.cache_hits} "
+            f"复用 {event.reused} 回退 {event.fallbacks} 跳过 {event.skipped} "
+            f"用时 {event.elapsed:.1f}s  预计剩余 {eta}"
+        )
+        if self.tty:
+            text = progress_text(f"{event.therapy.upper()} {phases.get(event.phase, event.phase)}",
+                                 event.completed, event.total, self._display.columns,
+                                 elapsed=event.elapsed, eta=event.eta,
+                                 detail=f"缓存 {event.cache_hits} 复用 {event.reused}")
+            self._display.show([text])
+        else:
+            self.stream.write(text + "\n")
+        self.stream.flush()
+        self._phase, self._bucket, self._printed = key, bucket, now
+        if complete:
+            self.finish()
+
+    def finish(self) -> None:
+        self._display.finish()
 
 
 async def _simulate(args: argparse.Namespace) -> int:
     config = _config(args)
     sandbox = CounselingSandbox(config)
     renderer = _ProgressRenderer(_enable_windows_vt())
+
+    async def refresh_display():
+        while True:
+            await asyncio.sleep(0.25)
+            renderer.refresh()
+
+    ticker = asyncio.create_task(refresh_display()) if not args.json and renderer.display.tty else None
     try:
         result = await sandbox.run_case(
             args.case,
@@ -267,8 +355,16 @@ async def _simulate(args: argparse.Namespace) -> int:
             resume_run_id=args.resume_run,
             progress_callback=(None if args.json else renderer.line),
             turn_progress=(None if args.json else renderer.progress),
+            status_progress=(None if args.json else renderer.status),
         )
     finally:
+        if ticker:
+            ticker.cancel()
+            try:
+                await ticker
+            except asyncio.CancelledError:
+                pass
+        renderer.finish()
         sandbox.store.close()
     visualization = None
     if not args.no_visualization:
@@ -427,10 +523,11 @@ async def _convert_data(args: argparse.Namespace, root: Path) -> dict:
         raise RuntimeError(
             "schema-v4 runtime cache is atomic and must be compiled with --therapy all"
         )
-    therapies = (
-        ["bt", "cbt", "het", "pdt", "pmt"]
-        if args.therapy == "all" else [args.therapy]
-    )
+    therapies = ["bt", "cbt", "het", "pdt", "pmt"]
+    concurrency = getattr(args, "concurrency", 4)
+    if isinstance(concurrency, bool) or not isinstance(concurrency, int) or not 1 <= concurrency <= 32:
+        raise ValueError("conversion concurrency must be an integer from 1 to 32")
+    root = root.resolve()
     source_dir = root
     if not all((source_dir / "data" / therapy).is_dir() for therapy in therapies):
         source_dir = latest_data_dir(root, "external")
@@ -442,48 +539,81 @@ async def _convert_data(args: argparse.Namespace, root: Path) -> dict:
         )
     if not os.getenv("PROFILE_MODEL"):
         raise RuntimeError("PROFILE_MODEL must be configured for schema-v4 conversion")
-    gateway = (
-        create_gateway(
-            diagnostic_dir=staging_root / "diagnostics",
-            required_roles={"profile"},
-        )
-        if args.atomizer == "extractive" else None
-    )
-    if not getattr(gateway, "models", {}).get("profile"):
-        raise RuntimeError("PROFILE_MODEL must be configured for schema-v4 conversion")
-    manifests = []
+    config = default_config(root)
+    run_dir = create_artifact_dir(runtime_root(root), "data-convert")
+    metadata = {
+        "command": "data convert", "status": "running", "concurrency": concurrency,
+        "started_at": datetime.now().astimezone().isoformat(),
+        "staging_dir": str(staging_root), "output_dir": str(output_root),
+    }
+    write_json(run_dir / "run.json", metadata)
+    renderer = _ConversionProgressRenderer(enabled=not getattr(args, "no_progress", False))
+    if renderer.enabled:
+        print(f"转换记录：{run_dir}", file=sys.stderr, flush=True)
+    output_root.parent.mkdir(parents=True, exist_ok=True)
     try:
-        for therapy in therapies:
-            output = (
-                staging_root / "by_therapy" / therapy
-                if args.therapy == "all" else staging_root
+        # A second converter must not publish over this invocation's output.
+        with exclusive_run_dir(output_root.parent), (run_dir / "progress.jsonl").open("w", encoding="utf-8") as log:
+            def progress(event: ConversionProgress) -> None:
+                log.write(json.dumps(asdict(event), ensure_ascii=False) + "\n")
+                if event.completed >= event.total or event.completed == 0:
+                    log.flush()
+                renderer(event)
+
+            gateway = create_gateway(
+                diagnostic_dir=run_dir / "diagnostics", required_roles={"profile"},
             )
-            manifest = await convert_psycheval_extractive(
-                source_dir,
-                output,
-                therapy=therapy,
-                gateway=gateway,
-                temperature=default_config(root).temperature_control,
-                cache_dir=(
-                    root / "data" / "processed" / ".psycheval-profile-cache" / therapy
-                ),
-            )
-            manifests.append(manifest)
-        combined = (
-            merge_therapy_conversions(staging_root, manifests)
-            if args.therapy == "all" else manifests[0]
-        )
-        if args.therapy == "all":
+            if not getattr(gateway, "models", {}).get("profile"):
+                raise RuntimeError("PROFILE_MODEL must be configured for schema-v4 conversion")
+            manifests = []
+            for therapy in therapies:
+                manifest = await convert_psycheval_extractive(
+                    source_dir, staging_root / "by_therapy" / therapy,
+                    therapy=therapy, gateway=gateway,
+                    temperature=config.temperature_control, concurrency=concurrency,
+                    progress_callback=progress,
+                    cache_dir=root / "data" / "processed" / ".psycheval-profile-cache" / therapy,
+                )
+                manifests.append(manifest)
+            started = time.monotonic()
+            progress(ConversionProgress("all", "merge", 0, 1))
+            combined = merge_therapy_conversions(staging_root, manifests)
+            progress(ConversionProgress("all", "merge", 1, 1, time.monotonic() - started))
+            started = time.monotonic()
+            progress(ConversionProgress("all", "validate", 0, 1))
             repository = CaseRepository(staging_root, raw_data_dir=source_dir)
             repository.list()
-        if output_root.exists():
-            shutil.rmtree(output_root)
-        staging_root.replace(output_root)
-        return combined
-    except BaseException:
-        if staging_root.exists():
-            shutil.rmtree(staging_root)
+            progress(ConversionProgress("all", "validate", 1, 1, time.monotonic() - started))
+            progress(ConversionProgress("all", "publish", 0, 1))
+            backup = run_dir / "processed-backup"
+            if staging_root.resolve().parent != output_root.resolve().parent:
+                raise ValueError("Processed staging/output paths must share the expected parent")
+            if backup.resolve().parent != run_dir.resolve():
+                raise ValueError("Processed backup must stay inside this conversion's artifact directory")
+            try:
+                if output_root.exists():
+                    output_root.replace(backup)
+                    metadata["previous_processed_backup"] = str(backup)
+                    write_json(run_dir / "run.json", metadata)
+                staging_root.replace(output_root)
+            except BaseException:
+                if backup.exists() and not output_root.exists():
+                    backup.replace(output_root)
+                    metadata["previous_processed_restored"] = True
+                raise
+            progress(ConversionProgress("all", "publish", 1, 1))
+            metadata["status"] = "completed"
+            metadata["case_count"] = combined["case_count"]
+            return combined
+    except BaseException as exc:
+        # Keep diagnostics and this invocation's staging files for inspection.
+        metadata["status"] = "failed"
+        metadata["error"] = f"{type(exc).__name__}: {str(exc)[:500]}"
         raise
+    finally:
+        renderer.finish()
+        metadata["finished_at"] = datetime.now().astimezone().isoformat()
+        write_json(run_dir / "run.json", metadata)
 
 
 async def _probe(args: argparse.Namespace, root: Path) -> int:

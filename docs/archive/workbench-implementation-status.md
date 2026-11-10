@@ -12,6 +12,10 @@
 
 设计和使用步骤已合并到 [工作台](../workbench/README.md)，当前验证必须重新执行； [质量修复](workbench-code-quality-review.md)保留问题分级与限制。
 
+2026-11-10 阅读校正：P0 中原 `docs/workbench/design.md`、`implementation-status.md` 的记录分别迁移为本目录的 [设计记录](workbench-design.md) 与本文。P5 的“已完成”描述审核发布接口和约束，不是专家已批准具体技能。新的 [技能独立试验](../workbench/SKILL_EVOLUTION_EXPERIMENT.md) 使用自己的数据库和未审核候选，不接管正式发布指针。
+
+当前网页还支持持久进度、原配置会谈续跑和报告生成重试；这些能力不回填到原阶段的 P0–P7 验证数字中。
+
 ## 原阶段清单（历史）
 
 | 阶段 | 模块 | 核心要求 | 状态 | 证据 / 关键产物 |

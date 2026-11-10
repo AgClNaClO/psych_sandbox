@@ -10,6 +10,7 @@ from pydantic import Field
 
 from ..domain.models import StrictModel, TrustTier
 from ..model_client import ModelGateway
+from ..artifacts import write_json
 from ..evidence_text import has_semantic_content
 from .profile_compiler import ATOMIZER_PROMPT_VERSION, AtomicSpan
 
@@ -62,6 +63,8 @@ class ExtractedSpans(StrictModel):
 
 class AtomizationAudit(StrictModel):
     cache_hit: bool = False
+    reused: bool = False
+    skipped: bool = False
     fallback: bool = False
     validation_failed: bool = False
     needs_review: bool = False
@@ -92,6 +95,8 @@ class ExtractiveAtomizer:
         self, *, source_path: str, source_text: str,
         purpose: Literal["growth", "language", "core_demands", "five_ps"] = "growth",
     ) -> tuple[list[AtomicSpan], AtomizationAudit]:
+        if not has_semantic_content(source_text):
+            return [], AtomizationAudit(skipped=True)
         cache_path = self.cache_dir / f"{self._cache_key(source_path, source_text, purpose)}.json"
         if cache_path.exists():
             try:
@@ -151,8 +156,7 @@ class ExtractiveAtomizer:
                         previous_output = parsed.model_dump(mode="json")
                         continue
                     raise
-                self.cache_dir.mkdir(parents=True, exist_ok=True)
-                cache_path.write_text(parsed.model_dump_json(indent=2), encoding="utf-8")
+                write_json(cache_path, parsed.model_dump(mode="json"))
                 return spans, AtomizationAudit()
             raise RuntimeError("atomizer semantic retry loop ended unexpectedly")
         except Exception as exc:
