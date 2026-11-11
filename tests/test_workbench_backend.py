@@ -10,38 +10,32 @@
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import pytest
 from pathlib import Path
 
-from psychsandbox.workbench.db import init_db, get_connection
+from psychsandbox.workbench.db import init_db
 from psychsandbox.workbench.job_manager import JobManager
 from psychsandbox.workbench.events import EventHub
 from psychsandbox.workbench.projections import (
     list_case_summaries,
     list_therapy_definitions,
-    list_experiment_runs,
-    get_run_detail,
 )
 from psychsandbox.workbench.interactive import (
     CourseManager,
     InteractiveRunner,
     VersionConflictError,
     OperationBusyError,
-    SessionClosedError,
 )
 from psychsandbox.workbench.evolution import (
     SkillEvolutionLab,
     EvolutionValidationError,
 )
-from psychsandbox.workbench.export import DataExporter, ExperimentAnalytics, _stable_case_split
-from psychsandbox.workbench.api import create_app
+from psychsandbox.workbench.export import DataExporter, _stable_case_split
 from psychsandbox.agents.counselor import CounselorAgent
 from psychsandbox.config import default_config
 from psychsandbox.datasets import CaseRepository
 from psychsandbox.runtime.storage import SQLiteStore
-from psychsandbox.domain import utc_now, SessionRecord, SessionPlan, SessionStage, ClinicalSummary, Message
 from tests.deterministic_gateway import DeterministicGateway
 
 
@@ -132,7 +126,7 @@ def test_job_fencing_and_stale_reap(wb_env):
 
 def test_job_stop_and_cancel_requests(wb_env):
     jm = JobManager(wb_env["db_path"])
-    job1 = jm.enqueue_job("simulation", "long", {"case_id": "c1"})
+    jm.enqueue_job("simulation", "long", {"case_id": "c1"})
     c1 = jm.claim_job("long", "w1", lease_seconds=60)
 
     # 请求停止

@@ -8,8 +8,6 @@ from psychsandbox.domain import (
     ClientState,
     CounselorDecision,
     CounselorTurn,
-    SessionMemory,
-    UnlockedClientInfo,
     DisclosureItem,
     TrustTier,
 )

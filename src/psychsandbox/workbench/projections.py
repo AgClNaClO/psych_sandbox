@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any
 
 from ..datasets import CaseRepository
-from ..domain import CounselingCase
 from ..therapies import list_therapy_profiles, normalize_therapy_id
 from ..artifacts import find_run_dir
 from .models import (

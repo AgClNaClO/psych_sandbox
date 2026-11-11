@@ -620,10 +620,6 @@ class PsychEvalSupervisor:
         return "\n".join(parts)
 
     @staticmethod
-    def _format_intake(case: CounselingCase) -> str:
-        return format_intake(case)
-
-    @staticmethod
     def _format_session_dialogue(session: SessionRecord) -> str:
         parts: list[str] = []
         for message in session.messages:
@@ -632,31 +628,6 @@ class PsychEvalSupervisor:
             label = "来访者" if message.role == "client" else "咨询师"
             parts.append(f"{label}：{message.content}")
         return "\n".join(parts)
-
-    @staticmethod
-    def _format_intake(case: CounselingCase) -> str:
-        profile = case.profile
-        traits = profile.static_traits
-        lines = [
-            f"姓名：{traits.name or '来访者'}",
-            f"年龄：{traits.age}",
-            f"性别：{traits.gender}",
-            f"职业：{traits.occupation}",
-            f"教育背景：{traits.educational_background}",
-            f"婚姻状况：{traits.marital_status}",
-            f"家庭状况：{traits.family_status}",
-            f"社会状况：{traits.social_status}",
-            f"主诉：{profile.main_problem}",
-            f"咨询主题：{profile.topic}",
-            f"核心诉求：{profile.core_demands}",
-        ]
-        if profile.growth_experiences:
-            lines.append("成长经历：" + "；".join(profile.growth_experiences))
-        return "\n".join(line for line in lines if line)
-
-
-def _has_intake_and_dialogue(prompt: str) -> bool:
-    return "来访者背景信息" in prompt and "咨询对话" in prompt
 
 
 def instrument_registry(therapy: str) -> dict[str, Instrument]:

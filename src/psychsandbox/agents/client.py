@@ -5,7 +5,7 @@ from typing import Any
 
 from ..client_simulation.prompts import (
     CLIENT_PLANNER_TEMPLATE,
-    CLIENT_PROMPT_VERSION,
+    CLIENT_PROMPT_VERSION as CLIENT_PROMPT_VERSION,
     CLIENT_UTTERANCE_TEMPLATE,
 )
 from ..domain import (
@@ -19,7 +19,6 @@ from ..domain import (
     DisclosureItem,
     DisclosureDecision,
     Message,
-    ResistancePatternType,
     UnlockedFact,
 )
 from ..model_client import ModelGateway

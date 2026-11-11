@@ -11,7 +11,6 @@ import argparse
 import asyncio
 from contextlib import closing
 import json
-import os
 from pathlib import Path
 import signal
 import sys
@@ -42,7 +41,7 @@ from ..domain import SandboxConfig
 from ..model_client import create_gateway
 from ..agents.counselor import CounselorAgent
 from ..config import default_config
-from ..skills import SkillCatalog, SkillRegistry
+from ..skills import SkillCatalog
 from ..therapies import normalize_therapy_id
 
 

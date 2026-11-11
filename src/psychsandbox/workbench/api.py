@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, AsyncGenerator, Literal
+from typing import AsyncGenerator, Literal
 
 from dotenv import load_dotenv
 
@@ -26,7 +26,6 @@ from fastapi.staticfiles import StaticFiles
 from ..artifacts import find_run_dir, create_artifact_dir
 from ..config import default_config
 from ..datasets import CaseRepository
-from ..domain import SandboxConfig
 from ..runtime.storage import SQLiteStore
 from ..therapies import normalize_therapy_id
 from .db import init_db

@@ -24,7 +24,7 @@ from .models import (
 )
 from .events import get_event_hub
 from ..domain import utc_now, AtomicSkill, SessionStage
-from ..skills import SkillCatalog, SkillRegistry
+from ..skills import SkillRegistry
 from ..therapies import normalize_therapy_id
 
 THERAPY_ASSET_DIR_MAP = {

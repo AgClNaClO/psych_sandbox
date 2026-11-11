@@ -8,10 +8,6 @@ import pytest
 from psychsandbox.domain import (
     SandboxConfig, SessionStage, CounselorSessionReview, ObjectiveAssessment, DialogueEvidence,
 )
-from psychsandbox.evaluation.psycheval_supervisor import (
-    _specific_counselor_instruments,
-    _specific_client_instruments,
-)
 from psychsandbox.runtime import CounselingSandbox
 from psychsandbox.therapies import get_therapy_profile, list_therapy_profiles
 from psychsandbox.visualization import generate_run_report
@@ -67,25 +63,6 @@ def test_phase_one_has_five_registered_therapy_profiles():
 
 
 @pytest.mark.parametrize(
-    ("therapy_id", "counselor_instrument", "client_instrument"),
-    [
-        ("behavioral", "miti", "stai"),
-        ("cbt", "ctrs", "bdi_ii"),
-        ("humanistic_existential", "tes", "cct"),
-        ("psychodynamic", "psc", "ipo"),
-        ("postmodern", "eft_tfs", "sfbt"),
-    ],
-)
-def test_each_therapy_uses_its_configured_holistic_instruments(
-    therapy_id, counselor_instrument, client_instrument
-):
-    assert set(_specific_counselor_instruments(therapy_id)) == {
-        counselor_instrument
-    }
-    assert set(_specific_client_instruments(therapy_id)) == {client_instrument}
-
-
-@pytest.mark.parametrize(
     (
         "therapy_code",
         "therapy_id",
@@ -125,9 +102,11 @@ def test_each_therapy_runs_with_specific_skills(
         for skill_id in session.interventions_used
     )
     assert result.holistic_report is not None
+    assert result.holistic_report.counselor_shared
     assert {item.name for item in result.holistic_report.counselor_specific} == {
         counselor_instrument
     }
+    assert result.holistic_report.client_shared
     assert {item.name for item in result.holistic_report.client_specific} == {
         client_instrument
     }
@@ -186,6 +165,9 @@ def test_six_session_course_keeps_state_and_memory_continuity(root, tmp_path, re
         sandbox.run_case("psycheval-cbt-001", session_count=6)
     )
     assert len(result.sessions) == 6
+    assert all(session.safety_verdict for session in result.sessions)
+    assert result.holistic_report is not None
+    assert all(session.summary and session.next_session_plan for session in result.sessions)
     assert result.final_memory.completed_sessions == 6
     for previous, current in zip(
         result.sessions[:-1],

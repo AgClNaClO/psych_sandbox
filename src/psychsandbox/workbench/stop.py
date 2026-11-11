@@ -3,7 +3,6 @@ import argparse
 import json
 from pathlib import Path
 import re
-import signal
 import subprocess
 import sys
 

@@ -76,10 +76,6 @@ def test_repository_rejects_source_digest_mismatch(root, tmp_path):
         CaseRepository(processed, raw_data_dir=root).list()
 
 
-def test_official_case_count(repository):
-    assert len(repository.list("cbt")) == 148
-
-
 def test_legacy_data_handler_cannot_create_non_atomic_processed_cache(tmp_path):
     from psychsandbox import cli
 
@@ -112,7 +108,8 @@ def test_converter_supports_each_therapy(
     assert sum(manifest["split_counts"].values()) == expected_count
 
 
-def test_supported_raw_case_ids_are_unique(repository):
+def test_repository_case_counts_and_ids_are_unique(repository):
+    assert len(repository.list("cbt")) == 148
     case_ids = [case.case_id for case in repository.list()]
     assert len(case_ids) == 341
     assert len(case_ids) == len(set(case_ids))

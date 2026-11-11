@@ -21,7 +21,7 @@ env_path = Path(__file__).resolve().parents[3] / ".env"
 if env_path.exists():
     load_dotenv(env_path)
 
-from .db import db_transaction, get_connection, utc_now
+from .db import db_transaction, get_connection
 from .models import (
     CourseResponse,
     CourseSessionDetailResponse,
@@ -40,10 +40,8 @@ from ..domain import (
     LongitudinalReport,
     Message,
     RiskAssessment,
-    RiskLevel,
     SessionMemory,
     SessionPlan,
-    SessionRecord,
     SessionStage,
     UnlockedClientInfo,
     utc_now,
@@ -59,7 +57,6 @@ from ..runtime.memory_pipeline import (
     MemoryExtractionAgent,
 )
 from ..runtime.safety import SafetyStateMachine
-from ..skills import SkillCatalog, SkillRegistry
 
 
 class VersionConflictError(Exception):

@@ -41,7 +41,6 @@ from psychsandbox.domain import (
     SessionRecap,
     SessionStage,
     SkillSelectionConfig,
-    SkillSelectionEvidence,
     UnlockedFact,
     UnlockedClientInfo,
 )

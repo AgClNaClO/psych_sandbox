@@ -13,7 +13,6 @@ from typing import Any, Iterable
 
 from ..domain import (
     AtomicSkill,
-    BigFive,
     ClientProfile,
     ClientRelationalProfile,
     ClientState,

@@ -8,7 +8,6 @@
 5. 多源评测大盘与 SFT/DPO 合规导出审计 API；
 6. 静态前端资源挂载与服务 API。
 """
-import json
 import pytest
 from pathlib import Path
 from fastapi.testclient import TestClient
@@ -16,7 +15,6 @@ from fastapi.testclient import TestClient
 from psychsandbox.workbench.api import create_app
 from psychsandbox.workbench.db import init_db
 from psychsandbox.runtime.storage import SQLiteStore
-from tests.deterministic_gateway import DeterministicGateway
 
 
 @pytest.fixture

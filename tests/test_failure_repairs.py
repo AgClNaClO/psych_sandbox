@@ -5,7 +5,7 @@ import pytest
 from psychsandbox.datasets.profile_compiler import AtomicSpan, PsychEvalProfileCompiler
 from psychsandbox.evaluation.safety_gate import SessionSafetyGate
 from psychsandbox.domain import DisclosureItem
-from tests.test_rollout_runtime import setup, runner_for, run, session_for, Judge
+from tests.test_rollout_runtime import setup as setup, runner_for, run, session_for, Judge
 from tests.test_model_client import _gateway
 from psychsandbox.runtime.memory_pipeline import _SessionSummaryWrapper
 import json

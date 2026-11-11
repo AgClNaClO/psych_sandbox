@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Generator, TypeVar
 from contextlib import contextmanager
 
-from ..domain import utc_now
+from ..domain import utc_now as utc_now
 
 DEFAULT_WORKBENCH_DB = Path("runs/runtime/workbench.sqlite3")
 _BUSY_TIMEOUT_MS = 5000

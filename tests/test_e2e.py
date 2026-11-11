@@ -41,13 +41,6 @@ def sandbox(root, tmp_path, repository):
     return CounselingSandbox(config, gateway=DeterministicGateway(), repository=repository)
 
 
-def test_three_session_end_to_end(sandbox):
-    result = asyncio.run(sandbox.run_case("psycheval-cbt-001", session_count=3))
-    assert len(result.sessions) == 3
-    assert all(session.safety_verdict for session in result.sessions)
-    assert result.holistic_report is not None
-
-
 def test_first_session_is_counselor_first_and_initial_memory_is_empty(sandbox):
     case = sandbox.repository.get("psycheval-cbt-001")
     initial = sandbox._initial_memory(case)
@@ -58,12 +51,6 @@ def test_first_session_is_counselor_first_and_initial_memory_is_empty(sandbox):
 
     result = asyncio.run(sandbox.run_case(case.case_id, session_count=1))
     assert result.sessions[0].messages[0].role == "counselor"
-
-
-def test_each_session_has_memory_artifacts(sandbox):
-    result = asyncio.run(sandbox.run_case("psycheval-cbt-002", session_count=3))
-    assert all(session.summary and session.next_session_plan for session in result.sessions)
-    assert result.final_memory.completed_sessions == 3
 
 
 def test_e7_e8_e9_feed_counselor_review_before_next_session(root, tmp_path, repository):
@@ -247,23 +234,6 @@ def test_counselor_reviews_progress_and_replans_unmet_goals(sandbox):
     )
 
 
-def test_state_continues_across_sessions(sandbox):
-    result = asyncio.run(sandbox.run_case("psycheval-cbt-007", session_count=2))
-    previous = result.sessions[0].final_state
-    current = result.sessions[1].initial_state
-    assert current.fatigue == max(0.1, round(previous.fatigue - 0.25, 4))
-    baseline = sandbox.repository.get("psycheval-cbt-007").profile.initial_state
-    assert current.trust == round(
-        baseline.trust + 0.5 * (previous.trust - baseline.trust), 4
-    )
-    assert current.resistance == baseline.resistance
-    assert current.model_dump(
-        exclude={"fatigue", "trust", "resistance", "rupture_state"}
-    ) == previous.model_dump(
-        exclude={"fatigue", "trust", "resistance", "rupture_state"}
-    )
-
-
 def test_sqlite_resume_boundary(sandbox):
     first = asyncio.run(sandbox.run_case("psycheval-cbt-004", session_count=1))
     first_dir = sandbox.run_dir
@@ -276,15 +246,7 @@ def test_sqlite_resume_boundary(sandbox):
     assert len((first_dir / "trajectory.jsonl").read_text(encoding="utf-8").splitlines()) == 3
 
 
-def test_jsonl_trajectory_written(sandbox):
-    result = asyncio.run(sandbox.run_case("psycheval-cbt-005", session_count=1))
-    path = sandbox.run_dir / "trajectory.jsonl"
-    rows = path.read_text(encoding="utf-8").splitlines()
-    assert len(rows) == 1
-    assert json.loads(rows[0])["case_id"] == result.case_id
-
-
-def test_run_reports_session_progress(sandbox):
+def test_run_reports_session_progress_and_writes_trajectory(sandbox):
     messages: list[str] = []
 
     result = asyncio.run(
@@ -300,15 +262,10 @@ def test_run_reports_session_progress(sandbox):
     assert any("Session 1/1 完成" in message for message in messages)
     assert any("状态=completed" in message for message in messages)
 
-
-def test_holistic_supervisor_has_psych_eval_instruments(sandbox):
-    result = asyncio.run(sandbox.run_case("psycheval-cbt-006", session_count=1))
-    report = result.holistic_report
-    assert report is not None
-    assert report.counselor_shared
-    assert {item.name for item in report.counselor_specific} == {"ctrs"}
-    assert report.client_shared
-    assert {item.name for item in report.client_specific} == {"bdi_ii"}
+    path = sandbox.run_dir / "trajectory.jsonl"
+    rows = path.read_text(encoding="utf-8").splitlines()
+    assert len(rows) == 1
+    assert json.loads(rows[0])["case_id"] == result.case_id
 
 
 def test_patientact_pipeline_can_be_disabled(root, tmp_path, repository):
