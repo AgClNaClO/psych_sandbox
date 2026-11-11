@@ -20,7 +20,11 @@
 
 `data convert` 是例外：在 `data/processed/.psycheval-staging-<编号>` 暂存，校验成功后发布到 `data/processed/psycheval`；抽取缓存保存在忽略目录中，不覆盖旧运行。配置显式指定 database_path/trace_dir 时，Python 调用跟随指定路径，测试必须使用 tmp_path。
 
-转换默认并发 4 个抽取请求，可用 `--concurrency 1–32` 调整；试转换和相同输入在本次调用内复用，缓存写入使用临时文件加原子替换。各阶段进度写入 stderr 与本次目录的 `progress.jsonl`，stdout 仅输出最终 manifest JSON，`--no-progress` 仅关闭终端显示。非交互日志按约 10% 的进度间隔输出。
+转换默认并发 5 个抽取任务，可用 `--concurrency 1–32` 调整；实际 HTTP 请求仍受 `MODEL_MAX_CONCURRENCY` 共享上限约束（默认 5）。试转换和相同输入在本次调用内复用，缓存写入使用临时文件加原子替换。各阶段进度写入 stderr 与本次目录的 `progress.jsonl`，stdout 仅输出最终 manifest JSON，`--no-progress` 仅关闭终端显示。非交互日志按约 10% 的进度间隔输出。
+
+模型调用向所属诊断目录追加 `request_metrics.jsonl`，按调用记录成功/失败/取消、Token 用量与逐次 HTTP 状态；`queue_seconds`、`response_seconds`、`retry_wait_seconds` 和 `overhead_seconds` 分别表示共享槽位排队、完整 HTTP 响应、重试之间的间隔及其他开销。间隔包含 SDK/外层退避与准备，不是纯睡眠时间。并行任务耗时不能直接相加作为疗程墙钟时间；统计不保存请求正文或密钥。
+
+`runs/runtime/.model-request-slots/<端点与模型哈希>/` 是共享协调目录，不属于某次实验：每个槽位使用独立 OS 锁文件，跨本检出的进程生效，进程退出自动释放锁，空闲锁文件保留。测试跟随 `PSYCHSANDBOX_RUNTIME_DIR` 隔离。运行删除与本次改动均不清理这个目录或共享数据库；不同模型使用不同池，多个 Worker 应保持同一并发配置。
 
 五流派依次转换，复用键包含来源路径、原文和用途；跨流派不共享抽取结果。manifest 分别记录 pilot 缓存命中、全量缓存命中、复用、跳过、回退和待复核计数；这些计数不是人工审核通过率。抽取前后的来源摘要必须一致，转换过程中不得编辑原始病例。
 

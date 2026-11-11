@@ -391,11 +391,12 @@ def test_api_gateway_uses_json_object_for_non_schema_role(tmp_path):
     assert "json_schema" not in request["response_format"]
 
 
-def test_non_schema_role_retries_with_original_temp_and_json_schema(tmp_path):
+@pytest.mark.parametrize("response_format", ["json_object", None])
+def test_non_schema_role_retries_with_original_temp_and_format(tmp_path, response_format):
     invalid = "这不是 JSON"
     gateway, completions = _gateway(tmp_path, [invalid, '{"value": 5}'])
     gateway.json_schema_roles = set()
-    gateway.json_object_roles = {"counselor"}
+    gateway.json_object_roles = {"counselor"} if response_format else set()
 
     result = asyncio.run(
         gateway.complete_structured(
@@ -410,9 +411,10 @@ def test_non_schema_role_retries_with_original_temp_and_json_schema(tmp_path):
     assert result.value == 5
     first_request = completions.calls[0]
     second_request = completions.calls[1]
-    assert first_request["response_format"] == {"type": "json_object"}
+    expected_format = {"type": response_format} if response_format else None
+    assert first_request.get("response_format") == expected_format
     assert first_request["temperature"] == 0.8
-    assert second_request["response_format"]["type"] == "json_schema"
+    assert second_request.get("response_format") == expected_format
     assert second_request["temperature"] == 0.8
     retry_payload = json.loads(second_request["messages"][1]["content"])
     assert retry_payload["invalid_previous_output"] == invalid
@@ -442,6 +444,193 @@ def test_api_gateway_retries_with_invalid_output_and_writes_diagnostic(tmp_path)
     assert diagnostic["raw_response"] == invalid
 
 
+@pytest.mark.parametrize("malformed_repair", [
+    '{"session_summary":{"session_index":1,"important_results":["能描述感受"]}',
+    '{"session_summary":{"session_index":1,"session_summary_abstract":"重复' + "重复" * 100,
+], ids=["unclosed-object", "unterminated-repetition"])
+def test_summary_recovers_after_repair_fails_without_reusing_bad_output(tmp_path, malformed_repair):
+    from psychsandbox.runtime.memory_pipeline import DialogueSummaryAgent
+    from tests.test_session_controls import record
+
+    invalid = json.dumps({"session_summary": {
+        "session_index": 1, "goal_assessment": {"objective_recap_note": None},
+    }}, ensure_ascii=False)
+    valid = {"session_summary": {
+        "session_index": 1, "important_results": ["能描述感受"],
+        "pending_items": ["继续核对感受"],
+    }}
+    gateway, completions = _gateway(tmp_path, [invalid, malformed_repair, json.dumps(valid)])
+    gateway.models["summarizer"] = "ecnu-max"
+    gateway.json_schema_roles = set()
+    gateway.json_object_roles = {"summarizer"}
+    session = record()
+
+    summary = asyncio.run(DialogueSummaryAgent(gateway).summarize(
+        1, session.messages, session.plan, [session.plan.therapy],
+    ))
+
+    assert summary.important_results == ["能描述感受"]
+    assert summary.pending_items == ["继续核对感受"]
+    assert len(completions.calls) == 3
+    assert all(call["response_format"] == {"type": "json_object"} for call in completions.calls)
+    first, repair, regeneration = [json.loads(call["messages"][1]["content"]) for call in completions.calls]
+    assert repair["invalid_previous_output"] == invalid
+    assert "invalid_previous_output" not in regeneration
+    assert regeneration["dialogue"] == first["dialogue"]
+    assert regeneration["plan"] == first["plan"]
+    assert regeneration["memory_items"] == first["memory_items"]
+    prompt = completions.calls[0]["messages"][0]["content"]
+    example = json.loads(prompt.split("【输出结构示例（空值仅展示类型；按本场证据填写）】\n", 1)[1].splitlines()[0])
+    assert example["session_summary"]["important_results"] == []
+    assert set(example["session_summary"]["goal_assessment"]) == {
+        "objective_recap", "completion_status", "evidence_and_analysis",
+    }
+    assert "pending_items" in example["session_summary"]
+    diagnostics = [json.loads(path.read_text(encoding="utf-8")) for path in gateway.diagnostic_dir.glob("*.json")]
+    assert sorted(record["attempt"] for record in diagnostics) == [1, 2]
+    assert {record["raw_response"] for record in diagnostics} == {invalid, malformed_repair}
+
+
+@pytest.mark.parametrize("reason", ["length", "oversized"])
+def test_retry_regenerates_instead_of_sending_partial_previous_output(tmp_path, reason):
+    invalid = '{"value":' if reason == "length" else json.dumps({"value": "x" * 12001})
+    gateway, completions = _gateway(tmp_path, [invalid, '{"value":7}'])
+    original_create = completions.create
+
+    async def create(**request):
+        result = await original_create(**request)
+        result.choices[0].finish_reason = "length" if reason == "length" and len(completions.calls) == 1 else "stop"
+        return result
+
+    completions.create = create
+    result = asyncio.run(gateway.complete_structured(
+        role="counselor", system_prompt="JSON", input_payload={"subject": "保留原始输入"},
+        output_schema=ExampleOutput, temperature=0,
+    ))
+    assert result.value == 7
+    retry = json.loads(completions.calls[1]["messages"][1]["content"])
+    assert "invalid_previous_output" not in retry
+    assert retry["subject"] == "保留原始输入"
+    assert "重新生成" in retry["repair_instruction"]
+    diagnostic = json.loads(next(gateway.diagnostic_dir.glob("*.json")).read_text(encoding="utf-8"))
+    assert diagnostic["raw_response"] == invalid
+    if reason == "length":
+        assert "finish_reason=length" in diagnostic["error"]
+
+
+def test_token_limited_response_cannot_pass_validation_or_lenient_fallback(tmp_path):
+    raw = '{"content":"表面完整但已达到输出上限"}'
+    gateway, completions = _gateway(tmp_path, [raw] * 3)
+    original_create = completions.create
+
+    async def create(**request):
+        result = await original_create(**request)
+        result.choices[0].finish_reason = "length"
+        return result
+
+    completions.create = create
+    with pytest.raises(ValueError, match="finish_reason=length"):
+        asyncio.run(gateway.complete_structured(
+            role="client", system_prompt="JSON", input_payload={},
+            output_schema=SingleStringField, temperature=0,
+        ))
+    assert len(completions.calls) == 3
+    diagnostics = [json.loads(path.read_text(encoding="utf-8")) for path in gateway.diagnostic_dir.glob("*.json")]
+    assert {record["attempt"] for record in diagnostics} == {1, 2, 3}
+    assert all(record["request"]["finish_reason"] == "length" for record in diagnostics)
+
+
+@pytest.mark.parametrize("field", [
+    "homework", "important_information", "important_methods",
+    "important_results", "completed_items", "pending_items",
+])
+def test_summary_scalar_text_is_preserved_verbatim_as_one_array_item(tmp_path, field):
+    from psychsandbox.runtime.memory_pipeline import _SessionSummaryWrapper
+
+    text = '保留原话：“我愿意试试”；不按标点拆分。\n也不删除第二行。'
+    raw = json.dumps({"session_summary": {"session_index": 5, field: text}}, ensure_ascii=False)
+    gateway, completions = _gateway(tmp_path, [raw])
+    result = asyncio.run(gateway.complete_structured(
+        role="summarizer", system_prompt="JSON", input_payload={},
+        output_schema=_SessionSummaryWrapper, temperature=0,
+    ))
+    assert getattr(result.session_summary, field) == [text]
+    assert len(completions.calls) == 1
+    diagnostic = json.loads(next(gateway.diagnostic_dir.glob("*.json")).read_text(encoding="utf-8"))
+    assert diagnostic["raw_response"] == raw
+    assert diagnostic["error"] == f"local_repair: wrapped string as single-item array: session_summary.{field}"
+
+
+@pytest.mark.parametrize("defect", [
+    {"important_results": "结果", "unknown": "不得丢弃的内容"},
+    {"important_results": "结果", "goal_assessment": {"objective_recap_note": None}},
+    {"important_results": "结果", "homework_assignments": "缺少作业证据"},
+    {"important_results": [42]},
+])
+def test_summary_array_repair_does_not_bypass_other_schema_errors(tmp_path, defect):
+    from psychsandbox.runtime.memory_pipeline import _SessionSummaryWrapper
+
+    raw = json.dumps({"session_summary": {"session_index": 5, **defect}}, ensure_ascii=False)
+    gateway, completions = _gateway(tmp_path, [raw] * 3)
+    with pytest.raises(ValueError, match="failed _SessionSummaryWrapper"):
+        asyncio.run(gateway.complete_structured(
+            role="summarizer", system_prompt="JSON", input_payload={},
+            output_schema=_SessionSummaryWrapper, temperature=0,
+        ))
+    assert len(completions.calls) == 3
+    records = [json.loads(path.read_text(encoding="utf-8")) for path in gateway.diagnostic_dir.glob("*.json")]
+    assert len(records) == 3
+    assert all(record["raw_response"] == raw for record in records)
+
+
+@pytest.mark.parametrize("existing", ["absent", "identical", "conflicting"])
+def test_summary_repairs_known_sibling_nesting_only_without_conflicts(tmp_path, existing):
+    from psychsandbox.runtime.memory_pipeline import _SessionSummaryWrapper
+
+    siblings = {
+        "client_state_analysis": {"affective_state": "能描述感受"},
+        "important_information": ["来访者描述本周困扰"],
+        "important_methods": ["开放询问"],
+        "important_results": "能描述感受",
+        "completed_items": ["核对状态"],
+        "pending_items": ["继续探索"],
+        "item_updates": [{"item_id": "topic-1", "status": "open", "evidence": "仍需跟进"}],
+        "homework": [], "homework_assignments": [],
+    }
+    summary = {"session_index": 5, "goal_assessment": {
+        "objective_recap": "澄清感受", "completion_status": "部分完成",
+        "evidence_and_analysis": "能描述感受", **siblings,
+    }}
+    if existing != "absent":
+        summary.update(siblings)
+    if existing == "conflicting":
+        summary["pending_items"] = ["冲突的待办，不能自动取舍"]
+    raw = json.dumps({"session_summary": summary}, ensure_ascii=False)
+    gateway, completions = _gateway(tmp_path, [raw] * 3)
+    call = gateway.complete_structured(
+        role="summarizer", system_prompt="JSON", input_payload={},
+        output_schema=_SessionSummaryWrapper, temperature=0,
+    )
+    if existing == "conflicting":
+        with pytest.raises(ValueError, match="goal_assessment.pending_items"):
+            asyncio.run(call)
+        assert len(completions.calls) == 3
+        return
+    result = asyncio.run(call)
+    actual = result.session_summary.model_dump(mode="json", exclude_unset=True)
+    for name, value in siblings.items():
+        assert actual[name] == ([value] if isinstance(value, str) else value)
+    assert actual["goal_assessment"] == {
+        "objective_recap": "澄清感受", "completion_status": "部分完成",
+        "evidence_and_analysis": "能描述感受",
+    }
+    assert len(completions.calls) == 1
+    diagnostic = json.loads(next(gateway.diagnostic_dir.glob("*.json")).read_text(encoding="utf-8"))
+    assert diagnostic["raw_response"] == raw
+    assert diagnostic["error"].startswith("local_repair:")
+    assert "session_summary.item_updates" in diagnostic["error"]
+
+
 def _structured_output_regressions():
     """Synthetic versions of the seven observed failures; no private dialogue."""
     from psychsandbox.domain import CounselorActorOutput, CounselorPlanning
@@ -469,6 +658,15 @@ def _structured_output_regressions():
         invalid["session_summary"]["goal_assessment"][field] = "模型生成的额外内容"
         yield pytest.param("summarizer", _SessionSummaryWrapper, json.dumps(invalid), summary,
                            field, id=f"summary-extra-{field}")
+    invalid = json.loads(json.dumps(summary))
+    invalid["session_summary"]["pending_items"] = ["已有待办"]
+    invalid["session_summary"]["goal_assessment"]["pending_items"] = ["冲突的待办"]
+    yield pytest.param("summarizer", _SessionSummaryWrapper, json.dumps(invalid), summary,
+                       "goal_assessment.pending_items", id="summary-wrong-nesting")
+    invalid = json.loads(json.dumps(summary))
+    invalid["session_summary"]["goal_assessment"]["objective_recap_note"] = None
+    yield pytest.param("summarizer", _SessionSummaryWrapper, json.dumps(invalid), summary,
+                       "extra_forbidden", id="summary-null-extra")
     yield pytest.param("summarizer", _SessionSummaryWrapper, json.dumps(summary) + "}", summary,
                        "Extra data", id="summary-extra-brace")
     missing_response = {key: value for key, value in actor.items() if key != "response"}
@@ -490,7 +688,8 @@ def _structured_output_regressions():
 def test_structured_output_repair_keeps_strict_contract(
     tmp_path, role, schema, invalid, valid, error_fragment, repaired,
 ):
-    gateway, completions = _gateway(tmp_path, [invalid, json.dumps(valid) if repaired else invalid])
+    responses = [invalid, json.dumps(valid)] if repaired else [invalid] * 3
+    gateway, completions = _gateway(tmp_path, responses)
     gateway.json_schema_roles = set()
     gateway.json_object_roles = {role}
     payload = {"subject": "公开测试话语"}
@@ -505,10 +704,10 @@ def test_structured_output_repair_keeps_strict_contract(
             asyncio.run(call)
 
     assert payload == {"subject": "公开测试话语"}
-    assert len(completions.calls) == 2
-    first, second = completions.calls
+    assert len(completions.calls) == (2 if repaired else 3)
+    first, second = completions.calls[:2]
     assert first["response_format"] == {"type": "json_object"}
-    assert second["response_format"]["type"] == "json_schema"
+    assert all(request["response_format"] == {"type": "json_object"} for request in completions.calls)
     assert second["temperature"] == first["temperature"]
     system_prompt = first["messages"][0]["content"]
     assert system_prompt.startswith("按公开证据完成任务。")
@@ -519,9 +718,15 @@ def test_structured_output_repair_keeps_strict_contract(
     assert retry["invalid_previous_output"] == invalid
     assert error_fragment in retry["validation_error"]
     assert "返回完整的 JSON 对象" in retry["repair_instruction"]
+    if not repaired:
+        regeneration = json.loads(completions.calls[2]["messages"][1]["content"])
+        assert "invalid_previous_output" not in regeneration
+        assert regeneration["subject"] == payload["subject"]
+        assert regeneration["output_schema"] == schema.model_json_schema()
+        assert "重新生成" in regeneration["repair_instruction"]
     diagnostics = [json.loads(p.read_text(encoding="utf-8")) for p in gateway.diagnostic_dir.glob("*.json")]
-    assert len(diagnostics) == (1 if repaired else 2)
-    assert {record["attempt"] for record in diagnostics} == ({1} if repaired else {1, 2})
+    assert len(diagnostics) == (1 if repaired else 3)
+    assert {record["attempt"] for record in diagnostics} == ({1} if repaired else {1, 2, 3})
     assert all(record["raw_response"] == invalid for record in diagnostics)
 
 
@@ -694,7 +899,8 @@ def test_embedding_transient_failure_recovers_within_budget(tmp_path, monkeypatc
     assert asyncio.run(gateway.embed_texts(["公开话语", "短句"])) == [[4.], [2.]]
 
     assert len(transport.calls) == 2
-    assert not gateway.diagnostic_dir.exists()
+    assert not list(gateway.diagnostic_dir.glob("*.json"))
+    assert (gateway.diagnostic_dir / "request_metrics.jsonl").is_file()
 
 
 def test_exhausted_embedding_transport_archives_request_metadata_only(tmp_path, monkeypatch):
@@ -795,13 +1001,13 @@ def test_scale_raw_json_is_validated_before_gateway_coercion(tmp_path, payload):
     from psychsandbox.domain import ScaleItems
 
     raw = json.dumps(payload)
-    gateway, completions = _gateway(tmp_path, [raw, raw])
+    gateway, completions = _gateway(tmp_path, [raw] * 3)
     with pytest.raises(ValueError, match="failed ScaleItems"):
         asyncio.run(gateway.complete_structured(
             role="supervisor", system_prompt="JSON", input_payload={},
             output_schema=ScaleItems, temperature=0,
         ))
-    assert len(completions.calls) == 2
+    assert len(completions.calls) == 3
 
 
 class MultiField(BaseModel):

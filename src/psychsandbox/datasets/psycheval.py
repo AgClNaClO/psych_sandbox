@@ -1030,7 +1030,7 @@ async def convert_psycheval_extractive(
     revision: str = PSYCHEVAL_REVISION,
     cache_dir: Path | None = None,
     temperature: float = 0.0,
-    concurrency: int = 4,
+    concurrency: int = 5,
     progress_callback: Callable[[ConversionProgress], None] | None = None,
 ) -> dict[str, Any]:
     """Atomize growth, language features and core demands before conversion."""

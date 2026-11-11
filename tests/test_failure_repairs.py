@@ -67,7 +67,7 @@ def test_atomic_checkpoint_permanent_lock_preserves_previous(tmp_path, monkeypat
 def test_summary_empty_extension_repair_is_narrow(tmp_path, extra, field):
     assessment = {'completion_status': '部分完成', field: extra}
     payload = {'session_summary': {'session_index': 8, 'goal_assessment': assessment}}
-    gateway, transport = _gateway(tmp_path, [json.dumps(payload)] * 2)
+    gateway, transport = _gateway(tmp_path, [json.dumps(payload)] * 3)
     gateway.json_schema_roles = set()
     gateway.json_object_roles = {'summarizer'}
     async def invoke():
@@ -103,7 +103,7 @@ def test_summary_stray_punctuation_repair_preserves_strict_validation(tmp_path, 
     malformed = json.dumps(repaired, ensure_ascii=False, separators=(',', ':')).replace(
         '"},"client_state_analysis"', '","},"client_state_analysis"', 1,
     )
-    gateway, transport = _gateway(tmp_path, [first, malformed])
+    gateway, transport = _gateway(tmp_path, [first, malformed, malformed])
 
     async def invoke():
         return await gateway.complete_structured(
@@ -116,7 +116,7 @@ def test_summary_stray_punctuation_repair_preserves_strict_validation(tmp_path, 
             asyncio.run(invoke())
     else:
         assert asyncio.run(invoke()) == _SessionSummaryWrapper.model_validate(repaired)
-    assert len(transport.calls) == 2
+    assert len(transport.calls) == (3 if unknown_field else 2)
     records = [json.loads(p.read_text('utf-8')) for p in gateway.diagnostic_dir.glob('*.json')]
     retry = next(record for record in records if record['attempt'] == 2)
     assert retry['raw_response'] == malformed

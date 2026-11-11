@@ -147,7 +147,12 @@ class DialogueSummaryAgent:
         }
         result = await self.gateway.complete_structured(
             role="summarizer",
-            system_prompt=render_prompt(DIALOGUE_SUMMARY_TEMPLATE, **summary_payload),
+            system_prompt=render_prompt(
+                DIALOGUE_SUMMARY_TEMPLATE, **summary_payload,
+                summary_output_example=_SessionSummaryWrapper(
+                    session_summary=ClinicalSummary(session_index=session_index),
+                ).model_dump_json(),
+            ),
             input_payload=summary_payload,
             output_schema=_SessionSummaryWrapper,
             temperature=self.temperature,

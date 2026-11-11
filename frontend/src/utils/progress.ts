@@ -22,14 +22,18 @@ export function progressView(job?: JobItem, run?: RunDetail | null, live?: Simul
   const total = progress?.sessions_total ?? job?.payload.session_count ?? relatedRun?.requested_sessions ?? null;
   const completed = Math.max(progress?.sessions_completed ?? 0, relatedRun?.sessions.length ?? 0, job?.result?.sessions_completed ?? 0);
   const phase = progress?.phase ?? 'preparing';
+  const candidatePhase = phase === 'generating' || phase === 'scoring';
+  const showGeneration = candidatePhase && (progress?.candidates.length ?? 0) > 0;
+  const showScoring = candidatePhase && !!progress?.scoring;
   const labels: Record<string, string> = { succeeded: '实验已完成', completed: '实验已完成',
     failed: '实验失败', stopped: '已在会谈边界停止', cancelled: '实验已取消', safety_hold: '安全暂停' };
   let title = labels[status] ?? (progress ? phaseLabels[phase] : null) ?? '实验进行中';
+  if (running && showGeneration && showScoring) title = '对话生成与候选评估';
   if (status === 'queued') title = '排队等待执行';
   if (running && job?.stop_requested) title = '等待当前会谈提交后停止';
   if (running && job?.cancel_requested) title = '正在取消实验';
   return { progress, status, running, total: typeof total === 'number' && total > 0 ? total : null,
-    completed: Math.max(0, completed), phase, title,
+    completed: Math.max(0, completed), phase, title, showGeneration, showScoring,
     success: status === 'succeeded' || status === 'completed',
     error: status === 'failed' || status === 'safety_hold' };
 }

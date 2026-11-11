@@ -87,8 +87,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--atomizer", choices=["extractive", "rules"], default="extractive"
     )
     convert.add_argument(
-        "--concurrency", type=_conversion_concurrency, default=4,
-        help="抽取请求的最大并发数，1–32，默认 4；设为 1 串行执行",
+        "--concurrency", type=_conversion_concurrency, default=5,
+        help="抽取请求的最大并发数，1–32，默认 5；设为 1 串行执行",
     )
     convert.add_argument("--no-progress", action="store_true", help="关闭转换进度输出；标准输出仍为 JSON")
 
@@ -524,7 +524,7 @@ async def _convert_data(args: argparse.Namespace, root: Path) -> dict:
             "schema-v4 runtime cache is atomic and must be compiled with --therapy all"
         )
     therapies = ["bt", "cbt", "het", "pdt", "pmt"]
-    concurrency = getattr(args, "concurrency", 4)
+    concurrency = getattr(args, "concurrency", 5)
     if isinstance(concurrency, bool) or not isinstance(concurrency, int) or not 1 <= concurrency <= 32:
         raise ValueError("conversion concurrency must be an integer from 1 to 32")
     root = root.resolve()

@@ -50,14 +50,14 @@ export function SimulationProgress({ job, run, progress, connected, experiments,
       aria-valuenow={Math.min(view.completed, view.total)} aria-valuetext={`${view.completed}/${view.total} 场已提交`}>
       <span style={{ width: `${percent}%` }} />
     </div>}
-    {view.running && view.phase === 'generating' && candidates.length > 0 && <div className="candidate-progress-list">
+    {view.running && view.showGeneration && <div className="candidate-progress-list">
       {candidates.slice(0, 4).map((item, index) => <div className="candidate-progress" key={item.label || index}>
         <span>{item.label ? `候选 ${item.label}` : '当前会谈'}</span><strong>{item.turn_index}/{item.total_turns} 轮上限</strong>
         <i><span style={{ width: `${Math.min(100, item.turn_index / Math.max(1, item.total_turns) * 100)}%` }} /></i>
       </div>)}
       {(state?.candidates_total ?? 1) > 4 && <span className="more-candidates">共 {state!.candidates_total} 个候选 · 已生成 {candidates.reduce((sum, item) => sum + item.turn_index, 0)} 轮</span>}
     </div>}
-    {view.running && view.phase === 'scoring' && scoring && <div className="scoring-progress">
+    {view.running && view.showScoring && scoring && <div className="scoring-progress">
       <span>{scoring.instruments_total > 0 ? `量表 ${scoring.instruments_done}/${scoring.instruments_total}` : `候选 ${scoring.candidates_scored}/${scoring.candidates_total}`}</span>
       <div><span style={{ width: `${Math.min(100, scoring.instruments_total > 0 ? scoring.instruments_done / scoring.instruments_total * 100 : scoring.candidates_scored / Math.max(1, scoring.candidates_total) * 100)}%` }} /></div>
       <span>已评估 {scoring.candidates_scored}/{scoring.candidates_total} 个候选</span>

@@ -8,6 +8,15 @@
 【会话计划】{{ plan }}
 【跨会谈记忆台账（含稳定 item_id，用于退休/保留判断）】{{ memory_items }}
 
+【输出结构示例（空值仅展示类型；按本场证据填写）】
+{{ summary_output_example }}
+session_summary 内各字段是同级字段。goal_assessment 到 evidence_and_analysis 后必须闭合，
+其中只有 objective_recap、completion_status、evidence_and_analysis 三个字符串字段。
+client_state_analysis、pending_items、item_updates 等不得放进 goal_assessment。
+important_information、important_methods、important_results、completed_items、pending_items、homework
+必须是字符串数组，即使只有一项也写成 ["内容"]，无内容写 []。不得添加 *_note 等额外字段或用 null 占位。
+总结应简洁，同一信息只记录一次，引用最短的必要原话，不逐轮复述对话或重复扩写。
+
 核心原则：
 1. 临床现实性原则：最终写入报告的每一句分析和结论，都必须在当前
    session 对话中有明确证据支撑，不能透露出咨询师的未知信息。

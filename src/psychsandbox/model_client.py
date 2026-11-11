@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import logging
 import os
 import re
 import uuid
@@ -16,7 +17,10 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ValidationError
 
-from .domain import ScaleItems
+from .domain import ClinicalSummary, ScaleItems
+from .request_control import (
+    RequestSlots, RequestTiming, current_request, instrumented_http_client, model_concurrency,
+)
 
 if TYPE_CHECKING:
     from .evaluation.item_logprob import BatchItemRatings
@@ -53,6 +57,8 @@ _request_meta: ContextVar[dict | None] = ContextVar("model_request_meta", defaul
 # retries, so the HTTP attempt count is ``attempts * (1 + SDK retries)``.
 DEFAULT_MAX_ATTEMPTS = 3
 TRANSPORT_RETRY_WAIT = wait_exponential(min=1, max=8)
+# One initial response, one repair, then a fresh generation from original input.
+STRUCTURED_OUTPUT_MAX_ATTEMPTS = 3
 
 
 @contextmanager
@@ -158,10 +164,12 @@ class OpenAICompatibleGateway(ModelGateway):
         if not api_key:
             raise RuntimeError("MODEL_API_KEY is required for API mode")
         base_url = os.getenv("MODEL_BASE_URL") or None
+        self.request_limit = model_concurrency()
         self.client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
             timeout=float(os.getenv("MODEL_TIMEOUT_SECONDS", "90")),
+            http_client=instrumented_http_client(),
         )
         counselor = os.getenv("COUNSELOR_MODEL", "")
         self.models = {
@@ -265,6 +273,7 @@ class OpenAICompatibleGateway(ModelGateway):
             api_key=api_key,
             base_url=base_url,
             timeout=float(os.getenv("EMBEDDING_TIMEOUT_SECONDS", "60")),
+            http_client=instrumented_http_client(),
         ) as client:
             for batch_index, batch in enumerate(batches):
                 _request_meta.set(
@@ -279,6 +288,7 @@ class OpenAICompatibleGateway(ModelGateway):
                     role="embedding",
                     output_schema_name="Embedding",
                     model=model,
+                    base_url=base_url,
                     call=lambda batch=batch: client.embeddings.create(
                         model=model, input=batch, encoding_format="float",
                     ),
@@ -292,6 +302,7 @@ class OpenAICompatibleGateway(ModelGateway):
     async def _call_transport(
         self, *, role: str, output_schema_name: str,
         call: Callable[[], Awaitable[Any]], model: str | None = None,
+        base_url: str | None = None,
     ) -> Any:
         """Run one transport call under the configured transient-retry budget.
 
@@ -304,6 +315,14 @@ class OpenAICompatibleGateway(ModelGateway):
         embedding endpoint, for example).
         """
         attempt_number = 0
+        request_model = model if model is not None else getattr(self, "models", {}).get(role, "")
+        endpoint = base_url or str(getattr(getattr(self, "client", None), "base_url", ""))
+        timing = RequestTiming(RequestSlots(
+            endpoint, request_model, getattr(self, "request_limit", None) or model_concurrency(),
+        ))
+        timing_token = current_request.set(timing)
+        outcome = "cancelled"
+        result = None
         try:
             async for attempt in AsyncRetrying(
                 stop=stop_after_attempt(self.max_attempts),
@@ -312,14 +331,48 @@ class OpenAICompatibleGateway(ModelGateway):
             ):
                 with attempt:
                     attempt_number = attempt.retry_state.attempt_number
-                    return await call()
+                    result = await call()
+                    outcome = "success"
+                    return result
         except Exception as exc:
+            outcome = "error"
             self._write_api_failure(
                 role=role, output_schema_name=output_schema_name,
                 attempt=attempt_number, error=exc, model=model,
             )
             raise
+        finally:
+            current_request.reset(timing_token)
+            self._write_request_metrics(
+                role=role, model=request_model, output_schema_name=output_schema_name,
+                timing=timing, outcome=outcome, transport_attempts=attempt_number, result=result,
+            )
         raise RuntimeError("transport retry loop ended without a result")
+
+    def _write_request_metrics(
+        self, *, role: str, model: str, output_schema_name: str,
+        timing: RequestTiming, outcome: str, transport_attempts: int, result: Any,
+    ) -> None:
+        directory = _diagnostic_scope.get() or self.diagnostic_dir
+        if directory is None:
+            return
+        usage = getattr(result, "usage", None)
+        record = {
+            "kind": "request_metrics", "timestamp": datetime.now(UTC).isoformat(),
+            "request_id": uuid.uuid4().hex, "role": role, "model": model,
+            "output_schema": output_schema_name, "outcome": outcome,
+            "transport_attempts": transport_attempts, **timing.summary(),
+        }
+        if usage is not None:
+            record["usage"] = {name: getattr(usage, name, None) for name in
+                               ("prompt_tokens", "completion_tokens", "total_tokens")}
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            with (directory / "request_metrics.jsonl").open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError:
+            # Telemetry cannot turn a valid response into a failed simulation.
+            logging.getLogger(__name__).warning("Could not write model request timing")
 
     async def _complete_text(
         self,
@@ -329,7 +382,6 @@ class OpenAICompatibleGateway(ModelGateway):
         user_prompt: str,
         temperature: float,
         output_schema: type[BaseModel],
-        force_json_schema: bool = False,
     ) -> str:
         request: dict[str, Any] = {
             "model": self.models[role],
@@ -340,7 +392,7 @@ class OpenAICompatibleGateway(ModelGateway):
                 {"role": "user", "content": user_prompt},
             ],
         }
-        if force_json_schema or role in self.json_schema_roles:
+        if role in self.json_schema_roles:
             schema_name = re.sub(r"[^a-zA-Z0-9_-]", "_", output_schema.__name__)
             request.update(
                 {
@@ -483,9 +535,9 @@ class OpenAICompatibleGateway(ModelGateway):
         output_schema: type[BaseModel],
         temperature: float,
     ) -> BaseModel:
-        payload = dict(input_payload)
+        original_payload = dict(input_payload)
         schema = output_schema.model_json_schema()
-        payload["output_schema"] = schema
+        original_payload["output_schema"] = schema
         # json_object constrains syntax at best, not the application's schema.
         # Put the contract in the system message as well as supplying the schema.
         system_prompt += (
@@ -502,27 +554,39 @@ class OpenAICompatibleGateway(ModelGateway):
         )
         error = ""
         text = ""
-        for attempt in range(2):
+        finish_reason = None
+        for attempt in range(STRUCTURED_OUTPUT_MAX_ATTEMPTS):
+            payload = dict(original_payload)
             if error:
-                payload["repair_instruction"] = (
-                    "上次输出未通过 JSON 解析或 schema 校验。请根据错误修复上次输出，"
-                    "保留符合 schema 的内容，修正语法、错误键名、缺失必需字段和多余字段；"
-                    "字段名和枚举值不得翻译。返回完整的 JSON 对象，不要只返回修改片段或解释。"
-                    "保持简洁，每项信息只写一次，禁止重复扩写或复制长段对话；"
-                    "修复输出长度不得超过上次输出，必须预留空间闭合 JSON。"
-                )
                 payload["validation_error"] = error
-                payload["invalid_previous_output"] = text[-12000:]
+                if attempt == 1 and finish_reason != "length" and len(text) <= 12000:
+                    payload["repair_instruction"] = (
+                        "上次输出未通过 JSON 解析或 schema 校验。请根据错误修复上次输出，"
+                        "保留符合 schema 的内容，修正语法、错误键名、缺失必需字段和多余字段；"
+                        "字段名和枚举值不得翻译。返回完整的 JSON 对象，不要只返回修改片段或解释。"
+                        "保持简洁，每项信息只写一次，禁止重复扩写或复制长段对话，预留空间闭合 JSON。"
+                    )
+                    payload["invalid_previous_output"] = text
+                else:
+                    # Never feed a truncated tail or a failed repair back into
+                    # the model: either can anchor it to malformed repetition.
+                    payload["repair_instruction"] = (
+                        "之前的输出未通过校验。请仅根据原始任务输入和 output_schema 重新生成，"
+                        "不要续写或模仿之前的错误输出。返回完整的 JSON 对象，不输出解释。"
+                        "严格遵守字段层级和类型，每项信息只写一次，文字简洁，预留空间闭合 JSON。"
+                    )
             text = await self._complete_text(
                 role=role,
                 system_prompt=system_prompt,
                 user_prompt=json.dumps(payload, ensure_ascii=False),
                 temperature=temperature,
                 output_schema=output_schema,
-                force_json_schema=attempt > 0,
             )
+            finish_reason = (_request_meta.get() or {}).get("finish_reason")
             repairs = []
             try:
+                if finish_reason == "length":
+                    raise ValueError("Model output reached its token limit (finish_reason=length)")
                 try:
                     value = json.loads(_strip_fence(text))
                 except json.JSONDecodeError as exc:
@@ -535,6 +599,7 @@ class OpenAICompatibleGateway(ModelGateway):
                     value = json.loads(prefix.removesuffix(malformed_tail) + '"},"' + exc.doc[exc.pos:])
                     repairs.append("removed stray comma and quote before object closure")
 
+                repairs.extend(_repair_summary_shape(output_schema, value))
                 try:
                     result = output_schema.model_validate(value)
                 except ValidationError as exc:
@@ -559,12 +624,12 @@ class OpenAICompatibleGateway(ModelGateway):
                         error="local_repair: " + "; ".join(repairs), text=text,
                     )
                 return result
-        fallback = _lenient_parse(output_schema, text)
+        fallback = _lenient_parse(output_schema, text) if finish_reason != "length" else None
         if fallback is not None:
             self._write_invalid_output(
                 role=role,
                 output_schema=output_schema,
-                attempt=3,
+                attempt=STRUCTURED_OUTPUT_MAX_ATTEMPTS + 1,
                 error="fell back to lenient single-field text parse",
                 text=text,
             )
@@ -709,6 +774,39 @@ def _json_object_roles(
     if mode == "off":
         return set()
     return set(models) - json_schema_roles
+
+
+def _repair_summary_shape(output_schema: type[BaseModel], value: Any) -> list[str]:
+    """Correct only lossless, schema-defined E.9 formatting mistakes.
+
+    Canonical sibling fields can leave goal_assessment only when the correct
+    location is absent or identical. Scalar list[str] text stays one verbatim
+    item. Conflicts, unknown content and all other errors face full validation;
+    judge scores and evidence objects are never coerced.
+    """
+    field = output_schema.model_fields.get("session_summary")
+    if field is None or field.annotation is not ClinicalSummary or not isinstance(value, dict):
+        return []
+    summary = value.get("session_summary")
+    if not isinstance(summary, dict):
+        return []
+    repairs = []
+    assessment = summary.get("goal_assessment")
+    if isinstance(assessment, dict):
+        for name in list(assessment):
+            if name == "goal_assessment" or name not in ClinicalSummary.model_fields:
+                continue
+            if name not in summary:
+                summary[name] = assessment.pop(name)
+                repairs.append(f"moved summary field out of goal_assessment: session_summary.{name}")
+            elif summary[name] == assessment[name]:
+                del assessment[name]
+                repairs.append(f"removed identical duplicate from goal_assessment: session_summary.{name}")
+    for name, field in ClinicalSummary.model_fields.items():
+        if field.annotation == list[str] and isinstance(summary.get(name), str):
+            summary[name] = [summary[name]]
+            repairs.append(f"wrapped string as single-item array: session_summary.{name}")
+    return repairs
 
 
 def _remove_empty_extra_fields(value: Any, error: ValidationError) -> list[str]:

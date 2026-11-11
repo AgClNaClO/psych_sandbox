@@ -8,6 +8,22 @@ const progress: SimulationProgress = { phase: 'generating', session_index: 4, se
   candidates_total: 3, candidates: [], scoring: null };
 const job = { job_id: 'job-one', attempt: 1, status: 'running', payload: { session_count: 7 } } as JobItem;
 
+test('generation and scoring stay visible together while candidates overlap', () => {
+  const overlapping = { ...progress,
+    candidates: [{ session_index: 4, turn_index: 2, total_turns: 20, elapsed: 5, eta: 45, label: '2/3' }],
+    scoring: { session_index: 4, instruments_done: 1, instruments_total: 9,
+      candidates_scored: 0, candidates_total: 1, elapsed: 2, eta: 16, label: '评分', last_instrument: 'wai' } };
+  for (const phase of ['generating', 'scoring']) {
+    const view = progressView(job, null, { ...overlapping, phase });
+    assert.equal(view.title, '对话生成与候选评估');
+    assert.equal(view.showGeneration, true);
+    assert.equal(view.showScoring, true);
+  }
+  const finished = progressView(job, null, { ...overlapping, phase: 'consolidating' });
+  assert.equal(finished.showGeneration, false);
+  assert.equal(finished.showScoring, false);
+});
+
 test('poll snapshots and replay cannot replace a newer attempt or newer live progress', () => {
   assert.equal(newerProgress(progress, { ...progress, revision: 4 }), progress);
   assert.equal(newerProgress({ ...progress, attempt: 2, revision: 1 }, progress)?.attempt, 2);

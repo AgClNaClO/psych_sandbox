@@ -17,6 +17,7 @@ from ..domain import (
     SessionEvaluationReport,
     SessionRecord,
 )
+from ..concurrency import gather_and_drain
 from .item_logprob import BatchItemRatings
 from ..logprob import LogprobRefusalError, LogprobScoringUnsupported
 from ..model_client import ModelGateway
@@ -339,19 +340,28 @@ class PsychEvalSupervisor:
             "client_specific": [],
         }
         steps = self._score_plan(therapy)
-        for completed, (group, instrument) in enumerate(steps, start=1):
+        completed = 0
+
+        async def score_step(group, instrument):
+            nonlocal completed
             if instrument is None:
                 # RRO is a single 24-item prompt that decomposes into counselor-
                 # and client-side factor scores (PsychEval's factor structure).
                 rro_counselor, rro_client = await self._score_rro(intake, dialogue)
-                groups["counselor_shared"].append(rro_counselor)
-                groups["client_shared"].append(rro_client)
+                scores = [("counselor_shared", rro_counselor), ("client_shared", rro_client)]
                 key = "rro"
             else:
-                groups[group].append(await self._score(instrument, intake, dialogue))
+                scores = [(group, await self._score(instrument, intake, dialogue))]
                 key = instrument.key
+            completed += 1
             if on_step is not None:
                 on_step(completed, len(steps), key)
+            return scores
+
+        # Completion ticks are live; scores retain the historical registry order.
+        for scores in await gather_and_drain(score_step(*step) for step in steps):
+            for group, score in scores:
+                groups[group].append(score)
         return (
             groups["counselor_shared"],
             groups["counselor_specific"],
@@ -402,10 +412,26 @@ class PsychEvalSupervisor:
         else:
             raw = cast(ScaleItems, await self.gateway.complete_structured(
                 role="supervisor", system_prompt=system_prompt,
-                input_payload={"intake_form": intake, "dialogue": dialogue},
+                input_payload={},
                 output_schema=ScaleItems, temperature=self.temperature,
             ))
         return [(item.item.strip(), float(item.score)) for item in raw.items if item.item.strip()]
+
+    async def _collect_prompt_files(self, instrument: Instrument, intake: str, dialogue: str):
+        # Each child owns its audit map; concurrent files/candidates cannot mix.
+        audits = [{} for _ in instrument.prompt_files]
+        try:
+            batches = await gather_and_drain(
+                self._collect_items(relative, intake, dialogue, records=records)
+                for relative, records in zip(instrument.prompt_files, audits)
+            )
+        except (LogprobScoringUnsupported, LogprobRefusalError) as exc:
+            exc.records = {**{key: value for audit in audits for key, value in audit.items()},
+                           **getattr(exc, "records", {})}
+            raise
+        return list(zip(instrument.prompt_files, batches)), {
+            key: value for audit in audits for key, value in audit.items()
+        }
 
     async def score_instrument_items(self, instrument: Instrument, intake: str, dialogue: str) -> ScaleScore:
         if self.logprob_scoring is None:
@@ -422,11 +448,11 @@ class PsychEvalSupervisor:
     ) -> ScaleScore:
         if instrument.key == "panas":
             return await self._score_panas(instrument, intake, dialogue)
-        records: dict = {}
+        batches, records = await self._collect_prompt_files(instrument, intake, dialogue)
         values: list[float] = []
         item_scores: dict[str, float] = {}
-        for relative in instrument.prompt_files:
-            for label, score in await self._collect_items(relative, intake, dialogue, records=records):
+        for relative, items in batches:
+            for label, score in items:
                 values.append(score)
                 key = f"{relative}::{label}" if len(instrument.prompt_files) > 1 else label
                 item_scores.setdefault(key, score)
@@ -449,10 +475,10 @@ class PsychEvalSupervisor:
         and 10 negative affects are averaged separately and combined as
         ``(positive - negative + 10) / 2`` (matching ``panas.py``).
         """
-        records: dict = {}
+        batches, records = await self._collect_prompt_files(instrument, intake, dialogue)
         item_scores: dict[str, float] = {}
-        for relative in instrument.prompt_files:
-            for label, score in await self._collect_items(relative, intake, dialogue, records=records):
+        for relative, items in batches:
+            for label, score in items:
                 item_scores.setdefault(label.strip().lower(), score)
 
         def side_average(names: frozenset[str]) -> float | None:

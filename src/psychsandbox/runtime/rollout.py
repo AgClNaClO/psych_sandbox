@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from ..artifacts import write_json
+from ..concurrency import gather_and_drain as _gather_and_drain
 from ..domain import (
     ClientState, CounselingCase, RFTConfig, RolloutCandidateSummary, RolloutReward,
     RolloutSelection, SessionMemory, SessionPlan, SessionRecord,
@@ -298,12 +299,15 @@ class SessionRolloutRunner:
                 notify(f"Session {plan.session_index} 候选 {candidate.summary.index}: {candidate.summary.status}")
 
         async def judge(candidate: _Candidate) -> None:
+            started = False
             try:
                 async with judge_limit:
                     notify(f"Session {plan.session_index} 候选 {candidate.summary.index}: 开始评分")
                     diagnostics = directory / f"d{candidate.summary.index:03d}"
                     instrument_total = self._instrument_count(candidate)
                     scoring.start_candidate(candidate.summary.index, instrument_total)
+                    started = True
+                    candidate.summary.score_source_index = candidate.summary.index
 
                     def on_step(done: int, total: int, name: str) -> None:
                         scoring.step(candidate.summary.index, name)
@@ -347,7 +351,8 @@ class SessionRolloutRunner:
             finally:
                 save_candidate(candidate)
                 save_batch()
-                scoring.finish_candidate()
+                if started:
+                    scoring.finish_candidate()
 
                 notify(f"Session {plan.session_index} 候选 {candidate.summary.index}: {candidate.summary.status}")
 
@@ -370,38 +375,71 @@ class SessionRolloutRunner:
                 selection.reason = "候选中出现即时风险，全部留档并暂停，不推进记忆"
                 raise RolloutSelectionError(selection)
 
-        try:
-            await _gather_and_drain([sample(candidate) for candidate in candidates])
+        seen: dict[str, _Candidate] = {}
+        identical: dict[str, list[_Candidate]] = {}
+
+        def qualify(candidate: _Candidate) -> None:
+            if candidate.summary.status != "generated":
+                return
+            session = candidate.session
+            session.safety_verdict = SessionSafetyGate().evaluate(session, case, memory)
+            if (
+                not session.safety_verdict.passed
+                or session.end_reason == "safety_output_block"
+                or any(r.get("client_leakage", {}).get("exposed_to_counselor") for r in session.turn_records)
+            ):
+                candidate.summary.status = "rejected"
+                candidate.summary.reason = "规则安全或披露检查未通过：" + "；".join(session.safety_verdict.reasons)
+            else:
+                key = candidate.summary.dialogue_hash
+                identical.setdefault(key, []).append(candidate)
+                if key in seen:
+                    candidate.summary.status = "duplicate"
+                    candidate.summary.duplicate_of = seen[key].summary.index
+                    candidate.summary.reason = "与已保留候选的双方对话完全相同，不重复评分"
+                else:
+                    seen[key] = candidate
+            save_candidate(candidate)
+
+        async def sample_and_judge(candidate: _Candidate) -> None:
+            await sample(candidate)
+            # Let already-ready sibling completions expose risk before judging.
+            await asyncio.sleep(0)
             hold_if_crisis()
+            qualify(candidate)
+            if candidate.summary.status == "generated":
+                await judge(candidate)
 
-            seen: dict[str, int] = {}
-            resampled = 0
-
-            def reject_duplicates_and_safety() -> None:
-                for candidate in candidates:
-                    if candidate.summary.status != "generated":
-                        continue
-                    session = candidate.session
-                    session.safety_verdict = SessionSafetyGate().evaluate(session, case, memory)
-                    if (
-                        not session.safety_verdict.passed
-                        or session.end_reason == "safety_output_block"
-                        or any(r.get("client_leakage", {}).get("exposed_to_counselor") for r in session.turn_records)
-                    ):
-                        candidate.summary.status = "rejected"
-                        candidate.summary.reason = "规则安全或披露检查未通过：" + "；".join(session.safety_verdict.reasons)
-                    elif candidate.summary.dialogue_hash in seen:
+        def canonicalize_duplicates() -> None:
+            # First completion owns the single scoring request. Once all draws
+            # finish, preserve the historical lowest-index duplicate identity.
+            # The judge sees the same intake/dialogue; branch memory stays local.
+            for key, group in identical.items():
+                source = seen[key]
+                canonical = min(group, key=lambda c: c.summary.index)
+                if canonical is not source:
+                    canonical.summary.status = source.summary.status
+                    canonical.summary.reason = source.summary.reason
+                    canonical.summary.assessment = source.summary.assessment
+                    canonical.summary.reward = source.summary.reward
+                    canonical.summary.score_source_index = source.summary.score_source_index
+                    canonical.summary.duplicate_of = None
+                    seen[key] = canonical
+                for candidate in group:
+                    if candidate is not canonical:
                         candidate.summary.status = "duplicate"
-                        candidate.summary.duplicate_of = seen[candidate.summary.dialogue_hash]
+                        candidate.summary.duplicate_of = canonical.summary.index
                         candidate.summary.reason = "与已保留候选的双方对话完全相同，不重复评分"
-                    else:
-                        seen[candidate.summary.dialogue_hash] = candidate.summary.index
+                        candidate.summary.assessment = None
+                        candidate.summary.reward = None
                     save_candidate(candidate)
 
-            async def judge_pending() -> None:
-                await _gather_and_drain(
-                    [judge(c) for c in candidates if c.summary.status == "generated"]
-                )
+        try:
+            await _gather_and_drain([sample_and_judge(candidate) for candidate in candidates])
+            hold_if_crisis()
+            canonicalize_duplicates()
+
+            resampled = 0
 
             async def resample_failed(statuses: set[str]) -> bool:
                 """Replace the first failed candidate, honoring the shared budget."""
@@ -422,7 +460,8 @@ class SessionRolloutRunner:
                     f"Session {plan.session_index} 补采候选 {replacement.summary.index}"
                     f"（替换 {failed[0].summary.status} 候选 {failed[0].summary.index}）"
                 )
-                await _gather_and_drain([sample(replacement)])
+                await sample_and_judge(replacement)
+                canonicalize_duplicates()
                 resampled += 1
                 return True
 
@@ -434,9 +473,6 @@ class SessionRolloutRunner:
             if resampled:
                 hold_if_crisis()
 
-            reject_duplicates_and_safety()
-            await judge_pending()
-
             # Scoring can also fail transiently (e.g. a judge API 500). If we
             # still lack enough eligible candidates, resample those too.
             while resampled < self.config.resample_limit:
@@ -446,8 +482,6 @@ class SessionRolloutRunner:
                 if not await resample_failed({"scoring_failed"}):
                     break
                 hold_if_crisis()
-                reject_duplicates_and_safety()
-                await judge_pending()
 
             eligible = [c for c in candidates if c.summary.status == "eligible"]
             if len(eligible) < self.config.min_eligible:
@@ -502,15 +536,3 @@ class SessionRolloutRunner:
         return await self.evaluator.evaluate(
             candidate.session, case, memory, on_step=on_step,
         )
-
-
-async def _gather_and_drain(coroutines: list[Awaitable[None]]) -> None:
-    """Never leave candidate tasks running after their parent exits."""
-    tasks = [asyncio.create_task(coroutine) for coroutine in coroutines]
-    try:
-        await asyncio.gather(*tasks)
-    except BaseException:
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        raise

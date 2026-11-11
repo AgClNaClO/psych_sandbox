@@ -155,6 +155,7 @@ def test_duplicate_sessions_are_not_scored_again_and_ties_use_index(setup):
     assert session.rollout_selection.winner_index == 1
     assert session.rollout_selection.candidates[1].status == "duplicate"
     assert session.rollout_selection.candidates[1].duplicate_of == 1
+    assert session.rollout_selection.candidates[0].score_source_index == 2
     assert len(judge.calls) == 2
 
 
@@ -172,6 +173,96 @@ def test_all_duplicates_fail_without_committing_and_retain_batch(setup):
     assert len(store.load_rollout_candidates(selection.batch_id)) == 3
     assert not memory.unresolved_topics
     assert list(path.glob("rollouts/s001__*/selection.json"))
+
+
+def test_finished_candidate_is_scored_before_siblings_finish_without_early_selection(setup):
+    _, _, plan, _, store, _ = setup
+    judged = asyncio.Event()
+    finish_generation = asyncio.Event()
+    judge = Judge()
+    evaluate = judge.evaluate
+
+    async def score(session, case, memory):
+        report = await evaluate(session, case, memory)
+        judged.set()
+        return report
+
+    judge.evaluate = score
+
+    async def generate(index, memory, state, checkpoint):
+        if index != 1:
+            await finish_generation.wait()
+        return session_for(index, plan, state)
+
+    async def scenario():
+        task = asyncio.create_task(run(runner_for(setup, judge), setup, generate))
+        try:
+            await asyncio.wait_for(judged.wait(), 2)
+            assert not task.done()
+            assert store.load_rollout_batches("run-test")[-1].status == "running"
+            assert store.load_memory("run-test") is None
+            finish_generation.set()
+            session, _ = await asyncio.wait_for(task, 2)
+            assert session.rollout_selection.winner_index == 3
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("interrupt", ["risk", "cancel"])
+def test_overlap_interruption_drains_both_generation_and_scoring(setup, interrupt):
+    _, _, plan, _, store, _ = setup
+    judging = asyncio.Event()
+    active_generation = active_scoring = 0
+    judge = Judge()
+
+    async def score(session, case, memory):
+        nonlocal active_scoring
+        active_scoring += 1
+        judging.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            active_scoring -= 1
+
+    judge.evaluate = score
+
+    async def generate(index, memory, state, checkpoint):
+        nonlocal active_generation
+        if index == 1:
+            return session_for(index, plan, state)
+        active_generation += 1
+        try:
+            await judging.wait()
+            if interrupt == "risk" and index == 2:
+                checkpoint({"messages": [{"role": "client", "content": "我现在拿着刀准备伤害自己"}]})
+            await asyncio.Event().wait()
+        finally:
+            active_generation -= 1
+
+    async def scenario():
+        task = asyncio.create_task(run(runner_for(setup, judge), setup, generate))
+        try:
+            await asyncio.wait_for(judging.wait(), 2)
+            if interrupt == "cancel":
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            else:
+                with pytest.raises(RolloutSelectionError, match="safety_hold"):
+                    await asyncio.wait_for(task, 2)
+            assert active_generation == active_scoring == 0
+            assert store.load_memory("run-test") is None
+            batch = store.load_rollout_batches("run-test")[-1]
+            assert batch.winner_index is None
+            assert batch.status == ("safety_hold" if interrupt == "risk" else "cancelled")
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("failure", ["generation", "score", "timeout", "unsafe", "rule", "leak"])
@@ -356,7 +447,7 @@ class RolloutGateway(DeterministicGateway):
         if schema is ScaleItems:
             if self.fail_judge:
                 raise RuntimeError("judge temporarily unavailable")
-            dialogue = kwargs["input_payload"].get("dialogue", "")
+            dialogue = kwargs["system_prompt"]
             match = re.search(r"离线样本 (\d+)", dialogue)
             number = int(match.group(1)) if match else 0
             score = 5.0 if number % 2 == 0 else 4.0

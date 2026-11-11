@@ -1444,6 +1444,7 @@ class RolloutCandidateSummary(StrictModel):
     reason: str = ""
     dialogue_hash: str = ""
     duplicate_of: int | None = None
+    score_source_index: int | None = Field(default=None, ge=1)
     assessment: SessionEvaluationReport | None = None
     reward: RolloutReward | None = None
     artifact_path: str

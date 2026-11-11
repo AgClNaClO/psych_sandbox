@@ -162,7 +162,7 @@ def test_conversion_progress_is_separate_from_json_and_bounded_when_redirected()
 
 def test_cli_conversion_options_reject_invalid_limits():
     parser = cli.build_parser()
-    assert parser.parse_args(["data", "convert"]).concurrency == 4
+    assert parser.parse_args(["data", "convert"]).concurrency == 5
     assert parser.parse_args(["data", "convert", "--concurrency", "1", "--no-progress"]).no_progress
     for value in ("0", "33", "1.5", "text"):
         with pytest.raises(SystemExit):
